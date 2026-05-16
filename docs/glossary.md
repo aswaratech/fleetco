@@ -56,6 +56,8 @@ This is the project's semantic memory: the place where words have agreed meaning
 
 **ADR** stands for Architecture Decision Record. An ADR is a short, append-only document capturing one architectural decision: its context, the decision itself, alternatives considered, consequences, and the signal that would prompt revisiting the decision. ADRs live in `docs/architecture/decisions/`. See `template.md` for the format.
 
+**better-auth** is the TypeScript-first authentication library FleetCo uses across the NestJS API and Next.js admin web. Sessions are database-stored and opaque-cookie-identified rather than JWT-based. See ADR-0015.
+
 **BullMQ** is a Redis-backed job queue library for Node.js. FleetCo uses BullMQ for background work that should not block the API: GPS ingestion (in Phase 2), notifications, report generation.
 
 **DTO (Data Transfer Object)** is a typed shape used at the API boundary, distinct from the database row shape. DTOs let the API evolve its public contracts without forcing the database schema to evolve in lockstep.
@@ -71,6 +73,10 @@ This is the project's semantic memory: the place where words have agreed meaning
 **PostGIS** is a PostgreSQL extension for geospatial data and queries. FleetCo uses PostGIS for geofences, GPS pings (Phase 2), and any spatial queries.
 
 **RBAC (Role-Based Access Control)** is a permission model in which permissions are grouped into roles, and users are assigned roles. RBAC is deferred until Phase 2 in FleetCo, when office staff are introduced as a user role distinct from the CEO.
+
+**Session-based authentication** is an authentication model in which a server issues a session record (stored in a database or cache), and the client holds an opaque cookie that references the session. Distinct from token-based authentication (such as JWT), in which the client holds a self-contained signed token. FleetCo uses session-based authentication because the admin web does not need cross-domain token-based auth, sessions are revocable without a key-rotation event, and the server-side session record is the natural place to attach role and permission state as Phase 2's RBAC arrives. See ADR-0015.
+
+**shadcn-ui** is the base design system FleetCo customizes from: a copy-paste-not-install component library built on Radix UI primitives and Tailwind CSS, shipping a Vercel-derived aesthetic. Component implementations are copied into `apps/web` and owned in-tree rather than imported as a versioned dependency; FleetCo customizations (NPR formatting, BS-calendar widgets, Devanagari fallback, ERP density) layer on top. See ADR-0016 and ADR-0007 for the design-folder discipline that consumes from it.
 
 **Vertical slice** is the development pattern FleetCo uses: each unit of work is one user-facing workflow built end-to-end (schema, migration, service, API, UI, test) rather than one layer of the system across all features. See ADR-0006.
 

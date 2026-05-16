@@ -6,7 +6,7 @@ The structure of this folder follows the discipline established in ADR-0007 and 
 
 External design tools (Open Design with its MCP server, Figma, hand-coded HTML, anywhere) are iteration surfaces. They are useful for rapid iteration, but the conclusions that emerge from iteration must commit to this folder to count as memory. A design that lives only on the designer's laptop is not memory, because it does not survive across machines, sessions, or tool changes.
 
-At project start, this folder contains only this README. The `DESIGN.md` itself is a Phase 0 deliverable to be authored before the first UI slice in Phase 1. The decision about which base design system to customize from (Linear, Notion, or Vercel are the leading candidates given FleetCo's dense ERP-like UI needs) is made in the first design-focused session and recorded in a phase-0 supplement to `DESIGN.md`.
+At project start, this folder contains only this README. The `DESIGN.md` itself is a Phase 0 deliverable to be authored before the first UI slice in Phase 1. The base design system FleetCo customizes from is `shadcn-ui`, recorded in ADR-0016; the Linear and Notion alternatives discussed in ADR-0007 are documented as rejected in ADR-0016's `Alternatives considered` section.
 
 The `slices/` folder is empty at project start because no UI slices exist yet. The first entry will appear when the first Phase 1 UI slice (likely Vehicles or Drivers) is being built.
 
