@@ -44,4 +44,4 @@ The postmortem may identify changes to the security baseline (ADR-0012) or the d
 
 ## Last verified
 
-[TODO: Fill in the date of the most recent verification. The procedure should be reviewed at least quarterly.]
+**Last verified:** 2026-05-16 — first authored version of this procedure. The procedure has been read and committed but has not yet been exercised against a real security incident; that operational verification happens when the first real security signal arrives (e.g., a Dependabot alert against a Phase 1 dependency, or a Sentry-detected anomaly meeting the security-incident definition). Reviewed at least quarterly per the discipline stated in this document.
