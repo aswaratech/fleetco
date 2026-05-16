@@ -60,4 +60,4 @@ If the incident consumed more than 20 percent of the error budget for either SLI
 
 ## Last verified
 
-[TODO: Fill in the date of the most recent verification. The procedure should be reviewed at least quarterly and after every SEV1 or SEV2 incident, in case the incident revealed gaps in the procedure itself.]
+**Last verified:** 2026-05-16 — first authored version of this procedure. The procedure has been read and committed but has not yet been exercised against a real incident; that operational verification happens when Phase 1 ships its first production deploy and the first real signal arrives. Reviewed at least quarterly per the discipline stated in this document, and immediately after every SEV1 or SEV2 incident.

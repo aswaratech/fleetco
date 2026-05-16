@@ -1,6 +1,6 @@
 # Business Continuity Plan
 
-> **STATUS: STUB.** This document is the founder's commitment to a degraded-mode operation plan and an unavailability handoff. The substantive content below is the framework; specific names, contact details, and credential locations need to be filled in by the founder before Phase 1 ships and updated whenever the operational substrate changes.
+> **STATUS: STUB — illustrative content.** This document is the founder's commitment to a degraded-mode operation plan and an unavailability handoff. The framework is complete and the shape of the filled-in content is demonstrated below with synthetic placeholder values clearly marked `[ILLUSTRATIVE]`. Every illustrative value must be replaced with real values by the founder before this procedure becomes operational; the real-content swap is tracked in `docs/tech-debt.md`. The `Last review` date at the foot is real (today's date of first authored version).
 
 A business continuity plan exists for a specific reason: a single-founder, single-customer software business has the same kind of operational fragility that a small medical practice or a one-attorney law firm has. The technical infrastructure is reasonably resilient (Postgres backups, R2 redundancy, CI gates, SLO discipline) but the human substrate is not redundant at all. If the founder is unavailable for two weeks, whether through illness, family emergency, or any other reason, the customer needs to be able to continue operating and the system needs to continue running without the founder making any decisions.
 
@@ -22,7 +22,28 @@ The founder has a designated personal point of contact who is the person who sho
 
 The founder has a designated technical substitute who is a developer or developer team capable of handling FleetCo's operational needs in the founder's absence. This is the most consequential designation because it is the person who can actually keep the system running. The substitute is identified by name and contractual relationship, has signed agreements regarding access and confidentiality, and has been given access to the credentials and documentation needed to operate the system.
 
-[TODO: Fill in the actual names, contact methods, and dates of last contact for each of the three designated points of contact. Update this section whenever any of these change.]
+The three designated points of contact are listed below. **All values in this section are `[ILLUSTRATIVE]` placeholders pending real-content swap by the founder; see the active entry in `docs/tech-debt.md`.** When real values are in hand, the placeholders are replaced, the STATUS line is updated, and the tech-debt entry is moved to the paid-off section.
+
+**Business POC** — the customer-side person the founder communicates with about scheduling, billing, and operational changes.
+
+- Name and role: `[ILLUSTRATIVE]` Rabi Sharma, Director of Operations, Acme Construction Pvt. Ltd.
+- Primary contact: `[ILLUSTRATIVE]` +977-98xx-xxxxxx (WhatsApp preferred)
+- Backup contact: `[ILLUSTRATIVE]` rabi.sharma@example.com
+- Last contact: `[ILLUSTRATIVE]` 2026-04-22
+
+**Personal POC** — the family member or close friend informed if the founder is unavailable due to circumstances the founder cannot communicate themselves.
+
+- Name and relationship: `[ILLUSTRATIVE]` Anita Pandey, sister
+- Primary contact: `[ILLUSTRATIVE]` +977-98xx-xxxxxx (mobile)
+- Information held: `[ILLUSTRATIVE]` Knows the location of the sealed physical envelope (see below); holds an activated-but-pending 1Password emergency-access invite
+
+**Technical substitute** — the developer or developer team capable of handling FleetCo's operational needs in the founder's absence.
+
+- Name and contractual relationship: `[ILLUSTRATIVE]` Bikash Thapa, independent contractor (sole proprietor under "Thapa Software Services")
+- Retainer terms: `[ILLUSTRATIVE]` NPR 15,000/month base; on-call up to 8 hours/month included; additional hours billed at NPR 3,000/hour
+- Signed agreements: `[ILLUSTRATIVE]` NDA and master services agreement, both signed 2026-01-15; signed copies held by founder
+- Access protocol: `[ILLUSTRATIVE]` On activation by the personal POC, Bikash receives credentials via 1Password emergency-access (pre-staged, see below); production SSH key already shared in encrypted form, decryption passphrase lives in the sealed envelope
+- Primary contact: `[ILLUSTRATIVE]` +977-98xx-xxxxxx (phone, 9am–9pm NPT); bikash@example.com
 
 ## Credentials and access
 
@@ -30,7 +51,14 @@ The credentials needed to operate FleetCo include the production server SSH acce
 
 For business continuity purposes, the founder maintains a sealed envelope (physical or in a secure password manager with emergency access enabled) that contains the master credentials needed to bootstrap recovery. The envelope is held by the personal point of contact identified above. The envelope is updated whenever the master credentials change.
 
-[TODO: Fill in the specific format and location of the sealed envelope, the password manager being used, and the emergency access protocol. Update this whenever the credential set changes.]
+**All values in this section are `[ILLUSTRATIVE]` placeholders pending real-content swap by the founder; see the active entry in `docs/tech-debt.md`.**
+
+- Format: `[ILLUSTRATIVE]` 1Password (hosted), using its built-in emergency-access feature, with a sealed physical envelope as a fallback if the 1Password feature itself is unavailable.
+- Held by / configured in: `[ILLUSTRATIVE]` Founder's personal 1Password account. Emergency-access invites are pre-configured for the personal POC (Anita) and the technical substitute (Bikash); both invites are held by the recipients in pending state. The fallback envelope is a tamper-evident physical envelope held by the personal POC at her home in a fireproof box.
+- Activation procedure: `[ILLUSTRATIVE]` Either the personal POC or the technical substitute initiates "request emergency access" in 1Password. The founder has a 72-hour deny window — if the founder does not deny the request within 72 hours, access auto-grants. The founder may temporarily lower this window in advance (e.g., to 24 hours) when traveling or otherwise expecting reduced ability to respond. If the 1Password emergency-access feature is itself unavailable (account locked, service outage), the personal POC opens the fallback envelope, which contains the master 1Password account password and a one-page recovery procedure.
+- Credentials accessible via emergency access: `[ILLUSTRATIVE]` Production secret-store master credentials; database superuser credentials; Cloudflare R2 access keys; GitHub repository admin token; domain registrar account; email and notification provider credentials.
+- Credentials NOT accessible via emergency access: `[ILLUSTRATIVE]` Payment processing credentials (introduced in Phase 4) — these require a separate handoff process documented at that time, because regulatory and contractual constraints around financial credentials demand a more controlled access path than the general operational-credentials envelope.
+- Update cadence: `[ILLUSTRATIVE]` Quarterly review; immediately whenever any master credential rotates; immediately whenever the personal POC or technical substitute changes.
 
 ## Degraded mode operation
 
@@ -46,4 +74,4 @@ These commitments are not ceremonial. They are the difference between a one-pers
 
 ## Last review
 
-[TODO: Fill in the date of the most recent annual review. Update annually.]
+**Last review:** 2026-05-16 — first authored version of this plan. The framework and the shape of all required fields are committed today; the `[ILLUSTRATIVE]`-marked values throughout will be replaced with real values by the founder before Phase 1 ships, per the active entry in `docs/tech-debt.md`.
