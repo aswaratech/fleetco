@@ -14,6 +14,8 @@ The procedure for handling security incidents specifically lives at `docs/runboo
 
 The business continuity plan lives at `docs/runbook/business-continuity.md`. It documents the founder's commitments around degraded-mode operation, designated points of contact, credentials and access, and what happens during short, medium, and extended unavailability. The plan is reviewed at least annually and updated whenever the operational substrate changes.
 
+The orchestration loop design lives at `docs/runbook/orchestration-loop-design.md` and the daily-operator reference lives at `docs/runbook/orchestration-loop-operator-guide.md`. These document the autonomous multi-ticket execution pattern adopted in ADR-0018: how the loop honors discipline gates, how it auto-answers mid-session questions, how it blocks destructive Bash, how it strips fabricated operator-confirmation preambles, and how the operator launches, monitors, halts, and resumes the loop via Slack. The design is verified by the 113 unit tests in `scripts/orchestration/tests/`; the operator guide is verified by running the loop end-to-end on a benign mock kickoff at the start of each program.
+
 ## Procedures we know we will need
 
 The following procedures will be needed at known points in the project's life. We create stubs now so that the file paths exist and future PRs can fill them in rather than inventing path conventions on the fly.
