@@ -11,3 +11,80 @@ datasource db {
   url        = env("DATABASE_URL")
   extensions = [postgis]
 }
+
+// Authentication models. Owned by apps/api/src/modules/auth/ per ADR-0001.
+// Library: better-auth (ADR-0015). Integration shape: ADR-0021.
+// Field shapes derived from @better-auth/core 1.6.11's getAuthTables.
+// Tier annotations per ADR-0013 (Tier 1 = credentials/tokens, Tier 2 = PII).
+// Triple-slash comments surface as JSDoc on the generated Prisma client.
+
+model User {
+  id            String    @id
+  /// Tier 2 PII per ADR-0013 — excluded from default logging (pino redact covers *.email).
+  email         String    @unique
+  emailVerified Boolean   @default(false)
+  /// Tier 2 PII per ADR-0013 — admin display name.
+  name          String
+  image         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  sessions      Session[]
+  accounts      Account[]
+
+  @@map("user")
+}
+
+model Session {
+  id        String   @id
+  expiresAt DateTime
+  /// Tier 1 per ADR-0013 — opaque session token; never logged (pino redact covers *.token).
+  token     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  /// Tier 2 PII per ADR-0013 — captured for audit; excluded from default logging.
+  ipAddress String?
+  /// Tier 2 PII per ADR-0013 — captured for audit; excluded from default logging.
+  userAgent String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("session")
+}
+
+model Account {
+  id                    String    @id
+  accountId             String
+  providerId            String
+  userId                String
+  /// Tier 1 per ADR-0013 — provider access token (OAuth, future).
+  accessToken           String?
+  /// Tier 1 per ADR-0013 — provider refresh token (OAuth, future).
+  refreshToken          String?
+  /// Tier 1 per ADR-0013 — provider id token (OAuth, future).
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  /// Tier 1 per ADR-0013 — hashed credential. Never logged (pino redact covers *.password).
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("account")
+}
+
+model Verification {
+  id         String    @id
+  identifier String
+  /// Tier 1 per ADR-0013 — verification token (password reset, email change, etc.).
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime? @default(now())
+  updatedAt  DateTime? @updatedAt
+
+  @@index([identifier])
+  @@map("verification")
+}

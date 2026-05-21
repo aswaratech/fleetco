@@ -4,6 +4,7 @@ import { ConfigModule } from "@nestjs/config";
 import { LoggerModule } from "nestjs-pino";
 
 import { env } from "./config/env";
+import { AuthModule } from "./modules/auth/auth.module";
 import { HealthModule } from "./modules/health/health.module";
 import { PrismaModule } from "./modules/prisma/prisma.module";
 import { RedisModule } from "./modules/redis/redis.module";
@@ -30,6 +31,7 @@ import { RedisModule } from "./modules/redis/redis.module";
             "*.password",
             "*.token",
             "*.secret",
+            "*.email",
             "*.driverName",
             "*.licenseNumber",
             "*.phoneNumber",
@@ -47,6 +49,7 @@ import { RedisModule } from "./modules/redis/redis.module";
     }),
     PrismaModule,
     RedisModule,
+    AuthModule,
     HealthModule,
   ],
 })
