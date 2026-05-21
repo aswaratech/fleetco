@@ -12,6 +12,12 @@ export default tseslint.config(
       "**/.turbo/**",
       "**/coverage/**",
       "**/*.tsbuildinfo",
+      // next-env.d.ts is framework-managed: Next.js rewrites it on every
+      // build and uses the `path=` form of /// <reference />, which our
+      // @typescript-eslint/triple-slash-reference rule rejects. The file
+      // itself documents "This file should not be edited." Excluding it
+      // from lint honors that.
+      "**/next-env.d.ts",
     ],
   },
   {

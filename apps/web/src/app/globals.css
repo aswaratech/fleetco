@@ -1,0 +1,65 @@
+@import "tailwindcss";
+
+/* DESIGN.md tokens. Edit only via PRs that also edit
+   docs/design/DESIGN.md; the design-token-drift test enforces this.
+   See ADR-0007 and ADR-0019. */
+@theme {
+  /* Color tokens — sourced from DESIGN.md's "Color tokens" table. */
+  --color-surface-canvas: #fafafa;
+  --color-surface-raised: #ffffff;
+  --color-surface-elevated: #ffffff;
+  --color-surface-muted: #f4f4f5;
+  --color-text-primary: #18181b;
+  --color-text-secondary: #3f3f46;
+  --color-text-muted: #71717a;
+  --color-text-inverse: #fafafa;
+  --color-text-accent: #047857;
+  --color-border-subtle: #e4e4e7;
+  --color-border-strong: #d4d4d8;
+  --color-border-focus: #10b981;
+  --color-accent-primary: #059669;
+  --color-accent-primary-hover: #047857;
+  --color-accent-foreground: #ffffff;
+  --color-status-success: #059669;
+  --color-status-warning: #f59e0b;
+  --color-status-error: #dc2626;
+  --color-status-info: #2563eb;
+
+  /* Font stacks. The Latin and Devanagari CSS variables
+     (--font-inter, --font-noto-devanagari) are injected at
+     <html> level by next/font/google in src/app/layout.tsx. */
+  --font-sans: var(--font-inter), var(--font-noto-devanagari), system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, monospace;
+}
+
+/* shadcn-ui CSS variable aliases. shadcn-ui components copied in
+   Ticket 10 onward reference these standard names; each aliases to
+   a DESIGN.md semantic token declared in @theme above. The drift
+   test does not check these aliases (they are convention, not
+   tokens). */
+:root {
+  --background: var(--color-surface-canvas);
+  --foreground: var(--color-text-primary);
+  --card: var(--color-surface-raised);
+  --card-foreground: var(--color-text-primary);
+  --popover: var(--color-surface-elevated);
+  --popover-foreground: var(--color-text-primary);
+  --primary: var(--color-accent-primary);
+  --primary-foreground: var(--color-accent-foreground);
+  --secondary: var(--color-surface-muted);
+  --secondary-foreground: var(--color-text-primary);
+  --muted: var(--color-surface-muted);
+  --muted-foreground: var(--color-text-muted);
+  --accent: var(--color-surface-muted);
+  --accent-foreground: var(--color-text-primary);
+  --destructive: var(--color-status-error);
+  --destructive-foreground: var(--color-accent-foreground);
+  --border: var(--color-border-subtle);
+  --input: var(--color-border-strong);
+  --ring: var(--color-border-focus);
+}
+
+body {
+  background: var(--color-surface-canvas);
+  color: var(--color-text-primary);
+}
