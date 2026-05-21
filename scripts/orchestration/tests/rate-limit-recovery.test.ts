@@ -123,6 +123,25 @@ describe("parseWaitFromException", () => {
     expect(r!.resumesAt.getMinutes()).toBe(1); // 11:00 + 60s
     expect(r!.resumesAt.getHours()).toBe(11);
   });
+
+  // Field-observed phrasing (iter 1 of Phase 1 Vehicles slice, 2026-05-21):
+  // the SDK's subprocess exited with a generic "Claude Code process exited
+  // with code 1" error, but the agent's final streamed message contained
+  // the rate-limit signal. index.ts's catch block falls back to parsing
+  // the transcript tail directly when the exception itself has no signal.
+  // This test asserts the parser accepts a raw string and matches the
+  // field-observed phrasing.
+  it("parses raw string with field-observed phrasing 'You've hit your limit · resets H:MMam (TZ)'", () => {
+    const localNow = new Date(2026, 4, 21, 23, 50, 0); // 11:50pm local
+    const transcriptTail = "You've hit your limit · resets 3:15am (Asia/Katmandu)";
+    const r = parseWaitFromException(transcriptTail, localNow, 0);
+    expect(r).not.toBeNull();
+    expect(r!.resumesAt.getHours()).toBe(3);
+    expect(r!.resumesAt.getMinutes()).toBe(15);
+    // 11:50pm + ~3.5h → next day 3:15am
+    expect(r!.resumesAt.getDate()).toBe(22);
+    expect(r!.source).toBe("thrown_exception");
+  });
 });
 
 describe("sleepUntil", () => {
