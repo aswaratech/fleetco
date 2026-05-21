@@ -1,7 +1,7 @@
 # ADR-0022: Adopt an autonomous orchestration loop for multi-ticket programs
 
-- **Status:** Proposed
-- **Date:** 2026-05-17
+- **Status:** Accepted
+- **Date:** 2026-05-17 (proposed); 2026-05-21 (accepted)
 - **Decider:** addressanup (CEO / sole developer)
 
 ## Context
