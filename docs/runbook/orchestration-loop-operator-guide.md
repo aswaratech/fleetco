@@ -1,6 +1,6 @@
 # Orchestration loop — operator guide
 
-This is the daily reference for running the orchestration loop. The full design is at [orchestration-loop-design.md](orchestration-loop-design.md); the adoption decision is at [ADR-0018](../architecture/decisions/0018-orchestration-loop.md). The loop's source lives at [scripts/orchestration/](../../scripts/orchestration/).
+This is the daily reference for running the orchestration loop. The full design is at [orchestration-loop-design.md](orchestration-loop-design.md); the adoption decision is at [ADR-0022](../architecture/decisions/0022-orchestration-loop.md). The loop's source lives at [scripts/orchestration/](../../scripts/orchestration/).
 
 ## One-time setup (do this once before the first program)
 

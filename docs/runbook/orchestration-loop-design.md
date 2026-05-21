@@ -1,6 +1,6 @@
 # Orchestration loop — design
 
-This document is the canonical design record for the autonomous orchestration loop that drives multi-ticket programs in FleetCo. It is paired with [ADR-0018](../architecture/decisions/0018-orchestration-loop.md), which records the adoption decision and the trade-offs the project accepts, and with [orchestration-loop-operator-guide.md](orchestration-loop-operator-guide.md), which is the daily reference the operator reads when running the loop.
+This document is the canonical design record for the autonomous orchestration loop that drives multi-ticket programs in FleetCo. It is paired with [ADR-0022](../architecture/decisions/0022-orchestration-loop.md), which records the adoption decision and the trade-offs the project accepts, and with [orchestration-loop-operator-guide.md](orchestration-loop-operator-guide.md), which is the daily reference the operator reads when running the loop.
 
 The loop's source lives at [scripts/orchestration/](../../scripts/orchestration/). Built and smoke-tested on 2026-05-17; 113 unit tests covering the deterministic pieces of the design (extractor, fabricated-preamble guard, PR detection, destructive-Bash blocklist, auto-answer rules, rate-limit recovery).
 
@@ -84,7 +84,7 @@ Any non-rate-limit exception from the SDK halts the loop with `loop_error` and s
 
 ## The ten principles, applied to FleetCo
 
-The principles are the same ones documented in ADR-0018's predecessors and are not repeated in full here. The FleetCo-specific tuning:
+The principles are the same ones documented in ADR-0022's predecessors and are not repeated in full here. The FleetCo-specific tuning:
 
 **1. Honor discipline gates absolutely.** The loop's CI-green-before-merge gate is enforced by `pollCi`; the `hasCiWorkflows` precheck refuses to operate without CI. There is no waiver mechanism. The agent's own discipline gates (CLAUDE.md, ADRs, runbook procedures) are enforced inside the agent's session by the agent's CLAUDE.md-mandated behavior; the loop trusts the agent and verifies via CI.
 
@@ -116,7 +116,7 @@ The loop RESPECTS:
 
 - **Tier 2/Tier 3 data classification (ADR-0013)**: Slack notifications are short summaries, NOT full agent output. The agent's full text and tool outputs stay in `scripts/orchestration/logs/`, which is gitignored and per-machine.
 - **Security baseline (ADR-0012)**: the loop's deps live in `scripts/orchestration/package.json` so Dependabot covers them once `.github/dependabot.yml` is configured. Semgrep can be configured to scan `scripts/orchestration/src/` once the security CI is built.
-- **"No new top-level dependency without proposing first" (CLAUDE.md)**: the loop's deps are scoped to `scripts/orchestration/` and are NOT root-level. ADR-0018 documents this explicitly.
+- **"No new top-level dependency without proposing first" (CLAUDE.md)**: the loop's deps are scoped to `scripts/orchestration/` and are NOT root-level. ADR-0022 documents this explicitly.
 - **Single-agent workflow (ADR-0004)**: the loop runs ONE agent session at a time, sequentially.
 
 ## The "no CI" edge case
