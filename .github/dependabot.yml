@@ -1,0 +1,66 @@
+# Dependabot configuration per ADR-0012.
+#
+# Component 1: npm dependency updates (security + version), recursive across
+# the pnpm workspace so apps/api, apps/web, and packages/shared all get
+# scanned. Weekly cadence to keep noise manageable in Phase 0.
+#
+# Component 4 of ADR-0012 (action SHA pinning): the github-actions ecosystem
+# below opens weekly PRs that bump the SHA pins in .github/workflows/*.yml.
+
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+      timezone: Asia/Kathmandu
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore(deps)
+      include: scope
+    groups:
+      typescript:
+        patterns:
+          - typescript
+          - typescript-eslint
+          - "@typescript-eslint/*"
+      nestjs:
+        patterns:
+          - "@nestjs/*"
+      nextjs:
+        patterns:
+          - next
+          - "@next/*"
+          - react
+          - react-dom
+          - "@types/react*"
+      tailwind:
+        patterns:
+          - tailwindcss
+          - "@tailwindcss/*"
+          - postcss
+      prisma:
+        patterns:
+          - prisma
+          - "@prisma/*"
+      linting:
+        patterns:
+          - eslint
+          - "@eslint/*"
+          - prettier
+          - eslint-config-*
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+      timezone: Asia/Kathmandu
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: chore(deps)
+      include: scope

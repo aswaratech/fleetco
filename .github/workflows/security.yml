@@ -1,0 +1,36 @@
+name: security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# ADR-0012 security baseline:
+#   - Component 1 (Dependabot npm alerts + automatic security PRs): enabled at
+#     repository settings level (see .github/dependabot.yml for update schedule).
+#   - Component 2 (GitHub native secrets scanning): enabled at repository
+#     settings level. Repo-level scanning unavailable at Free tier per active
+#     tech-debt entry; user-level push protection is free and on by default.
+#   - Component 3 (Semgrep OWASP + security-audit): the job below.
+#   - Component 4 (Action SHA pinning): all third-party actions are SHA-pinned
+#     in this repo's workflow files; Dependabot's github-actions ecosystem
+#     proposes SHA updates weekly.
+#   - Component 5 (CycloneDX SBOM): deferred until production deployment ticket
+#     ships, per ADR-0012 ("uploaded to the GitHub Actions release artifacts");
+#     no SBOM on PR-time CI.
+
+permissions:
+  contents: read
+
+jobs:
+  semgrep:
+    name: semgrep (OWASP + security-audit)
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Semgrep scan
+        run: semgrep ci --config p/owasp-top-ten --config p/security-audit

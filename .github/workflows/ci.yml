@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Pinned action SHAs per ADR-0012 component 4 (action-version pinning).
+# Dependabot's github-actions ecosystem (see .github/dependabot.yml) opens
+# weekly PRs to bump these SHAs.
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: lint + format + typecheck + tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup pnpm
+        # Version is inherited from the root package.json `packageManager`
+        # field; pnpm/action-setup@v4 fails if both are specified, even when
+        # they match.
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Format check
+        run: pnpm format:check
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Prisma schema validate
+        # Schema references env("DATABASE_URL"); validate only parses the
+        # schema and doesn't connect, but Prisma may still surface a warning
+        # if the env is absent. Set a placeholder to keep output clean.
+        env:
+          DATABASE_URL: postgresql://placeholder:placeholder@localhost:5432/placeholder
+        run: pnpm --filter @fleetco/api exec prisma validate
+
+      - name: Web tests (Vitest, includes design-token-drift)
+        run: pnpm --filter @fleetco/web test
