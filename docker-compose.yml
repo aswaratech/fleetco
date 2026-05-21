@@ -1,0 +1,63 @@
+# FleetCo local data plane.
+#
+# Brings up Postgres (with PostGIS) and Redis for local development. See
+# ADR-0020 for the data-plane stack choice and docs/runbook/dev-setup.md
+# for the full local setup procedure.
+#
+# Usage:
+#   docker compose up -d        # start both services
+#   docker compose ps           # check health
+#   docker compose down         # stop services (data survives)
+#   docker compose down -v      # stop services AND wipe data
+#
+# Credentials below are Tier 4 dev placeholders per ADR-0013. The real
+# production credentials live in the secret store named by the
+# deployment ADR (ADR-0014, reserved).
+#
+# Host ports default to 5432 (Postgres) and 6379 (Redis). If you run
+# sibling Docker projects on the same ports, override by creating a
+# `.env` file at the repo root with `POSTGRES_PORT=...` and/or
+# `REDIS_PORT=...` (gitignored). Then update apps/api/.env's
+# DATABASE_URL and REDIS_URL to match the overridden host ports.
+# See docs/runbook/dev-setup.md "What can go wrong" for the full pattern.
+
+services:
+  postgres:
+    # Multi-arch PostGIS image (amd64 + arm64). The official postgis/postgis
+    # image only publishes amd64, which is why we use imresamu/postgis here
+    # (de-facto community ARM64 mirror, maintained by a PostGIS contributor).
+    # See ADR-0020 for the rationale.
+    image: imresamu/postgis:16-3.5
+    environment:
+      POSTGRES_USER: fleetco
+      POSTGRES_PASSWORD: fleetco
+      POSTGRES_DB: fleetco
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Override imresamu's PostGIS auto-enable init script with a no-op.
+      # Prisma migrations create extensions; we keep migrations as the
+      # single source of truth for schema state. See ADR-0020.
+      - ./docker/postgres-init/disable-auto-extensions.sh:/docker-entrypoint-initdb.d/10_postgis.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fleetco -d fleetco"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  redis_data:

@@ -2,12 +2,15 @@
   "name": "@fleetco/api",
   "private": true,
   "version": "0.0.0",
-  "description": "FleetCo API (NestJS). See CLAUDE.md and ADR-0018.",
+  "description": "FleetCo API (NestJS). See CLAUDE.md, ADR-0018, ADR-0020.",
   "scripts": {
     "dev": "nest start --watch",
     "build": "nest build",
     "start": "node dist/main.js",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:studio": "prisma studio"
   },
   "dependencies": {
     "@fleetco/shared": "workspace:*",
@@ -15,7 +18,10 @@
     "@nestjs/config": "^4.0.0",
     "@nestjs/core": "^11.0.0",
     "@nestjs/platform-express": "^11.0.0",
+    "@prisma/client": "^6.0.0",
     "@sentry/node": "^9.0.0",
+    "dotenv": "^17.0.0",
+    "ioredis": "^5.0.0",
     "nestjs-pino": "^4.0.0",
     "pino": "^9.0.0",
     "pino-http": "^10.0.0",
@@ -27,6 +33,7 @@
     "@nestjs/cli": "^11.0.0",
     "@types/node": "^24.0.0",
     "pino-pretty": "^11.0.0",
+    "prisma": "^6.0.0",
     "typescript": "^5.6.0"
   }
 }

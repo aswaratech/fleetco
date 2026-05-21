@@ -1,0 +1,13 @@
+// FleetCo Prisma schema. See apps/api/README.md for location rationale
+// and ADR-0020 for the data-plane stack.
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [postgis]
+}
