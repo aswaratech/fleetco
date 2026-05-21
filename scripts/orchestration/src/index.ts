@@ -7,32 +7,19 @@
 import fs from "node:fs";
 import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { env, paths, limits, debugMode } from "./config.js";
-import {
-  appendDecision,
-  closeIterLog,
-  openIterLog,
-  writeIterLine,
-} from "./logging.js";
+import { appendDecision, closeIterLog, openIterLog, writeIterLine } from "./logging.js";
 import { halt } from "./halt.js";
 import { notify } from "./slack-notify.js";
 import { startSlackBot } from "./slack-bot.js";
 import { initialState, loadState, saveState } from "./state.js";
 import { buildPermissionShim } from "./permission-shim.js";
-import {
-  createDetectorState,
-  detectPr,
-  recordBash,
-} from "./pr-detection.js";
-import {
-  computeWaitFromEvent,
-  parseWaitFromException,
-  sleepUntil,
-} from "./rate-limit-recovery.js";
+import { createDetectorState, detectPr, recordBash } from "./pr-detection.js";
+import { computeWaitFromEvent, parseWaitFromException, sleepUntil } from "./rate-limit-recovery.js";
 import { hasCiWorkflows, pollCi } from "./ci-poll.js";
 import { autoMerge } from "./auto-merge.js";
 import { extractNextPrompt } from "./extract-next-prompt.js";
 import { stripFabricatedPreambles } from "./strip-fabricated.js";
-import type { LoopState, MilestoneEvent, RateLimitWaitInfo } from "./types.js";
+import type { LoopState, RateLimitWaitInfo } from "./types.js";
 
 const PROGRAM_DONE_SENTINEL = /^\s*STOP\s*[—-]\s*program\s+complete\s*$/im;
 
@@ -178,14 +165,27 @@ async function main(): Promise<void> {
         pr: prNumber,
         details: ci.details + (ci.failedCheck ? ` (${ci.failedCheck})` : ""),
       });
-      await halt(`CI failed on PR #${prNumber}: ${ci.failedCheck ?? "unknown check"}. ${ci.details}`, 4, state);
+      await halt(
+        `CI failed on PR #${prNumber}: ${ci.failedCheck ?? "unknown check"}. ${ci.details}`,
+        4,
+        state,
+      );
     }
     if (ci.status === "timeout") {
-      appendDecision({ milestone: "ci_timeout", iteration: state.iteration, pr: prNumber, details: ci.details });
+      appendDecision({
+        milestone: "ci_timeout",
+        iteration: state.iteration,
+        pr: prNumber,
+        details: ci.details,
+      });
       await halt(ci.details, 5, state);
     }
     if (ci.status === "no_workflows") {
-      appendDecision({ milestone: "ci_no_workflows", iteration: state.iteration, details: ci.details });
+      appendDecision({
+        milestone: "ci_no_workflows",
+        iteration: state.iteration,
+        details: ci.details,
+      });
       await halt(ci.details, 3, state);
     }
     // green
@@ -406,20 +406,22 @@ async function invokeAgentWithRetry(
 
 // ---------- Helpers ----------
 
-type SdkMessageLoose = {
+interface SdkMessageLoose {
   type: string;
   subtype?: string;
   result?: unknown;
   tool_use_result?: unknown;
   message?: unknown;
   [key: string]: unknown;
-};
+}
 
 function extractTextFromAssistantMessage(m: SdkMessageLoose): string {
-  const inner = m.message as { content?: Array<{ type: string; text?: string }> } | undefined;
+  const inner = m.message as { content?: { type: string; text?: string }[] } | undefined;
   if (!inner?.content || !Array.isArray(inner.content)) return "";
   return inner.content
-    .filter((c): c is { type: "text"; text: string } => c.type === "text" && typeof c.text === "string")
+    .filter(
+      (c): c is { type: "text"; text: string } => c.type === "text" && typeof c.text === "string",
+    )
     .map((c) => c.text)
     .join("\n");
 }
@@ -453,6 +455,8 @@ function makeSlug(kickoff: string): string {
 // ---------- Entry ----------
 
 main().catch(async (err) => {
-  process.stderr.write(`[orchestration] fatal: ${err instanceof Error ? err.stack : String(err)}\n`);
+  process.stderr.write(
+    `[orchestration] fatal: ${err instanceof Error ? err.stack : String(err)}\n`,
+  );
   await halt(`Unhandled fatal error: ${err instanceof Error ? err.message : String(err)}`, 99);
 });

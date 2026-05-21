@@ -59,77 +59,101 @@ export async function startSlackBot(options: SlackBotOptions = {}): Promise<Slac
   const web = new WebClient(env.SLACK_BOT_TOKEN);
   const haikuReply = options.haikuReply ?? defaultHaikuReply;
 
-  socket.on("slash_commands", async ({ body, ack }: { body: any; ack: (response?: any) => Promise<void> }) => {
-    const cmd = (body?.command ?? "").toString();
-    try {
-      switch (cmd) {
-        case "/status":
-          await ack({ response_type: "ephemeral", text: renderStatus() });
-          break;
-        case "/tail":
-          await ack({ response_type: "ephemeral", text: "```\n" + tailDecisions(30) + "\n```" });
-          break;
-        case "/stop":
-          try {
-            fs.writeFileSync(paths.stopSentinel, new Date().toISOString());
-            await ack({
-              response_type: "in_channel",
-              text: ":octagonal_sign: Stop sentinel touched. The loop will halt cleanly at the next iteration boundary.",
-            });
-          } catch (err) {
-            await ack({ response_type: "ephemeral", text: `Failed to touch .stop: ${String(err)}` });
-          }
-          break;
-        case "/resume":
-          try {
-            if (fs.existsSync(paths.stopSentinel)) fs.rmSync(paths.stopSentinel);
-            await ack({
-              response_type: "in_channel",
-              text: ":arrows_counterclockwise: Stop sentinel removed. Operator must `pnpm start` to relaunch the loop.",
-            });
-          } catch (err) {
-            await ack({ response_type: "ephemeral", text: `Failed to remove .stop: ${String(err)}` });
-          }
-          break;
-        case "/queue":
-          await ack({ response_type: "ephemeral", text: renderQueue() });
-          break;
-        default:
-          await ack({ response_type: "ephemeral", text: `Unknown command: ${cmd}` });
-      }
-    } catch (err) {
+  socket.on(
+    "slash_commands",
+    async ({
+      body,
+      ack,
+    }: {
+      body: { command?: string };
+      ack: (response?: { response_type?: string; text?: string }) => Promise<void>;
+    }) => {
+      const cmd = (body?.command ?? "").toString();
       try {
-        await ack({ response_type: "ephemeral", text: `Bot error: ${String(err)}` });
-      } catch {
-        // ack already consumed
+        switch (cmd) {
+          case "/status":
+            await ack({ response_type: "ephemeral", text: renderStatus() });
+            break;
+          case "/tail":
+            await ack({ response_type: "ephemeral", text: "```\n" + tailDecisions(30) + "\n```" });
+            break;
+          case "/stop":
+            try {
+              fs.writeFileSync(paths.stopSentinel, new Date().toISOString());
+              await ack({
+                response_type: "in_channel",
+                text: ":octagonal_sign: Stop sentinel touched. The loop will halt cleanly at the next iteration boundary.",
+              });
+            } catch (err) {
+              await ack({
+                response_type: "ephemeral",
+                text: `Failed to touch .stop: ${String(err)}`,
+              });
+            }
+            break;
+          case "/resume":
+            try {
+              if (fs.existsSync(paths.stopSentinel)) fs.rmSync(paths.stopSentinel);
+              await ack({
+                response_type: "in_channel",
+                text: ":arrows_counterclockwise: Stop sentinel removed. Operator must `pnpm start` to relaunch the loop.",
+              });
+            } catch (err) {
+              await ack({
+                response_type: "ephemeral",
+                text: `Failed to remove .stop: ${String(err)}`,
+              });
+            }
+            break;
+          case "/queue":
+            await ack({ response_type: "ephemeral", text: renderQueue() });
+            break;
+          default:
+            await ack({ response_type: "ephemeral", text: `Unknown command: ${cmd}` });
+        }
+      } catch (err) {
+        try {
+          await ack({ response_type: "ephemeral", text: `Bot error: ${String(err)}` });
+        } catch {
+          // ack already consumed
+        }
       }
-    }
-  });
+    },
+  );
 
-  socket.on("app_mention", async ({ event, ack }: { event: any; ack?: () => Promise<void> }) => {
-    if (ack) await ack();
-    try {
-      const text: string = (event?.text ?? "").replace(/<@[A-Z0-9]+>\s*/g, "").trim();
-      if (!text) return;
-      const context = tailDecisions(50);
-      const answer = await haikuReply(text, context);
-      await web.chat.postMessage({
-        channel: event.channel,
-        thread_ts: event.thread_ts ?? event.ts,
-        text: answer || "(no answer)",
-      });
-    } catch (err) {
+  interface AppMentionEvent {
+    text?: string;
+    channel: string;
+    thread_ts?: string;
+    ts: string;
+  }
+  socket.on(
+    "app_mention",
+    async ({ event, ack }: { event: AppMentionEvent; ack?: () => Promise<void> }) => {
+      if (ack) await ack();
       try {
+        const text: string = (event?.text ?? "").replace(/<@[A-Z0-9]+>\s*/g, "").trim();
+        if (!text) return;
+        const context = tailDecisions(50);
+        const answer = await haikuReply(text, context);
         await web.chat.postMessage({
           channel: event.channel,
           thread_ts: event.thread_ts ?? event.ts,
-          text: `Bot error: ${String(err)}`,
+          text: answer || "(no answer)",
         });
-      } catch {
-        // best-effort
+      } catch (err) {
+        try {
+          await web.chat.postMessage({
+            channel: event.channel,
+            thread_ts: event.thread_ts ?? event.ts,
+            text: `Bot error: ${String(err)}`,
+          });
+        } catch {
+          // best-effort
+        }
       }
-    }
-  });
+    },
+  );
 
   await socket.start();
 
@@ -165,7 +189,9 @@ function renderStatus(): string {
 function renderQueue(): string {
   let kickoff: string;
   try {
-    kickoff = fs.existsSync(paths.kickoffFile) ? fs.readFileSync(paths.kickoffFile, "utf8") : "(kickoff.md absent)";
+    kickoff = fs.existsSync(paths.kickoffFile)
+      ? fs.readFileSync(paths.kickoffFile, "utf8")
+      : "(kickoff.md absent)";
   } catch (err) {
     kickoff = `(failed to read kickoff.md: ${String(err)})`;
   }

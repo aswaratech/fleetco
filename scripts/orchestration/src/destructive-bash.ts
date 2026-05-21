@@ -30,7 +30,8 @@ export interface BlockEntry {
 export const BLOCKLIST: readonly BlockEntry[] = [
   // ---------- filesystem destroy ----------
   {
-    pattern: /\brm\s+([^|;&\n]*\s)?(-[a-zA-Z]*r[a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*r|--recursive[ \t]+--force|--force[ \t]+--recursive|-rf|-fr)\b/,
+    pattern:
+      /\brm\s+([^|;&\n]*\s)?(-[a-zA-Z]*r[a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*r|--recursive[ \t]+--force|--force[ \t]+--recursive|-rf|-fr)\b/,
     reason: "rm with recursive+force is blocked; remove paths individually or with care",
     category: "filesystem_destroy",
   },
@@ -49,7 +50,8 @@ export const BLOCKLIST: readonly BlockEntry[] = [
   // ---------- git commit --amend (loop wants additive iteration) ----------
   {
     pattern: /\bgit\s+commit\b[^|;&\n]*\s--amend\b/,
-    reason: "git commit --amend is blocked; the loop relies on additive commits per CLAUDE.md commit discipline",
+    reason:
+      "git commit --amend is blocked; the loop relies on additive commits per CLAUDE.md commit discipline",
     category: "git_reset_or_amend",
   },
   // ---------- git rebase -i / --interactive ----------
@@ -83,7 +85,8 @@ export const BLOCKLIST: readonly BlockEntry[] = [
   // ---------- database destroy (forbidden per CLAUDE.md) ----------
   {
     pattern: /\b(pnpm|npm|yarn|npx)?\s*prisma\s+db\s+push\b/,
-    reason: "prisma db push is forbidden outside local development (CLAUDE.md); use a versioned migration",
+    reason:
+      "prisma db push is forbidden outside local development (CLAUDE.md); use a versioned migration",
     category: "database_destroy",
   },
   {
@@ -99,7 +102,8 @@ export const BLOCKLIST: readonly BlockEntry[] = [
   // ---------- dependency removals ----------
   {
     pattern: /\b(npm\s+uninstall|pnpm\s+(uninstall|remove)|yarn\s+remove)\b/,
-    reason: "dependency removal is operator-only; surfacing as a proposal in the PR description is fine",
+    reason:
+      "dependency removal is operator-only; surfacing as a proposal in the PR description is fine",
     category: "dependency_remove",
   },
   {

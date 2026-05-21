@@ -35,7 +35,7 @@ export function computeWaitFromEvent(
 
 // We support several phrasings seen in the wild. Each capture group yields
 // hour/minute/am-pm or 24-hour time, optionally with a timezone offset.
-const EXCEPTION_PATTERNS: ReadonlyArray<RegExp> = [
+const EXCEPTION_PATTERNS: readonly RegExp[] = [
   // "resets 5:25pm" / "resets at 5:25 PM" (case-insensitive)
   /(?:resets|reset|reset at|resets at)\s+(\d{1,2}):(\d{2})\s*(am|pm)/i,
   // "limit will reset at 5:25pm"
@@ -82,7 +82,9 @@ export function parseWaitFromException(
     if (!m) continue;
     // Relative-duration patterns (capture group 2 is a time unit word).
     if (m[2] && /(min|sec|hour|hr)/i.test(m[2])) {
-      const resumesAt = new Date(applyRelativeDuration(now, Number(m[1]), m[2]).getTime() + bufferMs);
+      const resumesAt = new Date(
+        applyRelativeDuration(now, Number(m[1]), m[2]).getTime() + bufferMs,
+      );
       return {
         resumesAt,
         reason: `Parsed from exception: try again in ${m[1]} ${m[2]}`,

@@ -14,11 +14,7 @@ describe("autoAnswer", () => {
           question: "Choose a deploy target",
           header: "Deploy",
           multiSelect: false,
-          options: [
-            { label: "Vercel" },
-            { label: "Fly.io (Recommended)" },
-            { label: "Render" },
-          ],
+          options: [{ label: "Vercel" }, { label: "Fly.io (Recommended)" }, { label: "Render" }],
         },
       ],
     };
@@ -52,11 +48,7 @@ describe("autoAnswer", () => {
           question: "Which features to enable?",
           header: "Features",
           multiSelect: true,
-          options: [
-            { label: "Feature A" },
-            { label: "Feature B" },
-            { label: "Feature C" },
-          ],
+          options: [{ label: "Feature A" }, { label: "Feature B" }, { label: "Feature C" }],
         },
       ],
     };
@@ -67,18 +59,17 @@ describe("autoAnswer", () => {
   });
 
   it("routes to Haiku for genuinely ambiguous single-select (≥3 options, no Recommended)", async () => {
-    const mockHaiku: HaikuPicker = vi.fn(async () => ({ index: 2, reason: "safest reversible option" }));
+    const mockHaiku: HaikuPicker = vi.fn(async () => ({
+      index: 2,
+      reason: "safest reversible option",
+    }));
     const input: AskUserQuestionInput = {
       questions: [
         {
           question: "Which library should we use for date formatting?",
           header: "Date lib",
           multiSelect: false,
-          options: [
-            { label: "date-fns" },
-            { label: "luxon" },
-            { label: "dayjs" },
-          ],
+          options: [{ label: "date-fns" }, { label: "luxon" }, { label: "dayjs" }],
         },
       ],
     };

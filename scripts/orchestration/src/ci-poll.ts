@@ -46,7 +46,9 @@ export interface PollOptions {
   runGh?: (args: readonly string[]) => Promise<{ stdout: string; exitCode: number }>;
 }
 
-const defaultRunGh = async (args: readonly string[]): Promise<{ stdout: string; exitCode: number }> => {
+const defaultRunGh = async (
+  args: readonly string[],
+): Promise<{ stdout: string; exitCode: number }> => {
   try {
     const { stdout } = await execFileAsync("gh", [...args], {
       cwd: paths.repoRoot,
@@ -76,19 +78,37 @@ export async function pollCi(prNumber: number, options: PollOptions = {}): Promi
 
   while (true) {
     if (options.onPoll) options.onPoll(Date.now() - startedAt);
-    const { stdout, exitCode } = await runGh(["pr", "checks", String(prNumber), "--json", "name,state,conclusion"]);
+    const { stdout, exitCode } = await runGh([
+      "pr",
+      "checks",
+      String(prNumber),
+      "--json",
+      "name,state,conclusion",
+    ]);
     if (exitCode === 0) {
       try {
-        const checks = JSON.parse(stdout) as Array<{ name: string; state: string; conclusion: string | null }>;
+        const checks = JSON.parse(stdout) as {
+          name: string;
+          state: string;
+          conclusion: string | null;
+        }[];
         // Treat empty checks array as "no checks reported yet" — keep waiting.
         if (checks.length > 0) {
           const allDone = checks.every((c) => c.state === "COMPLETED");
           const anyFailed = checks.some(
-            (c) => c.state === "COMPLETED" && c.conclusion !== "SUCCESS" && c.conclusion !== "NEUTRAL" && c.conclusion !== "SKIPPED",
+            (c) =>
+              c.state === "COMPLETED" &&
+              c.conclusion !== "SUCCESS" &&
+              c.conclusion !== "NEUTRAL" &&
+              c.conclusion !== "SKIPPED",
           );
           if (anyFailed) {
             const failed = checks.find(
-              (c) => c.state === "COMPLETED" && c.conclusion !== "SUCCESS" && c.conclusion !== "NEUTRAL" && c.conclusion !== "SKIPPED",
+              (c) =>
+                c.state === "COMPLETED" &&
+                c.conclusion !== "SUCCESS" &&
+                c.conclusion !== "NEUTRAL" &&
+                c.conclusion !== "SKIPPED",
             );
             return {
               status: "red",

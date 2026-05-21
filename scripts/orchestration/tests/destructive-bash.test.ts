@@ -60,10 +60,14 @@ describe("checkBashCommand — destructive-bash blocklist", () => {
       expect(checkBashCommand("git rebase main").allowed).toBe(true);
     });
     it("blocks git filter-branch", () => {
-      expect(checkBashCommand("git filter-branch --tree-filter 'rm secret' HEAD").allowed).toBe(false);
+      expect(checkBashCommand("git filter-branch --tree-filter 'rm secret' HEAD").allowed).toBe(
+        false,
+      );
     });
     it("blocks git filter-repo", () => {
-      expect(checkBashCommand("git filter-repo --invert-paths --path secret.txt").allowed).toBe(false);
+      expect(checkBashCommand("git filter-repo --invert-paths --path secret.txt").allowed).toBe(
+        false,
+      );
     });
   });
 
@@ -75,7 +79,9 @@ describe("checkBashCommand — destructive-bash blocklist", () => {
       expect(checkBashCommand("gh pr merge 123 --merge --delete-branch").allowed).toBe(false);
     });
     it("allows gh pr create", () => {
-      expect(checkBashCommand("gh pr create --title 'feat: add x' --body 'description'").allowed).toBe(true);
+      expect(
+        checkBashCommand("gh pr create --title 'feat: add x' --body 'description'").allowed,
+      ).toBe(true);
     });
     it("allows gh pr view", () => {
       expect(checkBashCommand("gh pr view 123").allowed).toBe(true);
@@ -99,7 +105,9 @@ describe("checkBashCommand — destructive-bash blocklist", () => {
       expect(checkBashCommand("pnpm prisma migrate deploy").allowed).toBe(false);
     });
     it("allows prisma migrate dev", () => {
-      expect(checkBashCommand("pnpm prisma migrate dev --name add_vehicles_table").allowed).toBe(true);
+      expect(checkBashCommand("pnpm prisma migrate dev --name add_vehicles_table").allowed).toBe(
+        true,
+      );
     });
     it("blocks psql -c DROP TABLE", () => {
       expect(checkBashCommand("psql -c 'DROP TABLE users'").allowed).toBe(false);

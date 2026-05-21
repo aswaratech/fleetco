@@ -2,11 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import {
-  extractNextPrompt,
-  extractTier1,
-  extractTier2,
-} from "../src/extract-next-prompt.js";
+import { extractNextPrompt, extractTier1, extractTier2 } from "../src/extract-next-prompt.js";
 import type { HaikuExtractor } from "../src/extract-next-prompt.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));

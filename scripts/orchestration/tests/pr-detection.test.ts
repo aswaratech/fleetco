@@ -1,9 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import {
-  createDetectorState,
-  detectPr,
-  recordBash,
-} from "../src/pr-detection.js";
+import { createDetectorState, detectPr, recordBash } from "../src/pr-detection.js";
 import type { GhPrLister } from "../src/pr-detection.js";
 
 describe("pr-detection", () => {

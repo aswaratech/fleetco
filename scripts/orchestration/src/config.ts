@@ -2,9 +2,10 @@
 // All env vars are validated up-front via zod; absent required vars fail fast
 // with a clear error so the loop never silently starts in a half-configured state.
 
-import { z } from "zod";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { z } from "zod";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const ORCHESTRATION_DIR = path.resolve(here, "..");
@@ -32,8 +33,6 @@ function loadEnv(): z.infer<typeof Schema> {
   // We avoid pulling in dotenv to keep the dep footprint small for this scope.
   try {
     const envPath = path.join(ORCHESTRATION_DIR, ".env");
-    // Lazy import fs so this stays trivially testable.
-    const fs = require("node:fs") as typeof import("node:fs");
     if (fs.existsSync(envPath)) {
       const content = fs.readFileSync(envPath, "utf8");
       for (const rawLine of content.split("\n")) {

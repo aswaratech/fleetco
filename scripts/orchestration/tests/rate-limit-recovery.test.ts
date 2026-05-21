@@ -90,11 +90,7 @@ describe("parseWaitFromException", () => {
   });
 
   it("parses 'retry in 90 seconds'", () => {
-    const r = parseWaitFromException(
-      new Error("quota exceeded; retry in 90 seconds"),
-      noon,
-      0,
-    );
+    const r = parseWaitFromException(new Error("quota exceeded; retry in 90 seconds"), noon, 0);
     expect(r).not.toBeNull();
     expect(r!.resumesAt.getTime() - noon.getTime()).toBe(90 * 1000);
   });

@@ -57,9 +57,7 @@ export function recordBash(state: PrDetectorState, command: string, output: stri
   }
 }
 
-export interface GhPrLister {
-  (branch: string, cwd: string): Promise<number | null>;
-}
+export type GhPrLister = (branch: string, cwd: string) => Promise<number | null>;
 
 export const defaultGhPrLister: GhPrLister = async (branch, cwd) => {
   try {
@@ -68,7 +66,7 @@ export const defaultGhPrLister: GhPrLister = async (branch, cwd) => {
       ["pr", "list", "--head", branch, "--state", "open", "--json", "number", "--limit", "1"],
       { cwd, timeout: 20_000 },
     );
-    const parsed = JSON.parse(stdout) as Array<{ number: number }>;
+    const parsed = JSON.parse(stdout) as { number: number }[];
     return parsed[0]?.number ?? null;
   } catch {
     return null;
@@ -85,7 +83,11 @@ export async function detectPr(
   options: DetectOptions,
 ): Promise<PrDetectionResult> {
   // Tier 1: last Bash was `gh pr create` — parse its specific output.
-  if (state.lastBashCommand && state.lastBashOutput && GH_PR_CREATE_RE.test(state.lastBashCommand)) {
+  if (
+    state.lastBashCommand &&
+    state.lastBashOutput &&
+    GH_PR_CREATE_RE.test(state.lastBashCommand)
+  ) {
     const urlMatch = PR_URL_RE.exec(state.lastBashOutput);
     if (urlMatch?.[1]) {
       return { prNumber: Number(urlMatch[1]), source: "gh_pr_create_output" };

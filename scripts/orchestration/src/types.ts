@@ -79,12 +79,12 @@ export interface SdkMessageLike {
 }
 
 export interface AskUserQuestionInput {
-  questions: Array<{
+  questions: {
     question: string;
     header: string;
     multiSelect: boolean;
-    options: Array<{ label: string; description?: string }>;
-  }>;
+    options: { label: string; description?: string }[];
+  }[];
 }
 
 export interface AutoAnswerResult {

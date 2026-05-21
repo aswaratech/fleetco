@@ -34,12 +34,10 @@ function pickByDefaultRule(q: AskUserQuestionInput["questions"][number]): number
   return [0];
 }
 
-export interface HaikuPicker {
-  (
-    question: AskUserQuestionInput["questions"][number],
-    projectContext: string,
-  ): Promise<{ index: number; reason: string }>;
-}
+export type HaikuPicker = (
+  question: AskUserQuestionInput["questions"][number],
+  projectContext: string,
+) => Promise<{ index: number; reason: string }>;
 
 let cachedAnthropic: Anthropic | null = null;
 function getAnthropic(): Anthropic {
@@ -75,7 +73,10 @@ export const defaultHaikuPicker: HaikuPicker = async (question, projectContext) 
     .trim();
   const m = text.match(/INDEX\s*=\s*(\d+)\s+REASON\s*=\s*(.+)/i);
   if (!m) {
-    return { index: 0, reason: `Haiku reply unparseable (${text.slice(0, 80)}); fell back to option 0` };
+    return {
+      index: 0,
+      reason: `Haiku reply unparseable (${text.slice(0, 80)}); fell back to option 0`,
+    };
   }
   const idx = Number(m[1]);
   const safeIdx = Number.isInteger(idx) && idx >= 0 && idx < question.options.length ? idx : 0;
@@ -131,7 +132,9 @@ export async function autoAnswer(
         : q.multiSelect
           ? "multi-select conservative default (first option only)"
           : "first option (no Recommended marker, ≤2 options or trivial)";
-      messageLines.push(`Q${qi + 1} (${q.header}): picked [${indices[0]}] "${picked?.label ?? "?"}" via ${reason}.`);
+      messageLines.push(
+        `Q${qi + 1} (${q.header}): picked [${indices[0]}] "${picked?.label ?? "?"}" via ${reason}.`,
+      );
     }
   }
 

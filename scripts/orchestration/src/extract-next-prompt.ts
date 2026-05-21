@@ -65,9 +65,7 @@ export function extractTier2(transcript: string): string | null {
 
 // ---------- Tier 3: Haiku fallback ----------
 
-export interface HaikuExtractor {
-  (recentTranscript: string): Promise<string | null>;
-}
+export type HaikuExtractor = (recentTranscript: string) => Promise<string | null>;
 
 let cachedAnthropic: Anthropic | null = null;
 function getAnthropic(): Anthropic {
@@ -130,14 +128,6 @@ export async function extractNextPrompt(
 }
 
 // ---------- helpers ----------
-
-function extractFirstFencedBlock(section: string): string | null {
-  const re = /```(?:[a-zA-Z0-9_-]*\n)?([\s\S]*?)```/;
-  const m = re.exec(section);
-  if (!m) return null;
-  const body = (m[1] ?? "").trim();
-  return body.length > 0 ? body : null;
-}
 
 function extractBlockquoteRun(section: string): string | null {
   const lines = section.split("\n");
