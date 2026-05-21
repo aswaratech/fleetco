@@ -354,6 +354,15 @@ async function invokeAgentWithRetry(
       }
     } catch (err) {
       waitInfo = parseWaitFromException(err);
+      // The SDK sometimes terminates with a generic "Claude Code process
+      // exited with code N" error after the agent's final streamed message
+      // contained the rate-limit phrasing ("You've hit your limit · resets
+      // H:MM..."). In that case the exception itself has no parseable
+      // signal, but the transcript tail does. Try the tail as a fallback
+      // so a rate-limit recovery still engages instead of a hard halt.
+      if (!waitInfo && transcript.length > 0) {
+        waitInfo = parseWaitFromException(transcript.slice(-2000));
+      }
       if (!waitInfo) {
         // Non-rate-limit error: halt.
         await halt(
