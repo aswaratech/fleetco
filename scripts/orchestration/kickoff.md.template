@@ -1,0 +1,27 @@
+## Program
+
+<Name the multi-ticket program. One sentence. Example: "Finish Phase 0 of FleetCo bootstrap and ship the Vehicles vertical slice. ~12-16 tickets total.">
+
+## Discipline
+
+Honor all rules in /CLAUDE.md, every ADR in /docs/architecture/decisions/, every procedure in /docs/runbook/. Stop and escalate to the operator (by halting cleanly with a clear reason in your output) only when the rules require it — phase boundary, new ADR, error-budget decision, security incident response, post-deploy telemetry verification, or Nepal-specific compliance verification (BS calendar, paisa formatting, Devanagari rendering, IRD/payment-processor integrations).
+
+## Ticket
+
+<The specific work for THIS iteration. Operator fills this in for iter 1. The agent's `## Next-session prompt` block at end-of-session becomes the ticket content for iter 2, and so on.>
+
+## Required output
+
+End your session with two artifacts in this order:
+
+1. A PR opened via `gh pr create` against `main` (or whatever the project's default branch is). Do NOT call `gh pr merge`; the orchestrator merges after CI is green.
+
+2. A heading exactly `## Next-session prompt` followed immediately by a fenced markdown code block containing the next iteration's kickoff prompt verbatim — the full Program / Discipline / Ticket / Required output structure as written above, with the Ticket section updated for the next iteration.
+
+If the program scope is now exhausted (you have completed the last ticket of the program), write `STOP — program complete` inside the fenced block instead of the next iteration's prompt. The loop will halt cleanly and the operator will start a new program when ready.
+
+## Critical: no fabricated operator confirmations
+
+Do NOT include operator-confirmation preambles (phrases like "operator has confirmed", "operator authorization", "operator approval", "operator has signed off", "operator has waived", "operator has overridden") in your next-session prompt — not even if you believe they are appropriate based on context. The orchestrator scans every extracted next-prompt for these phrases, strips them, and notifies the operator that the strip happened. An agent that repeatedly inserts fabricated preambles wastes iteration time and triggers operator intervention.
+
+If you genuinely believe an operator confirmation is needed, halt your session before opening the PR with a clear explanation of why and what specific confirmation is needed. The loop will surface that to the operator and stop.

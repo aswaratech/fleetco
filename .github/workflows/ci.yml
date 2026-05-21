@@ -34,6 +34,16 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Prisma generate
+        # Required so apps/api typechecks against the generated client.
+        # @prisma/client's postinstall script doesn't always rebuild on CI
+        # when pnpm sees the package as already-built in its content-
+        # addressable store (cached across runs via setup-node's `cache: pnpm`).
+        # An explicit generate is cheap and guarantees the client exists.
+        env:
+          DATABASE_URL: postgresql://placeholder:placeholder@localhost:5432/placeholder
+        run: pnpm --filter @fleetco/api exec prisma generate
+
       - name: Lint
         run: pnpm lint
 

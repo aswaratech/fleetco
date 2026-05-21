@@ -41,3 +41,12 @@ Thumbs.db
 # Prisma
 *.db
 *.db-journal
+
+# Orchestration loop runtime (see scripts/orchestration/)
+scripts/orchestration/state.json
+scripts/orchestration/logs/
+scripts/orchestration/decisions.log
+scripts/orchestration/.stop
+scripts/orchestration/.env
+scripts/orchestration/dist/
+scripts/orchestration/node_modules/

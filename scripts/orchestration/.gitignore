@@ -1,0 +1,11 @@
+# Loop runtime (do not commit)
+state.json
+logs/
+decisions.log
+.stop
+.env
+
+# Build outputs
+dist/
+node_modules/
+*.tsbuildinfo
