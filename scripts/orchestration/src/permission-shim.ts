@@ -6,6 +6,15 @@
 //
 // Everything else is allowed by default. Every denial is logged for the
 // operator to audit later.
+//
+// SDK-shape note: @anthropic-ai/claude-agent-sdk@0.1.77 rejects an `allow`
+// response that omits `updatedInput`, even though its TypeScript types mark
+// the field optional. Surfaced by iter 1 of the Phase 1 Vehicles slice
+// (2026-05-21): every Write/Edit/state-changing-Bash returned a Zod
+// `invalid_union` error and the agent halted with no PR. We pass `updatedInput:
+// input` (the original input, unchanged) on every allow path to satisfy the
+// runtime requirement. If a future SDK version changes the schema, revisit
+// here.
 
 import { checkBashCommand } from "./destructive-bash.js";
 import { autoAnswer } from "./auto-answer.js";
@@ -43,7 +52,7 @@ export function buildPermissionShim(ctx: ShimContext) {
           interrupt: false,
         };
       }
-      return { behavior: "allow" };
+      return { behavior: "allow", updatedInput: input };
     }
 
     if (toolName === "AskUserQuestion") {
@@ -66,6 +75,6 @@ export function buildPermissionShim(ctx: ShimContext) {
     }
 
     // Everything else: allow.
-    return { behavior: "allow" };
+    return { behavior: "allow", updatedInput: input };
   };
 }
