@@ -10,7 +10,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
-    "db:studio": "prisma studio"
+    "db:studio": "prisma studio",
+    "db:seed": "tsx scripts/seed-admin.ts",
+    "auth:secret": "node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\""
   },
   "dependencies": {
     "@fleetco/shared": "workspace:*",
@@ -20,6 +22,7 @@
     "@nestjs/platform-express": "^11.0.0",
     "@prisma/client": "^6.0.0",
     "@sentry/node": "^9.0.0",
+    "better-auth": "~1.6.11",
     "dotenv": "^17.0.0",
     "ioredis": "^5.0.0",
     "nestjs-pino": "^4.0.0",
@@ -31,9 +34,11 @@
   },
   "devDependencies": {
     "@nestjs/cli": "^11.0.0",
+    "@types/express": "^5.0.6",
     "@types/node": "^24.0.0",
     "pino-pretty": "^11.0.0",
     "prisma": "^6.0.0",
+    "tsx": "^4.22.3",
     "typescript": "^5.6.0"
   }
 }

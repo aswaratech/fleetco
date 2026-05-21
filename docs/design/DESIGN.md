@@ -129,6 +129,8 @@ Motion principles (one stack for the whole product):
 
 Each component subsection names its shadcn-ui upstream so a future agent can compare against the latest published version and decide whether to pull in an upstream change. Component code is owned in-tree at `apps/web/src/components/ui/<name>.tsx` per ADR-0016's copy-paste-not-install model; the subsections below document the contract DESIGN.md commits FleetCo to, not the implementation detail.
 
+**Provenance of in-tree components (as of 2026-05-21, Ticket 10).** The first four shadcn-ui components copied into `apps/web/src/components/ui/` were `button.tsx`, `input.tsx`, `label.tsx`, and `form.tsx`, pulled via `pnpm dlx shadcn@latest add ...` with the CLI at version `4.7.0` and the unified `radix-ui` peer at `1.4.3`. Subsequent component additions append a one-line note here naming the CLI version at the time of addition (per ADR-0016's "maintaining a short note... referencing the shadcn-ui version the component was copied from").
+
 ### Buttons
 
 - **shadcn-ui upstream:** `Button` from `ui/button.tsx`.
