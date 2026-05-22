@@ -8,6 +8,7 @@ import { AuthModule } from "./modules/auth/auth.module";
 import { HealthModule } from "./modules/health/health.module";
 import { PrismaModule } from "./modules/prisma/prisma.module";
 import { RedisModule } from "./modules/redis/redis.module";
+import { VehiclesModule } from "./modules/vehicles/vehicles.module";
 
 @Module({
   imports: [
@@ -51,6 +52,7 @@ import { RedisModule } from "./modules/redis/redis.module";
     RedisModule,
     AuthModule,
     HealthModule,
+    VehiclesModule,
   ],
 })
 export class AppModule {}

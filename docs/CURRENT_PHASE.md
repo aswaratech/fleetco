@@ -1,7 +1,9 @@
 # Current phase
 
-**Phase 0 — Kickoff**
+**Phase 1 — The Spine**
 
-We are setting up the foundations of FleetCo: the repository, the monorepo scaffold, the NestJS and Next.js skeletons, the Postgres and Redis services running locally via Docker Compose, the Prisma initialization with an empty baseline migration, the CI pipeline on GitHub Actions, the baseline documentation, and the agent guardrails. No business features are being built yet.
+Phase 0 (Kickoff) is complete: the monorepo scaffold, NestJS API skeleton, Next.js admin skeleton, Postgres + Redis via Docker Compose, Prisma baseline + auth migration, CI on GitHub Actions, the security baseline jobs from ADR-0012, the baseline documentation, the agent guardrails, the orchestration loop (ADR-0022), and basic auth scaffolding for a single admin user are all in place.
 
-When Phase 0 completes, this file is updated to "Phase 1 — The Spine" and the next vertical slice is recorded here. Phase progression is part of the work that progresses the phase; it is not a separate task. The PR that completes the last Phase 0 ticket also updates this file to indicate that Phase 1 is now active.
+Phase 1 replaces spreadsheets and paper for daily fleet operations. The system in Phase 1 is web admin only, with the CEO as the only user. The phase is built as a sequence of vertical slices per ADR-0006 (schema → migration → service → API → UI → test), in this order: Vehicles, Drivers, Customers, Jobs, Trips, Fuel logs, Expense logs, Reports v1. Operational milestones (first production deploy, first restore-from-backup test, SLI instrumentation, OpenTelemetry, performance budget) are interleaved across the same window.
+
+The Vehicles slice is in flight (read path landed in this PR; writes and tests follow in iter 2). See `docs/product/roadmap.md` §"Phase 1 — The Spine" for the full Phase 1 scope and operational commitments. When the last Phase 1 slice (Reports v1) ships and the CEO is using FleetCo daily, this file is updated to indicate Phase 2 is active.

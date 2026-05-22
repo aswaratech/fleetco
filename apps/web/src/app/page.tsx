@@ -1,5 +1,7 @@
+import Link from "next/link";
 import { redirect } from "next/navigation";
 
+import { Button } from "@/components/ui/button";
 import { getServerSession } from "@/lib/session";
 
 import { SignOutButton } from "./sign-out-button";
@@ -19,9 +21,11 @@ export default async function HomePage() {
             Signed in as <span className="text-text-primary">{session.user.email}</span>.
           </p>
         </div>
-        <p className="text-text-secondary text-sm">
-          Phase 0 placeholder home. The Vehicles slice (first Phase 1 ticket) mounts here.
-        </p>
+        <nav aria-label="Primary" className="space-y-2">
+          <Button asChild variant="outline" className="w-full justify-start">
+            <Link href="/vehicles">Vehicles</Link>
+          </Button>
+        </nav>
         <SignOutButton />
       </div>
     </main>
