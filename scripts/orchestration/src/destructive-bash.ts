@@ -5,10 +5,19 @@
 // interruption; the cost of a false negative can be data loss. Err toward
 // over-blocking.
 //
-// The blocklist is intentionally regex-based on the full command string,
-// not on the parsed argv. Agents can construct commands in many ways (env-var
-// expansion, subshells, here-docs); a string-level check catches more of them
-// than an argv check would.
+// The blocklist is regex-based. By default, patterns are applied to a
+// "stripped" version of the command where double-quoted strings, single-quoted
+// strings, and heredoc bodies have been replaced with whitespace. This means
+// `gh pr create --body "..."` won't false-positive just because the PR body
+// happens to contain the literal text `prisma migrate reset` as documentation.
+// Surfaced by iter 1 of the Phase 1 Vehicles slice (2026-05-22): the agent
+// burned an attempt re-running `gh pr create` with a shorter body after the
+// first attempt was denied for "prisma migrate reset" text inside the body.
+//
+// A small number of patterns DO need to inspect the original command including
+// quoted content — specifically `psql -c "<destructive SQL>"`, where the entire
+// point is that the destructive SQL lives inside a quoted argument. Those
+// patterns set `inspectQuoted: true`.
 
 export interface BlockEntry {
   pattern: RegExp;
@@ -25,6 +34,12 @@ export interface BlockEntry {
     | "system_path_write"
     | "process_kill"
     | "container_destroy";
+  // If true, the pattern is applied to the ORIGINAL command string (including
+  // quoted/heredoc content). Default false: pattern is applied to a stripped
+  // version where quoted content has been removed. Set to true only for
+  // patterns whose intent is to catch destructive content INSIDE quoted args
+  // (the canonical case: `psql -c "<destructive SQL>"`).
+  inspectQuoted?: boolean;
 }
 
 export const BLOCKLIST: readonly BlockEntry[] = [
@@ -98,6 +113,9 @@ export const BLOCKLIST: readonly BlockEntry[] = [
     pattern: /\bpsql\b[^|;&\n]*\s-c\s+["'][^"']*\b(DROP|TRUNCATE|DELETE\s+FROM)\b/i,
     reason: "hand-editing the database via psql is forbidden (CLAUDE.md)",
     category: "database_destroy",
+    // This pattern's whole point is to catch destructive SQL inside the -c
+    // quoted argument; we must NOT strip quotes before matching.
+    inspectQuoted: true,
   },
   // ---------- dependency removals ----------
   {
@@ -168,11 +186,31 @@ export interface BashCheckResult {
   category?: BlockEntry["category"];
 }
 
+/**
+ * Strip quoted strings and heredoc bodies from a shell command so the resulting
+ * string represents only the command/argument structure, not user-supplied
+ * literal text. Used so patterns like `prisma migrate reset` don't false-positive
+ * on `gh pr create --body "...prisma migrate reset..."`.
+ */
+function stripQuotedAndHeredocs(cmd: string): string {
+  let result = cmd;
+  // Heredocs first: <<EOF ... \nEOF or <<'EOF' ... \nEOF (tag is usually EOF).
+  // Multi-line aware: the body can contain anything until a line with just the tag.
+  result = result.replace(/<<\s*['"]?(\w+)['"]?\s*\n[\s\S]*?\n\s*\1\s*(?=\n|$)/g, " ");
+  // Double-quoted strings (with escaped-quote support).
+  result = result.replace(/"(?:\\.|[^"\\])*"/g, " ");
+  // Single-quoted strings (POSIX: no escapes inside).
+  result = result.replace(/'[^']*'/g, " ");
+  return result;
+}
+
 export function checkBashCommand(command: string): BashCheckResult {
   // Normalize whitespace so patterns can be written linearly; preserve flag tokens.
   const normalized = command.replace(/\s+/g, " ").trim();
+  const stripped = stripQuotedAndHeredocs(normalized).replace(/\s+/g, " ").trim();
   for (const entry of BLOCKLIST) {
-    if (entry.pattern.test(normalized)) {
+    const target = entry.inspectQuoted ? normalized : stripped;
+    if (entry.pattern.test(target)) {
       return {
         allowed: false,
         reason: entry.reason,
