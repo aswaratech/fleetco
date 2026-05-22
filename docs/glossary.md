@@ -18,11 +18,17 @@ This is the project's semantic memory: the place where words have agreed meaning
 
 **Lease-taker** is a party who has rented or leased a vehicle for a period and operates it independently of FleetCo's direct dispatch. We bill lease-takers on a contract basis, not on a per-trip basis. Lease-takers are distinct from customers.
 
+**Odometer** is the integer kilometer reading on a vehicle's distance counter. FleetCo tracks two odometer values per vehicle: `odometerStartKm` (the reading at acquisition, used as the baseline for lifetime distance) and `odometerCurrentKm` (the most recent reading, updated by trip-end events). Lifetime kilometers for a vehicle is `current − start`. Odometer values are stored as integers (no fractional kilometers); fractional distances belong on trip-level fields where precision matters.
+
 **Tipper** is a truck with a hydraulic dump body, common in construction haulage. Tippers are a vehicle type within the fleet.
 
 **Trip** is the central aggregate of the FleetCo domain. One trip is one contiguous use of one vehicle by one driver for one job, with a start odometer reading, an end odometer reading, a start time, an end time, and route data accumulated during the trip. See ADR-0003 for why the Trip is the central aggregate.
 
-**Vehicle** is a registered asset in the fleet: a truck, a tipper, a loader, an excavator. Vehicles have a Bluebook number and metadata, an insurance policy with an expiry, and a registration with a route permit if applicable.
+**Vehicle** is a registered asset in the fleet: a truck, a tipper, an excavator, a loader, a grader, or other heavy-construction equipment. Vehicles have a Nepali commercial registration number (unique across the fleet), a kind (the enum `vehicle.kind`), a make and model, a year of manufacture, a status (the enum `vehicle.status`), odometer readings (see `odometer`), an acquisition date, and an optional retirement date. Bluebook, insurance, and route-permit metadata are added in later slices; iter 1 covers the core record. Vehicle records are classified Tier 3 (operational business data) per ADR-0013. Vehicle is the foundation aggregate for Trips per ADR-0003 — every Trip references one Vehicle by id.
+
+**vehicle.kind** is the enum classifying a vehicle by chassis type. Phase 1 values are `TRUCK`, `TIPPER`, `EXCAVATOR`, `LOADER`, `GRADER`, and `OTHER`. `OTHER` exists so an unusual asset can be registered without forcing a schema change; future slices may promote frequent `OTHER` values to their own enum entries.
+
+**vehicle.status** is the enum tracking a vehicle's operational state. Values are `ACTIVE` (default; available for trips), `IN_MAINTENANCE` (off-road for service), `RETIRED` (permanently out of service), and `SOLD` (no longer owned by FleetCo). Transition to `RETIRED` or `SOLD` populates the vehicle's `retiredAt` date.
 
 **Vendor** is a party that FleetCo pays: a fuel station, a repair shop, a parts supplier. Vendors are distinct from customers (whom FleetCo bills) and from lease-takers (whom FleetCo also bills, but on a contract basis).
 

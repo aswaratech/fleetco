@@ -19,17 +19,18 @@ datasource db {
 // Triple-slash comments surface as JSDoc on the generated Prisma client.
 
 model User {
-  id            String    @id
+  id              String    @id
   /// Tier 2 PII per ADR-0013 — excluded from default logging (pino redact covers *.email).
-  email         String    @unique
-  emailVerified Boolean   @default(false)
+  email           String    @unique
+  emailVerified   Boolean   @default(false)
   /// Tier 2 PII per ADR-0013 — admin display name.
-  name          String
-  image         String?
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-  sessions      Session[]
-  accounts      Account[]
+  name            String
+  image           String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  sessions        Session[]
+  accounts        Account[]
+  vehiclesCreated Vehicle[] @relation("VehicleCreatedBy")
 
   @@map("user")
 }
@@ -87,4 +88,71 @@ model Verification {
 
   @@index([identifier])
   @@map("verification")
+}
+
+// Vehicles module. Owned by apps/api/src/modules/vehicles/ per ADR-0001.
+// First Phase 1 vertical slice per the roadmap; foundation aggregate for
+// Trips per ADR-0003 (every downstream slice references Vehicle by id).
+// Tier annotations per ADR-0013: vehicle records are Tier 3 (operational
+// business data) — logged at the level of operational events but not at
+// the level of full record content; access restricted to authenticated
+// administrative users.
+
+enum VehicleKind {
+  TRUCK
+  TIPPER
+  EXCAVATOR
+  LOADER
+  GRADER
+  OTHER
+
+  @@map("vehicle_kind")
+}
+
+enum VehicleStatus {
+  ACTIVE
+  IN_MAINTENANCE
+  RETIRED
+  SOLD
+
+  @@map("vehicle_status")
+}
+
+model Vehicle {
+  id                 String        @id @default(cuid())
+  /// Tier 3 per ADR-0013 — Nepali commercial plate (loose validation in
+  /// Phase 1; tightened in a later slice). Unique across the fleet.
+  registrationNumber String        @unique
+  kind               VehicleKind
+  /// Tier 3 per ADR-0013 — manufacturer (e.g., "Tata", "Mahindra").
+  make               String
+  /// Tier 3 per ADR-0013 — model designation (e.g., "LPK 2518").
+  model              String
+  /// Tier 3 per ADR-0013 — manufacture year.
+  year               Int
+  status             VehicleStatus @default(ACTIVE)
+  /// Tier 3 per ADR-0013 — odometer at acquisition (kilometers). Baseline
+  /// for lifetime distance tracking; defaults to 0 when the vehicle is
+  /// new or the prior reading is unknown.
+  odometerStartKm    Int           @default(0)
+  /// Tier 3 per ADR-0013 — current odometer reading (kilometers).
+  /// Updated by trip end events; tracked at vehicle level so reports
+  /// can compute lifetime kilometers (current - start).
+  odometerCurrentKm  Int           @default(0)
+  /// Tier 3 per ADR-0013 — date the vehicle joined the fleet.
+  acquiredAt         DateTime
+  /// Tier 3 per ADR-0013 — date the vehicle left the fleet (retired or
+  /// sold). Nullable; populated when status transitions to RETIRED or SOLD.
+  retiredAt          DateTime?
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+  /// References the User who created the record (ADR-0021 admin user).
+  /// Audit field; restrict deletion of users with vehicles (Restrict).
+  createdById        String
+  createdBy          User          @relation("VehicleCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@index([status])
+  @@index([kind])
+  @@index([createdById])
+  @@map("vehicle")
 }

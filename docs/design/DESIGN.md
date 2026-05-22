@@ -131,6 +131,8 @@ Each component subsection names its shadcn-ui upstream so a future agent can com
 
 **Provenance of in-tree components (as of 2026-05-21, Ticket 10).** The first four shadcn-ui components copied into `apps/web/src/components/ui/` were `button.tsx`, `input.tsx`, `label.tsx`, and `form.tsx`, pulled via `pnpm dlx shadcn@latest add ...` with the CLI at version `4.7.0` and the unified `radix-ui` peer at `1.4.3`. Subsequent component additions append a one-line note here naming the CLI version at the time of addition (per ADR-0016's "maintaining a short note... referencing the shadcn-ui version the component was copied from").
 
+- **2026-05-21 (Vehicles iter 1):** `table.tsx` added. Shape matches shadcn-ui's `new-york` Table primitive (the style configured in `apps/web/components.json`) with FleetCo density tuning applied inline: default row vertical padding 12px (`p-3`), headers `font-medium` and not uppercase, row separators in `color.border.subtle`. Hand-written rather than CLI-pulled to keep iter-1's added surface tight; the next CLI invocation will reconcile if upstream has changed meaningfully.
+
 ### Buttons
 
 - **shadcn-ui upstream:** `Button` from `ui/button.tsx`.
