@@ -209,4 +209,75 @@ describe("checkBashCommand — destructive-bash blocklist", () => {
       expect(checkBashCommand("find . -name '*.ts' | head -20").allowed).toBe(true);
     });
   });
+
+  // Iter 1 of the Phase 1 Vehicles slice (2026-05-22) surfaced this false-
+  // positive: the agent's `gh pr create --body "..."` was denied because the
+  // PR body contained the literal text "prisma migrate reset" as documentation
+  // (the body explained how to roll back). The fix strips quoted strings and
+  // heredoc bodies before applying the patterns, so text inside an argument
+  // is no longer mistaken for a command being run.
+  describe("quoted/heredoc body false-positive prevention", () => {
+    it("allows gh pr create with 'prisma migrate reset' in a double-quoted body", () => {
+      const cmd =
+        'gh pr create --title "feat: x" --body "Note: do not run pnpm prisma migrate reset in prod"';
+      expect(checkBashCommand(cmd).allowed).toBe(true);
+    });
+
+    it("allows gh pr create with 'prisma migrate reset' inside a heredoc body", () => {
+      const cmd = `gh pr create --title "feat: x" --body "$(cat <<'EOF'
+This PR adds a migration.
+DO NOT pnpm prisma migrate reset against production.
+EOF
+)"`;
+      expect(checkBashCommand(cmd).allowed).toBe(true);
+    });
+
+    it("allows git commit -m with destructive-looking text in the message", () => {
+      const cmd = `git commit -m "fix: avoid prisma db push in CI workflows"`;
+      expect(checkBashCommand(cmd).allowed).toBe(true);
+    });
+
+    it("allows git commit -m mentioning DROP TABLE inside the quoted message", () => {
+      const cmd = `git commit -m "docs: explain why we never DROP TABLE outside migrations"`;
+      expect(checkBashCommand(cmd).allowed).toBe(true);
+    });
+
+    it("allows gh pr create with rm -rf mentioned inside a single-quoted body", () => {
+      const cmd = `gh pr create --title 'feat: x' --body 'Reverting: do not rm -rf node_modules without lockfile backup'`;
+      expect(checkBashCommand(cmd).allowed).toBe(true);
+    });
+
+    // Still-blocks-when-real: the strip mustn't gut the blocklist's ability to
+    // catch genuinely destructive commands. These all run the destructive op
+    // outside of a quoted arg.
+    it("still blocks standalone prisma migrate reset (no quotes)", () => {
+      expect(checkBashCommand("pnpm --filter @fleetco/api exec prisma migrate reset").allowed).toBe(
+        false,
+      );
+    });
+    it("still blocks prisma migrate reset chained after &&", () => {
+      expect(checkBashCommand("cd apps/api && pnpm prisma migrate reset --force").allowed).toBe(
+        false,
+      );
+    });
+    it("still blocks rm -rf in a real command (no surrounding quotes)", () => {
+      expect(checkBashCommand("rm -rf /tmp/junk-dir").allowed).toBe(false);
+    });
+
+    // psql -c "DROP ..." must remain blocked: the inspectQuoted flag on the
+    // psql pattern means we check the ORIGINAL command including the quoted
+    // content. The whole point of this pattern is to catch destructive SQL
+    // inside the -c argument.
+    it("still blocks psql -c with DROP inside double-quoted SQL", () => {
+      expect(checkBashCommand('psql -c "DROP TABLE users"').allowed).toBe(false);
+    });
+    it("still blocks psql -c with DROP inside single-quoted SQL", () => {
+      expect(checkBashCommand("psql -c 'DROP TABLE users'").allowed).toBe(false);
+    });
+    it('still blocks PGPASSWORD=... psql -c "DROP DATABASE ..."', () => {
+      const cmd =
+        'PGPASSWORD=fleetco psql -h localhost -p 55432 -U fleetco -d postgres -c "DROP DATABASE fleetco_shadow"';
+      expect(checkBashCommand(cmd).allowed).toBe(false);
+    });
+  });
 });

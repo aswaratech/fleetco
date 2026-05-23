@@ -48,10 +48,17 @@ export async function notify(event: MilestoneEvent, message: string): Promise<vo
   // Truncate aggressively to keep accidental Tier 2/3 spillage minimal.
   const safe = body.length > 2000 ? body.slice(0, 2000) + " …(truncated)" : body;
   try {
+    // 5s timeout: notify() is best-effort, NOT load-bearing. A hung or slow
+    // Slack endpoint must not block the main iteration loop. Surfaced by
+    // iter 1 of the Phase 1 Vehicles slice (2026-05-22): the loop hung for
+    // 34+ minutes between agent_session_end and CI polling because
+    // fetch(SLACK_WEBHOOK_URL) had no timeout and Slack connectivity was
+    // intermittent (Socket Mode pong timeouts in stderr corroborated this).
     const res = await fetch(env.SLACK_WEBHOOK_URL, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ text: safe }),
+      signal: AbortSignal.timeout(5_000),
     });
     if (!res.ok) {
       process.stderr.write(`[orchestration] slack webhook returned ${res.status}\n`);
