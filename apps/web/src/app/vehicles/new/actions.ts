@@ -4,10 +4,7 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 
 import { apiFetch, ApiError } from "@/lib/api";
-import {
-  CreateVehicleFormSchema,
-  type CreateVehicleFormValues,
-} from "@/lib/vehicles-schema";
+import { CreateVehicleFormSchema, type CreateVehicleFormValues } from "@/lib/vehicles-schema";
 
 export interface CreateVehicleActionResult {
   ok: true;

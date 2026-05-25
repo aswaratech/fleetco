@@ -63,7 +63,10 @@ export type CreateVehicleFormValues = z.infer<typeof CreateVehicleFormSchema>;
 // Display-friendly enum labels. The page-level vehicles list uses the
 // same mapping (apps/web/src/app/vehicles/page.tsx); promoting these to
 // a shared module is deferred until a third surface needs them.
-export const VEHICLE_KIND_OPTIONS: readonly { value: (typeof VEHICLE_KINDS)[number]; label: string }[] = [
+export const VEHICLE_KIND_OPTIONS: readonly {
+  value: (typeof VEHICLE_KINDS)[number];
+  label: string;
+}[] = [
   { value: "TRUCK", label: "Truck" },
   { value: "TIPPER", label: "Tipper" },
   { value: "EXCAVATOR", label: "Excavator" },

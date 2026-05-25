@@ -32,8 +32,7 @@ const PRISMA_UNIQUE_VIOLATION = "P2002";
 
 function isPrismaUniqueViolation(error: unknown): error is Prisma.PrismaClientKnownRequestError {
   return (
-    error instanceof Prisma.PrismaClientKnownRequestError &&
-    error.code === PRISMA_UNIQUE_VIOLATION
+    error instanceof Prisma.PrismaClientKnownRequestError && error.code === PRISMA_UNIQUE_VIOLATION
   );
 }
 
@@ -163,11 +162,9 @@ export class VehiclesService {
     let derivedRetiredAt: Date | null | undefined;
     if (!clientProvidedRetiredAt && input.status !== undefined) {
       const transitioningIntoOutOfFleet =
-        OUT_OF_FLEET_STATUSES.has(input.status) &&
-        !OUT_OF_FLEET_STATUSES.has(existing.status);
+        OUT_OF_FLEET_STATUSES.has(input.status) && !OUT_OF_FLEET_STATUSES.has(existing.status);
       const transitioningOutOfOutOfFleet =
-        !OUT_OF_FLEET_STATUSES.has(input.status) &&
-        OUT_OF_FLEET_STATUSES.has(existing.status);
+        !OUT_OF_FLEET_STATUSES.has(input.status) && OUT_OF_FLEET_STATUSES.has(existing.status);
       if (transitioningIntoOutOfFleet) {
         derivedRetiredAt = new Date();
       } else if (transitioningOutOfOutOfFleet) {
