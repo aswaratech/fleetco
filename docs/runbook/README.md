@@ -16,6 +16,8 @@ The business continuity plan lives at `docs/runbook/business-continuity.md`. It 
 
 The orchestration loop design lives at `docs/runbook/orchestration-loop-design.md` and the daily-operator reference lives at `docs/runbook/orchestration-loop-operator-guide.md`. These document the autonomous multi-ticket execution pattern adopted in ADR-0022: how the loop honors discipline gates, how it auto-answers mid-session questions, how it blocks destructive Bash, how it strips fabricated operator-confirmation preambles, and how the operator launches, monitors, halts, and resumes the loop via Slack. The design is verified by the 113 unit tests in `scripts/orchestration/tests/`; the operator guide is verified by running the loop end-to-end on a benign mock kickoff at the start of each program.
 
+The API error-mapping convention lives at `docs/runbook/api-error-mapping.md`. It documents how Prisma error codes (P2002, P2003, P2025) translate to HTTP status codes (409, 404) across modules, how zod validation failures surface as 400, and how new modules should implement the mapping without inventing per-module response shapes. Introduced during the Vehicles write-path slice (iter 2) when the first unique-constraint violation needed an honest 4xx response; updated whenever the mapping table changes.
+
 ## Procedures we know we will need
 
 The following procedures will be needed at known points in the project's life. We create stubs now so that the file paths exist and future PRs can fill them in rather than inventing path conventions on the fly.

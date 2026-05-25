@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
+import { Button } from "@/components/ui/button";
 import {
   Table,
   TableBody,
@@ -104,6 +105,12 @@ export default async function VehiclesPage() {
               {data.total === 0 ? "No vehicles registered." : `${data.total} registered.`}
             </p>
           </div>
+          {/* Primary action right-aligned per DESIGN.md §"Page header".
+              `asChild` lets the Button render as a Next.js <Link>, which
+              gets us client-side navigation without a wrapping <a>. */}
+          <Button asChild>
+            <Link href="/vehicles/new">New vehicle</Link>
+          </Button>
         </header>
 
         <section className="border-border-subtle bg-surface-raised rounded border shadow-sm">
