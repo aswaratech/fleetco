@@ -130,9 +130,19 @@ export default async function VehiclesPage() {
               </TableHeader>
               <TableBody>
                 {data.items.map((v) => (
-                  <TableRow key={v.id}>
+                  // Stretched-link pattern: the row is `relative`, the
+                  // first cell hosts a Link with `before:absolute
+                  // before:inset-0` so the whole row reads as one
+                  // clickable surface while preserving valid table
+                  // HTML and a single tab stop per row. (Iter 3.)
+                  <TableRow key={v.id} className="relative cursor-pointer">
                     <TableCell className="font-mono text-text-primary">
-                      {v.registrationNumber}
+                      <Link
+                        href={`/vehicles/${v.id}`}
+                        className="before:absolute before:inset-0 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-border-focus"
+                      >
+                        {v.registrationNumber}
+                      </Link>
                     </TableCell>
                     <TableCell className="text-text-secondary">
                       {KIND_LABELS[v.kind] ?? v.kind}
