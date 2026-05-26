@@ -110,6 +110,35 @@ pnpm --filter @fleetco/web dev
 #     admin@fleetco.local". Click Sign out → back to /login.
 ```
 
+## Running API tests locally
+
+The API test suite runs against a real Postgres database named `fleetco_test` (separate from the `fleetco` dev database). The schema is brought up once per `pnpm --filter @fleetco/api test` invocation by a Vitest global setup that runs `prisma migrate deploy`; each test resets the data with `TRUNCATE ... RESTART IDENTITY CASCADE`. See ADR-0023 for the rationale.
+
+```bash
+# 1. Create the test database on the local Postgres. One-time per machine.
+#    The compose Postgres user is a superuser, so CREATE DATABASE works.
+docker compose exec postgres psql -U fleetco -d fleetco -c "CREATE DATABASE fleetco_test;"
+
+# 2. Copy the test env template. The default targets host port 5432; if you
+#    overrode POSTGRES_PORT (see "Port 5432 already in use" below), edit
+#    apps/api/.env.test to match. .env.test is gitignored.
+cp apps/api/.env.test.example apps/api/.env.test
+# If POSTGRES_PORT=55432, change the DATABASE_URL host port in apps/api/.env.test.
+
+# 3. Run the suite. ~2-3 seconds on a warm machine; under the 30s budget per
+#    ADR-0023 §5 so it can join the pre-commit gate list.
+pnpm --filter @fleetco/api test
+# Expected: "Test Files 4 passed (4)  Tests N passed (N)" in 2-3s.
+```
+
+The full pre-commit gate is now:
+
+```bash
+pnpm format && pnpm format:check && pnpm lint && pnpm typecheck && pnpm --filter @fleetco/api test
+```
+
+CI runs the same suite against a `postgis/postgis:16-3.5` service container; see `.github/workflows/ci.yml`'s `services: postgres` block.
+
 ## What can go wrong
 
 ### Port 5432 (Postgres) is already in use
@@ -201,3 +230,4 @@ Docker Desktop sometimes leaves containers in a confused state across a host res
 
 - **2026-05-21** — initial draft; verified on macOS (Apple Silicon) running Docker Desktop with sibling-Docker projects on the canonical ports (port overrides documented above were used). Postgres came up via `imresamu/postgis:16-3.5`; Redis via `redis:7-alpine`; `prisma migrate dev` applied the baseline migration creating the PostGIS extension; both health endpoints returned the expected JSON; the readiness probe correctly transitioned to 503 when the redis container was stopped and back to 200 when it was started.
 - **2026-05-21** (session 11) — extended with the auth-flow procedure for Ticket 10. The full smoke test (admin seed → `/me` 401 → sign-in 200 + cookie → `/me` 200 → sign-out → `/me` 401) passed against the same machine with `PORT=3011`, `POSTGRES_PORT=55432`, `REDIS_PORT=56379` overrides. The web dev server on `:3000` correctly redirected unauthenticated `/` to `/login` and, after sign-in, rendered the gated home with the admin's email.
+- **2026-05-26** (iter 5) — extended with the "Running API tests locally" section as part of the API test framework discharge (ADR-0023). The full suite (39 tests across `auth.guard`, `health.controller`, `vehicles.service`, `vehicles.controller`) ran in ~2.2s on the same machine with the `POSTGRES_PORT=55432` override; `fleetco_test` was created via the documented one-time `CREATE DATABASE` and `apps/api/.env.test` overrode the host port to 55432 to match.

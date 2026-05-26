@@ -8,6 +8,7 @@
     "build": "nest build",
     "start": "node dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:studio": "prisma studio",
@@ -34,11 +35,15 @@
   },
   "devDependencies": {
     "@nestjs/cli": "^11.0.0",
+    "@nestjs/testing": "^11.1.24",
+    "@swc/core": "^1.15.40",
     "@types/express": "^5.0.6",
     "@types/node": "^24.0.0",
     "pino-pretty": "^11.0.0",
     "prisma": "^6.0.0",
     "tsx": "^4.22.3",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "unplugin-swc": "^1.5.9",
+    "vitest": "^3.2.4"
   }
 }

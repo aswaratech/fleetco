@@ -15,6 +15,29 @@ jobs:
   ci:
     name: lint + format + typecheck + tests
     runs-on: ubuntu-latest
+    # Postgres service for the API test suite. See ADR-0023 §6 for the
+    # database-strategy rationale. The official postgis/postgis image is
+    # used here (amd64-only, which matches GitHub Actions runners); the
+    # local dev compose uses imresamu/postgis instead because that image
+    # is multi-arch. The two images publish compatible 16-3.5 builds, so
+    # the schema and migrations are identical in CI and locally.
+    services:
+      postgres:
+        image: postgis/postgis:16-3.5
+        env:
+          POSTGRES_USER: fleetco
+          POSTGRES_PASSWORD: fleetco
+          POSTGRES_DB: fleetco_test
+        ports:
+          - 5432:5432
+        # Health check matches docker-compose.yml's pg_isready pattern so
+        # subsequent steps wait until Postgres is ready to accept
+        # connections before they try.
+        options: >-
+          --health-cmd "pg_isready -U fleetco -d fleetco_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -60,6 +83,23 @@ jobs:
         env:
           DATABASE_URL: postgresql://placeholder:placeholder@localhost:5432/placeholder
         run: pnpm --filter @fleetco/api exec prisma validate
+
+      - name: API tests (Vitest, NestJS unit + integration)
+        # Vitest's global-setup hook (apps/api/test/global-setup.ts) runs
+        # `prisma migrate deploy` against this DATABASE_URL on the first
+        # invocation, so a separate migrate step is not needed. Env vars
+        # below match ADR-0023 §6's CI defaults; vitest.config.ts's
+        # test.env block consumes them via the same fallback chain that
+        # local dev uses.
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://fleetco:fleetco@localhost:5432/fleetco_test?schema=public
+          REDIS_URL: redis://localhost:6379
+          BETTER_AUTH_SECRET: ci-test-secret-32-bytes-minimum-aaaa
+          BETTER_AUTH_URL: http://localhost:3001
+          CORS_ORIGIN: http://localhost:3000
+          LOG_LEVEL: fatal
+        run: pnpm --filter @fleetco/api test
 
       - name: Web tests (Vitest, includes design-token-drift)
         run: pnpm --filter @fleetco/web test
