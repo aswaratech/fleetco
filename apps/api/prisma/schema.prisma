@@ -31,6 +31,7 @@ model User {
   sessions        Session[]
   accounts        Account[]
   vehiclesCreated Vehicle[] @relation("VehicleCreatedBy")
+  driversCreated  Driver[]  @relation("DriverCreatedBy")
 
   @@map("user")
 }
@@ -155,4 +156,98 @@ model Vehicle {
   @@index([kind])
   @@index([createdById])
   @@map("vehicle")
+}
+
+// Drivers module. Owned by apps/api/src/modules/drivers/ per ADR-0001.
+// Second Phase 1 vertical slice per the roadmap; a Driver is one of the
+// two FK participants that the Trip aggregate references (the other is
+// Vehicle, ADR-0003). Iter 6 ships the read path only; write path, the
+// license-expiry workflow, and Driver→Vehicle assignment are deferred
+// to later iters.
+//
+// Tier annotations per ADR-0013: driver records mix Tier 2 PII
+// (fullName, phone, dateOfBirth, licenseNumber) with Tier 3 operational
+// fields (status, hiredAt, licenseExpiresAt). The Tier 2 fields are
+// excluded from default logging (pino redact in apps/api/src/app.module.ts
+// already covers *.licenseNumber, *.phoneNumber, *.driverName — added
+// pre-emptively before the Drivers slice existed).
+
+// Nepal Department of Transport Management license categories. The
+// four entries cover the heavy-construction-fleet use cases:
+//   - LMV   light motor vehicle (cars/jeeps/vans for site supervisors)
+//   - HMV   heavy motor vehicle (general heavy vehicle authorization)
+//   - HTV   heavy transport vehicle (goods trucks and tippers — most of
+//           the fleet's working drivers)
+//   - HPMV  heavy passenger motor vehicle (buses and similar)
+// Additional DoTM categories (LMV-NT, MGV, HGMV) are deliberately
+// omitted in Phase 1 because they are uncommon in a heavy-construction
+// fleet and adding them later is a non-breaking enum extension. The
+// taxonomy is documented in docs/glossary.md.
+enum LicenseClass {
+  LMV
+  HMV
+  HTV
+  HPMV
+
+  @@map("license_class")
+}
+
+enum DriverStatus {
+  ACTIVE
+  ON_LEAVE
+  SUSPENDED
+  TERMINATED
+
+  @@map("driver_status")
+}
+
+model Driver {
+  id               String       @id @default(cuid())
+  /// Tier 2 PII per ADR-0013 — driver's legal full name. Pino redact
+  /// path `*.driverName` was added in iter 0 in anticipation of this
+  /// slice; the field is still excluded from default logging.
+  fullName         String
+  /// Tier 2 PII per ADR-0013 — DoTM-issued license number. Unique
+  /// across the fleet so a duplicate registration is rejected at the
+  /// database layer (surfaces as P2002 → HTTP 409 via the service per
+  /// docs/runbook/api-error-mapping.md). Pino redact path
+  /// `*.licenseNumber` covers it.
+  licenseNumber    String       @unique
+  licenseClass     LicenseClass
+  /// Tier 2 PII per ADR-0013 — phone number, stored loosely (no E.164
+  /// normalization) because Nepali numbers come in many shapes and the
+  /// fleet has both Nepali and occasional foreign numbers in practice.
+  /// Pino redact path `*.phoneNumber` covers it.
+  phone            String
+  /// Tier 2 PII per ADR-0013 — optional date of birth. Stored as ISO/UTC
+  /// per CLAUDE.md; BS-calendar rendering arrives with the future
+  /// <NepaliDate> component on the web side.
+  dateOfBirth      DateTime?
+  /// Tier 3 per ADR-0013 — date the driver joined the fleet.
+  hiredAt          DateTime
+  /// Tier 3 per ADR-0013 — license expiry date. License-expiry alerting
+  /// is a later-iter feature; the field is captured today so the
+  /// alerting can be added without a schema change.
+  licenseExpiresAt DateTime
+  status           DriverStatus @default(ACTIVE)
+  /// Tier 3 per ADR-0013 — date the driver was terminated. Nullable;
+  /// populated when status transitions to TERMINATED. Mirrors
+  /// Vehicle.retiredAt in shape and in the transition rule encoded by
+  /// the service: status → TERMINATED auto-sets terminatedAt (to the
+  /// client's value if provided, else now()); status transitioning out
+  /// of TERMINATED clears it; explicit terminatedAt in PATCH always
+  /// wins. (Iter 6 ships only the read path, but the column is in place
+  /// so the iter-7 write path lands without a follow-up migration.)
+  terminatedAt     DateTime?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+  /// References the User who created the record (ADR-0021 admin user).
+  /// Audit field; restrict deletion of users with drivers (Restrict).
+  createdById      String
+  createdBy        User         @relation("DriverCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@index([status])
+  @@index([licenseClass])
+  @@index([createdById])
+  @@map("driver")
 }
