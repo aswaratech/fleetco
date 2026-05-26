@@ -192,12 +192,8 @@ describe("TripsService (integration, real Postgres)", () => {
         expect(item.vehicle.registrationNumber).toBeTruthy();
         expect(item.driver.fullName).toBeTruthy();
         // Slim projection — these wider fields should not be present.
-        expect(
-          (item.vehicle as unknown as { kind?: unknown }).kind,
-        ).toBeUndefined();
-        expect(
-          (item.driver as unknown as { licenseClass?: unknown }).licenseClass,
-        ).toBeUndefined();
+        expect((item.vehicle as unknown as { kind?: unknown }).kind).toBeUndefined();
+        expect((item.driver as unknown as { licenseClass?: unknown }).licenseClass).toBeUndefined();
       }
     });
 

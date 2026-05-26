@@ -123,8 +123,7 @@ export default async function TripDetailPage({
               Trip · {trip.vehicle.registrationNumber}
             </h1>
             <p className="text-text-muted text-sm">
-              {statusLabel} ·{" "}
-              {trip.startedAt ? formatDateTime(trip.startedAt) : "Not yet started"}
+              {statusLabel} · {trip.startedAt ? formatDateTime(trip.startedAt) : "Not yet started"}
             </p>
           </div>
           {/* Iter 8 ships the read path; the Edit / Cancel CTAs land
@@ -147,10 +146,7 @@ export default async function TripDetailPage({
                 </Link>
               }
             />
-            <DetailRow
-              label="Make / Model"
-              value={`${trip.vehicle.make} ${trip.vehicle.model}`}
-            />
+            <DetailRow label="Make / Model" value={`${trip.vehicle.make} ${trip.vehicle.model}`} />
             <DetailRow label="Year" value={String(trip.vehicle.year)} numeric />
             <DetailRow label="Kind" value={trip.vehicle.kind} />
           </dl>
@@ -186,11 +182,7 @@ export default async function TripDetailPage({
             <DetailRow label="Status" value={statusLabel} />
             <DetailRow label="Started" value={formatDateTime(trip.startedAt)} />
             <DetailRow label="Ended" value={formatDateTime(trip.endedAt)} />
-            <DetailRow
-              label="Notes"
-              value={trip.notes ?? "—"}
-              className="sm:col-span-2"
-            />
+            <DetailRow label="Notes" value={trip.notes ?? "—"} className="sm:col-span-2" />
           </dl>
         </section>
 
@@ -199,11 +191,7 @@ export default async function TripDetailPage({
             Odometer
           </h2>
           <dl className="grid grid-cols-1 gap-x-8 gap-y-4 sm:grid-cols-2">
-            <DetailRow
-              label="Start"
-              value={formatKm(trip.startOdometerKm)}
-              numeric
-            />
+            <DetailRow label="Start" value={formatKm(trip.startOdometerKm)} numeric />
             <DetailRow label="End" value={formatKm(trip.endOdometerKm)} numeric />
             <DetailRow
               label="Distance"

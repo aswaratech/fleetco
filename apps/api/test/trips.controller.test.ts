@@ -1,8 +1,4 @@
-import {
-  BadRequestException,
-  NotFoundException,
-  type INestApplication,
-} from "@nestjs/common";
+import { BadRequestException, NotFoundException, type INestApplication } from "@nestjs/common";
 import { Test, type TestingModule } from "@nestjs/testing";
 import { TripStatus, type Vehicle, type Driver } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";

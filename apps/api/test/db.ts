@@ -26,15 +26,7 @@ import { PrismaClient } from "@prisma/client";
 // glance (trip → driver/vehicle → user; session/account/verification →
 // user). The actual TRUNCATE uses CASCADE so order has no effect on
 // correctness.
-const TABLES = [
-  "trip",
-  "driver",
-  "vehicle",
-  "session",
-  "account",
-  "verification",
-  "user",
-] as const;
+const TABLES = ["trip", "driver", "vehicle", "session", "account", "verification", "user"] as const;
 
 export async function resetDb(prisma: PrismaClient): Promise<void> {
   // Quote each table name so Postgres treats it case-sensitively and a
