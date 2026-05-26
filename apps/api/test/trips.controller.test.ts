@@ -6,10 +6,15 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest"
 import { ZodValidationPipe } from "../src/common/zod-validation.pipe";
 import { AuthGuard } from "../src/modules/auth/auth.guard";
 import { AUTH } from "../src/modules/auth/auth.tokens";
+import type { AuthenticatedRequest } from "../src/modules/auth/auth.types";
 import { PrismaService } from "../src/modules/prisma/prisma.service";
 import { TripsController } from "../src/modules/trips/trips.controller";
 import { TripsService } from "../src/modules/trips/trips.service";
-import { ListTripsQuerySchema } from "../src/modules/trips/trips.schemas";
+import {
+  CreateTripSchema,
+  ListTripsQuerySchema,
+  UpdateTripSchema,
+} from "../src/modules/trips/trips.schemas";
 import { resetDb } from "./db";
 import { seedDriver, seedTrip, seedUser, seedVehicle } from "./fixtures/trip";
 
@@ -325,6 +330,358 @@ describe("TripsController.list / getById (integration, real Prisma)", () => {
     // appears so a future message refactor that dropped it would fail.
     try {
       await controller.getById("nonexistent-id");
+      throw new Error("expected NotFoundException");
+    } catch (error) {
+      expect(error).toBeInstanceOf(NotFoundException);
+      expect((error as NotFoundException).message).toContain("nonexistent-id");
+    }
+  });
+});
+
+describe("TripsController write-path schemas (iter-9 contract)", () => {
+  // Pipe-level tests for CreateTripSchema and UpdateTripSchema. Same
+  // cheap pure-code approach as the iter-8 list-query tests above:
+  // instantiate ZodValidationPipe directly, no TestingModule. The
+  // runbook's api-error-mapping table commits ZodError →
+  // BadRequestException → HTTP 400; these tests pin each branch.
+
+  describe("CreateTripSchema", () => {
+    const createPipe = new ZodValidationPipe(CreateTripSchema);
+
+    test("bogus body key → BadRequestException (.strict() defense)", () => {
+      // The schema is `.strict()` so a client cannot smuggle
+      // `createdById` or `id` through the POST body. Same defense the
+      // runbook lists for the list query and the Drivers/Vehicles
+      // create surfaces.
+      expect(() =>
+        createPipe.transform({
+          vehicleId: "vh_1",
+          driverId: "dr_1",
+          status: "PLANNED",
+          createdById: "smuggled",
+        }),
+      ).toThrow(BadRequestException);
+    });
+
+    test("missing required field (no vehicleId) → BadRequestException", () => {
+      expect(() =>
+        createPipe.transform({
+          driverId: "dr_1",
+          status: "PLANNED",
+        }),
+      ).toThrow(BadRequestException);
+    });
+
+    test("invalid status enum → BadRequestException", () => {
+      expect(() =>
+        createPipe.transform({
+          vehicleId: "vh_1",
+          driverId: "dr_1",
+          status: "NONSENSE",
+        }),
+      ).toThrow(BadRequestException);
+    });
+
+    test("COMPLETED without start/end fields → BadRequestException (cross-field)", () => {
+      // superRefine runs validateTripCrossFields; COMPLETED requires
+      // all four start/end fields. The runbook commits to surfacing
+      // these as 400 with a per-field message rather than a 500 from
+      // Prisma later.
+      expect(() =>
+        createPipe.transform({
+          vehicleId: "vh_1",
+          driverId: "dr_1",
+          status: "COMPLETED",
+        }),
+      ).toThrow(BadRequestException);
+    });
+
+    test("COMPLETED with end before start → BadRequestException (cross-field)", () => {
+      // The cross-field rule rejects endedAt < startedAt. Pinned to
+      // catch a refactor that dropped the ordering check.
+      expect(() =>
+        createPipe.transform({
+          vehicleId: "vh_1",
+          driverId: "dr_1",
+          status: "COMPLETED",
+          startedAt: "2026-01-06T18:00:00Z",
+          endedAt: "2026-01-05T08:00:00Z",
+          startOdometerKm: 80000,
+          endOdometerKm: 80100,
+        }),
+      ).toThrow(BadRequestException);
+    });
+
+    test("valid PLANNED body parses through (no odometer / no timestamps)", () => {
+      const parsed = createPipe.transform({
+        vehicleId: "vh_1",
+        driverId: "dr_1",
+        status: "PLANNED",
+      });
+      expect(parsed.vehicleId).toBe("vh_1");
+      expect(parsed.status).toBe("PLANNED");
+    });
+
+    test("valid COMPLETED body parses through with all four start/end fields", () => {
+      const parsed = createPipe.transform({
+        vehicleId: "vh_1",
+        driverId: "dr_1",
+        status: "COMPLETED",
+        startedAt: "2026-01-05T08:00:00Z",
+        endedAt: "2026-01-06T18:00:00Z",
+        startOdometerKm: 80000,
+        endOdometerKm: 80350,
+        notes: "Pokhara delivery",
+      });
+      expect(parsed.status).toBe("COMPLETED");
+      expect(parsed.startOdometerKm).toBe(80000);
+      expect(parsed.endOdometerKm).toBe(80350);
+    });
+  });
+
+  describe("UpdateTripSchema", () => {
+    const updatePipe = new ZodValidationPipe(UpdateTripSchema);
+
+    test("bogus body key (e.g. id) → BadRequestException", () => {
+      // The .strict() defense applies on PATCH too: a client cannot
+      // smuggle `id` or `createdById` through the update body.
+      expect(() => updatePipe.transform({ id: "smuggled" })).toThrow(BadRequestException);
+    });
+
+    test("single-field PATCH (just notes) parses through", () => {
+      const parsed = updatePipe.transform({ notes: "Updated note" });
+      expect(parsed.notes).toBe("Updated note");
+    });
+
+    test("explicit notes: null is accepted (the 'clear' branch)", () => {
+      // notes is `.nullable().optional()` so an operator can clear a
+      // previously-set value by sending null explicitly. The service
+      // distinguishes "client provided null" from "client did not
+      // mention" via hasOwnProperty; both branches need to parse
+      // through here.
+      const parsed = updatePipe.transform({ notes: null });
+      expect(parsed.notes).toBeNull();
+    });
+
+    test("invalid odometer (negative) → BadRequestException", () => {
+      expect(() => updatePipe.transform({ startOdometerKm: -1 })).toThrow(BadRequestException);
+    });
+
+    test("invalid datetime string → BadRequestException", () => {
+      expect(() => updatePipe.transform({ startedAt: "not-a-datetime" })).toThrow(
+        BadRequestException,
+      );
+    });
+  });
+});
+
+describe("TripsController.create / update / remove (integration, real Prisma)", () => {
+  // Full controller-level integration for the iter-9 write path. Same
+  // TestingModule shape as the list integration above: real
+  // TripsController + TripsService + PrismaService, AuthGuard
+  // overridden to pass-through, AUTH provider stubbed. The kickoff
+  // (iter-9 deliverable 4) is the spec under test here — HTTP status
+  // codes are checked via the @HttpCode decorator's effect indirectly
+  // (we call controller methods directly, not through an HTTP server),
+  // so the assertions focus on the response body shape, the NotFound /
+  // BadRequest paths, and the side effects (DB row created / updated /
+  // removed).
+
+  let module: TestingModule;
+  let app: INestApplication;
+  let prisma: PrismaService;
+  let controller: TripsController;
+  let service: TripsService;
+  let adminId: string;
+  let vehicle: Vehicle;
+  let driver: Driver;
+  let fakeRequest: AuthenticatedRequest;
+
+  beforeAll(async () => {
+    module = await Test.createTestingModule({
+      controllers: [TripsController],
+      providers: [
+        TripsService,
+        PrismaService,
+        { provide: AUTH, useValue: { api: { getSession: () => null } } },
+      ],
+    })
+      .overrideGuard(AuthGuard)
+      .useValue({ canActivate: () => true })
+      .compile();
+
+    app = module.createNestApplication();
+    await app.init();
+
+    prisma = module.get(PrismaService);
+    service = module.get(TripsService);
+    controller = module.get(TripsController);
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  beforeEach(async () => {
+    await resetDb(prisma);
+    adminId = await seedUser(prisma);
+    vehicle = await seedVehicle(prisma, adminId);
+    driver = await seedDriver(prisma, adminId);
+    // The controller reads `request.session.user.id`. In production the
+    // AuthGuard populates request.session per ADR-0021; here the guard
+    // is overridden, so we hand the controller a minimal fake. Cast is
+    // necessary because AuthenticatedRequest extends express.Request,
+    // which we don't construct in full.
+    fakeRequest = { session: { user: { id: adminId } } } as unknown as AuthenticatedRequest;
+  });
+
+  test("create() persists the trip with createdById from the session (HTTP 201)", async () => {
+    // The body shape here matches what ZodValidationPipe would emit
+    // after parsing the wire JSON. The kickoff spec: createdById comes
+    // from the session, not the body (the schema's .strict() rejects
+    // it). The @HttpCode(HttpStatus.CREATED) decorator on the route
+    // ensures the framework returns 201; calling the controller method
+    // directly bypasses that, but the path is exercised via the
+    // declared signature.
+    const created = await controller.create(
+      {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        status: TripStatus.PLANNED,
+      },
+      fakeRequest,
+    );
+    expect(created.id).toBeTruthy();
+    expect(created.status).toBe(TripStatus.PLANNED);
+    expect(created.createdById).toBe(adminId);
+    // Detail-shape contract: the full nested Vehicle and Driver
+    // objects come back on the create response too (the service
+    // returns via DETAIL_INCLUDE). Pinned so a refactor that returned
+    // the slim list projection on create would fail.
+    expect(created.vehicle.id).toBe(vehicle.id);
+    expect(created.driver.id).toBe(driver.id);
+
+    const refetched = await prisma.trip.findUnique({ where: { id: created.id } });
+    expect(refetched?.createdById).toBe(adminId);
+  });
+
+  test("create() with unknown vehicleId → BadRequestException naming vehicle", async () => {
+    // P2003 → BadRequestException with the FK name in the message.
+    // The runbook commits to "vehicle" being mentioned so the web
+    // client can surface a per-field error to the operator.
+    try {
+      await controller.create(
+        {
+          vehicleId: "nonexistent-vehicle",
+          driverId: driver.id,
+          status: TripStatus.PLANNED,
+        },
+        fakeRequest,
+      );
+      throw new Error("expected BadRequestException");
+    } catch (error) {
+      expect(error).toBeInstanceOf(BadRequestException);
+      expect((error as BadRequestException).message.toLowerCase()).toContain("vehicle");
+    }
+  });
+
+  test("update() returns the updated trip on success", async () => {
+    const before = await seedTrip(prisma, {
+      vehicleId: vehicle.id,
+      driverId: driver.id,
+      createdById: adminId,
+      status: TripStatus.PLANNED,
+      notes: "original note",
+    });
+
+    const after = await controller.update(before.id, { notes: "Updated note" });
+    expect(after.id).toBe(before.id);
+    expect(after.notes).toBe("Updated note");
+    // Other fields stay put — diff-PATCH semantics confirmed at the
+    // controller level.
+    expect(after.status).toBe(TripStatus.PLANNED);
+  });
+
+  test("update() applying a legal status transition returns the new status", async () => {
+    // PLANNED → IN_PROGRESS requires startedAt + startOdometerKm
+    // (the cross-field rule on the merged shape). The service applies
+    // the validator and writes both fields.
+    const before = await seedTrip(prisma, {
+      vehicleId: vehicle.id,
+      driverId: driver.id,
+      createdById: adminId,
+      status: TripStatus.PLANNED,
+    });
+
+    const after = await controller.update(before.id, {
+      status: TripStatus.IN_PROGRESS,
+      startedAt: new Date("2026-02-01T08:00:00Z").toISOString(),
+      startOdometerKm: 80000,
+    });
+    expect(after.status).toBe(TripStatus.IN_PROGRESS);
+    expect(after.startOdometerKm).toBe(80000);
+  });
+
+  test("update() with illegal status transition throws BadRequestException", async () => {
+    // PLANNED → COMPLETED is illegal (must go via IN_PROGRESS). The
+    // service throws BadRequestException; Nest's default exception
+    // filter renders this as HTTP 400.
+    const before = await seedTrip(prisma, {
+      vehicleId: vehicle.id,
+      driverId: driver.id,
+      createdById: adminId,
+      status: TripStatus.PLANNED,
+    });
+
+    try {
+      await controller.update(before.id, {
+        status: TripStatus.COMPLETED,
+        startedAt: new Date("2026-02-01T08:00:00Z").toISOString(),
+        endedAt: new Date("2026-02-02T18:00:00Z").toISOString(),
+        startOdometerKm: 80000,
+        endOdometerKm: 80350,
+      });
+      throw new Error("expected BadRequestException");
+    } catch (error) {
+      expect(error).toBeInstanceOf(BadRequestException);
+    }
+  });
+
+  test("update() of an unknown id throws NotFoundException (HTTP 404)", async () => {
+    try {
+      await controller.update("nonexistent-id", { notes: "X" });
+      throw new Error("expected NotFoundException");
+    } catch (error) {
+      expect(error).toBeInstanceOf(NotFoundException);
+      expect((error as NotFoundException).message).toContain("nonexistent-id");
+    }
+  });
+
+  test("remove() deletes the row and resolves without a body (HTTP 204)", async () => {
+    const created = await service.create(
+      {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        status: TripStatus.PLANNED,
+      },
+      adminId,
+    );
+
+    // @HttpCode(HttpStatus.NO_CONTENT) is applied at the decorator
+    // level; calling the method directly we only see the resolved
+    // value (void). The HTTP status is verified indirectly via the
+    // method's declared return type — if a refactor changed remove()
+    // to return a body, the type system would catch it.
+    const result = await controller.remove(created.id);
+    expect(result).toBeUndefined();
+
+    const refetched = await prisma.trip.findUnique({ where: { id: created.id } });
+    expect(refetched).toBeNull();
+  });
+
+  test("remove() of an unknown id throws NotFoundException (HTTP 404)", async () => {
+    try {
+      await controller.remove("nonexistent-id");
       throw new Error("expected NotFoundException");
     } catch (error) {
       expect(error).toBeInstanceOf(NotFoundException);
