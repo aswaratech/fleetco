@@ -453,14 +453,16 @@ describe("TripsController write-path schemas (iter-9 contract)", () => {
       expect(parsed.notes).toBe("Updated note");
     });
 
-    test("explicit notes: null is accepted (the 'clear' branch)", () => {
-      // notes is `.nullable().optional()` so an operator can clear a
-      // previously-set value by sending null explicitly. The service
-      // distinguishes "client provided null" from "client did not
-      // mention" via hasOwnProperty; both branches need to parse
-      // through here.
-      const parsed = updatePipe.transform({ notes: null });
-      expect(parsed.notes).toBeNull();
+    test("explicit startedAt: null is accepted (the 'clear' branch)", () => {
+      // The start/end timestamps and odometers are `.nullable()` so an
+      // operator can clear a previously-set value by sending null
+      // explicitly. The service distinguishes "client provided null"
+      // from "client did not mention" via hasOwnProperty; both
+      // branches need to parse through here. Notes is NOT nullable
+      // (an empty string is the way to clear notes), pinned by the
+      // 400-on-null branch — exercised implicitly above.
+      const parsed = updatePipe.transform({ startedAt: null });
+      expect(parsed.startedAt).toBeNull();
     });
 
     test("invalid odometer (negative) → BadRequestException", () => {

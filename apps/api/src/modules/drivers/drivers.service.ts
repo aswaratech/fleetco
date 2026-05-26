@@ -263,34 +263,48 @@ export class DriversService {
   }
 
   /**
-   * Hard delete. Acceptable in iter 7 because no Trip aggregate exists
-   * yet — once Trips reference Driver by id, hard-deleting a driver
-   * who has trips would either orphan the trips (data loss) or fail
-   * at the DB layer (foreign-key Restrict → Prisma P2003, which we
-   * would then map to HTTP 409 the same way P2002 is mapped today).
-   * The decision between "switch to soft-delete" and "block-when-
-   * referenced" is deferred until Trips lands and we see the
-   * dependency direction in practice. The controller-side comment on
-   * `remove()` carries the same plan so a reader of the public
-   * surface finds it without opening this file.
+   * Hard delete. Returns true on delete, false when the driver was not
+   * found, so the controller can shape the 404 response.
    *
-   * Returns true on delete, false when the driver was not found, so
-   * the controller can shape the 404 response (api-error-mapping
-   * runbook entry for P2025).
+   * Iter 9 paid off the tech-debt entry "Driver delete must map P2003
+   * to HTTP 409 once Trip write path lands" (docs/tech-debt.md). The
+   * schema's onDelete: Restrict on Trip.driverId means Prisma raises
+   * P2003 (FK constraint violation) when the operator tries to delete
+   * a Driver that still has referencing Trips. We count the
+   * referencing rows and translate that into ConflictException
+   * (HTTP 409) with the count in the message, so the operator sees a
+   * clear "this driver has N trips" message rather than a 500.
+   *
+   * The "block-when-referenced" path (over soft-delete) was the right
+   * call here in practice: a driver with historical trips is a
+   * different person from a never-existed driver, and the audit value
+   * of "this row was deleted on Date X" is lower than the simplicity
+   * of "the row exists or it doesn't". Soft-delete remains an option
+   * if a future audit-trail requirement reverses the calculus.
    */
   async delete(id: string): Promise<boolean> {
     try {
       await this.prisma.driver.delete({ where: { id } });
       return true;
     } catch (error) {
-      if (
-        error instanceof Prisma.PrismaClientKnownRequestError &&
+      if (error instanceof Prisma.PrismaClientKnownRequestError) {
         // P2025 = "An operation failed because it depends on one or
         // more records that were required but not found." Prisma raises
         // this when delete targets a non-existent row.
-        error.code === "P2025"
-      ) {
-        return false;
+        if (error.code === "P2025") {
+          return false;
+        }
+        // P2003 = FK constraint violation on the referencing side. The
+        // referencing model (Trip) declares onDelete: Restrict on
+        // driverId per ADR-0003; this branch fires when the operator
+        // tries to delete a Driver who still has Trips. We count the
+        // referencing rows so the message names the obstacle precisely.
+        if (error.code === "P2003") {
+          const tripCount = await this.prisma.trip.count({ where: { driverId: id } });
+          throw new ConflictException(
+            `Cannot delete driver: ${tripCount} trip${tripCount === 1 ? "" : "s"} reference this driver.`,
+          );
+        }
       }
       throw error;
     }

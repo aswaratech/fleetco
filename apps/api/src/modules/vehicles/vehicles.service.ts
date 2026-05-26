@@ -254,30 +254,45 @@ export class VehiclesService {
   }
 
   /**
-   * Hard delete. Acceptable in iter 2 because no Trip aggregate exists
-   * yet (ADR-0003's onDelete: Restrict applies to createdBy → User, not
-   * Vehicle → its dependants). Returns true on delete, false when the
-   * vehicle was not found, so the controller can shape the 404 response.
+   * Hard delete. Returns true on delete, false when the vehicle was not
+   * found, so the controller can shape the 404 response.
    *
-   * A future slice (Trips) will likely change this method: either to a
-   * soft delete (add `deletedAt` to the schema and filter on read) or
-   * to a block-when-referenced check that throws ConflictException if
-   * any Trip references this Vehicle. The decision is deferred until
-   * Trips lands and we know the dependency direction in practice.
+   * Iter 9 paid off the tech-debt entry "Vehicle delete must map P2003
+   * to HTTP 409 once Trip write path lands" (docs/tech-debt.md). The
+   * schema's onDelete: Restrict on Trip.vehicleId means Prisma raises
+   * P2003 (FK constraint violation) when the operator tries to delete
+   * a Vehicle that still has referencing Trips. We count the
+   * referencing rows and translate that into ConflictException
+   * (HTTP 409) with the count in the message, so the operator sees a
+   * clear "this vehicle has N trips" message rather than a 500.
+   *
+   * A future slice (e.g., fuel logs or GPS pings in Phase 2) may need
+   * the same treatment for those aggregates; the pattern will be
+   * mirrored from this method.
    */
   async delete(id: string): Promise<boolean> {
     try {
       await this.prisma.vehicle.delete({ where: { id } });
       return true;
     } catch (error) {
-      if (
-        error instanceof Prisma.PrismaClientKnownRequestError &&
+      if (error instanceof Prisma.PrismaClientKnownRequestError) {
         // P2025 = "An operation failed because it depends on one or
         // more records that were required but not found." Prisma raises
         // this when delete targets a non-existent row.
-        error.code === "P2025"
-      ) {
-        return false;
+        if (error.code === "P2025") {
+          return false;
+        }
+        // P2003 = FK constraint violation on the referencing side. The
+        // referencing model (Trip) declares onDelete: Restrict on
+        // vehicleId per ADR-0003; this branch fires when the operator
+        // tries to delete a Vehicle that still has Trips. We count the
+        // referencing rows so the message names the obstacle precisely.
+        if (error.code === "P2003") {
+          const tripCount = await this.prisma.trip.count({ where: { vehicleId: id } });
+          throw new ConflictException(
+            `Cannot delete vehicle: ${tripCount} trip${tripCount === 1 ? "" : "s"} reference this vehicle.`,
+          );
+        }
       }
       throw error;
     }

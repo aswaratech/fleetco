@@ -287,6 +287,63 @@ describe("VehiclesService (integration, real Postgres)", () => {
       const ok = await service.delete("nonexistent-id");
       expect(ok).toBe(false);
     });
+
+    test("throws ConflictException with the trip count when referencing Trips exist (iter-9 P2003 mapping)", async () => {
+      // Iter-9 deliverable: paying off the P2003 tech-debt entry. Trip
+      // declares onDelete: Restrict on vehicleId per ADR-0003, so a
+      // delete that would orphan trips raises Prisma P2003. The
+      // service maps that to ConflictException with the count of
+      // referencing trips so the operator sees a clear "N trips
+      // reference this vehicle" message rather than a 500. Pinned at
+      // count == 2 and 1 so both the "trips" and "trip" plural arms
+      // of the message are exercised.
+      const vehicle = await service.create(makeCreateInput(), adminId);
+      const driver = await prisma.driver.create({
+        data: {
+          fullName: "Test Driver",
+          licenseNumber: `LIC-${randomUUID().slice(0, 8)}`,
+          licenseClass: "HMV",
+          phone: "+977-9800000000",
+          hiredAt: new Date("2022-04-01"),
+          licenseExpiresAt: new Date("2028-04-01"),
+          status: "ACTIVE",
+          createdById: adminId,
+        },
+      });
+      await prisma.trip.create({
+        data: {
+          vehicleId: vehicle.id,
+          driverId: driver.id,
+          createdById: adminId,
+          status: "PLANNED",
+        },
+      });
+      await prisma.trip.create({
+        data: {
+          vehicleId: vehicle.id,
+          driverId: driver.id,
+          createdById: adminId,
+          status: "IN_PROGRESS",
+          startedAt: new Date("2026-01-05T08:00:00Z"),
+          startOdometerKm: 80000,
+        },
+      });
+
+      try {
+        await service.delete(vehicle.id);
+        throw new Error("expected ConflictException");
+      } catch (error) {
+        expect(error).toBeInstanceOf(ConflictException);
+        const message = (error as ConflictException).message;
+        expect(message).toContain("2");
+        expect(message.toLowerCase()).toContain("trip");
+      }
+
+      // The vehicle row is still present — Restrict prevented the
+      // delete from happening, and the service did not double-delete.
+      const refetched = await prisma.vehicle.findUnique({ where: { id: vehicle.id } });
+      expect(refetched).not.toBeNull();
+    });
   });
 
   describe("list() — iter-4 filter / sort / paginate", () => {
