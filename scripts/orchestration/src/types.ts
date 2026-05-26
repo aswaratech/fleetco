@@ -46,7 +46,10 @@ export interface LoopState {
 
 export interface ExtractedPrompt {
   prompt: string;
-  tier: 1 | 2 | 3 | null; // null means NONE (no prompt found)
+  // 1 = transcript heading anchor; 2 = transcript last fenced block;
+  // 3 = PR-body re-run of tier-1/tier-2; 4 = Haiku fallback over transcript tail;
+  // null = NONE (no prompt found by any tier).
+  tier: 1 | 2 | 3 | 4 | null;
 }
 
 export interface FabricatedStripResult {

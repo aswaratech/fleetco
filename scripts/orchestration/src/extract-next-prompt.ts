@@ -1,21 +1,31 @@
-// Three-tier extractor for the next-session kickoff prompt the agent drafts
+// Four-tier extractor for the next-session kickoff prompt the agent drafts
 // at end-of-session.
 //
 // Principle 5 from docs/runbook/orchestration-loop-design.md: the agent's
 // output format will vary across runs; a single extraction approach will
-// silently miss the prompt in a non-trivial fraction of iterations. The three
-// tiers are in order of preference; without all three, format drift silently
-// halts the loop within ~10 iterations.
+// silently miss the prompt in a non-trivial fraction of iterations. The four
+// tiers are in order of preference (cheapest + most deterministic first);
+// without all four, format drift silently halts the loop within ~10
+// iterations.
 //
 // Tier 1: heading anchor "## ... next-session prompt" + following block
-//         (fenced code, blockquote, or prose).
-// Tier 2: last triple-backtick fenced block in the full transcript.
-// Tier 3: AI fallback (Haiku) over last 20k chars; returns NONE if it can't
+//         (fenced code, blockquote, or prose) in the assistant transcript.
+// Tier 2: last triple-backtick fenced block in the assistant transcript.
+// Tier 3: fetch the just-merged PR's body via `gh pr view --json body` and
+//         re-run tier-1 / tier-2 extraction against that text. Handles the
+//         case where the agent placed the next-prompt in the PR description
+//         instead of the transcript (which halted the loop on the iter that
+//         motivated this fallback's introduction). One cheap `gh` call.
+// Tier 4: AI fallback (Haiku) over last 20k chars; returns NONE if it can't
 //         find a next-session prompt verbatim.
 
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import Anthropic from "@anthropic-ai/sdk";
 import { env } from "./config.js";
 import type { ExtractedPrompt } from "./types.js";
+
+const execFileAsync = promisify(execFile);
 
 // ---------- Tier 1: heading anchor ----------
 
@@ -63,7 +73,29 @@ export function extractTier2(transcript: string): string | null {
   return last && last.length > 0 ? last : null;
 }
 
-// ---------- Tier 3: Haiku fallback ----------
+// ---------- Tier 3: PR body fallback ----------
+
+// Fetches the just-merged PR's description body. Returns null on any
+// failure (gh missing, PR missing, network blip) — never crashes the
+// extractor. The caller wraps this in a closure that binds the prNumber.
+export type PrBodyFetcher = () => Promise<string | null>;
+
+export async function defaultPrBodyFetcher(prNumber: number, cwd: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync(
+      "gh",
+      ["pr", "view", String(prNumber), "--json", "body"],
+      { cwd, timeout: 20_000 },
+    );
+    const parsed = JSON.parse(stdout) as { body?: string };
+    const body = parsed.body;
+    return typeof body === "string" && body.length > 0 ? body : null;
+  } catch {
+    return null;
+  }
+}
+
+// ---------- Tier 4: Haiku fallback ----------
 
 export type HaikuExtractor = (recentTranscript: string) => Promise<string | null>;
 
@@ -98,6 +130,12 @@ export const defaultHaikuExtractor: HaikuExtractor = async (recentTranscript) =>
 // ---------- Public API ----------
 
 export interface ExtractOptions {
+  /**
+   * Tier 3: fetch the just-merged PR's body. The caller binds the PR number.
+   * If omitted, tier 3 is skipped entirely (useful for tests that only
+   * exercise the transcript-based tiers).
+   */
+  prBodyFetcher?: PrBodyFetcher;
   /** Override the Haiku extractor (for tests). */
   haikuExtractor?: HaikuExtractor;
   /** How many trailing characters to feed Haiku. Default 20k. */
@@ -112,15 +150,33 @@ export async function extractNextPrompt(
   if (tier1) return { prompt: tier1, tier: 1 };
   const tier2 = extractTier2(transcript);
   if (tier2) return { prompt: tier2, tier: 2 };
-  // Tier 3 only worth invoking if the transcript at least mentions "next session" or "next prompt".
+
+  // Tier 3: PR body. Runs before Haiku because it's cheaper (one `gh` call,
+  // no API spend) and more deterministic (regex over a typically
+  // well-structured PR description). Fetcher failures fall through silently.
+  if (options.prBodyFetcher) {
+    try {
+      const body = await options.prBodyFetcher();
+      if (body) {
+        const fromBody = extractTier1(body) ?? extractTier2(body);
+        if (fromBody) return { prompt: fromBody, tier: 3 };
+      }
+    } catch {
+      // Fetcher failure → continue to Haiku.
+    }
+  }
+
+  // Tier 4 (Haiku) only worth invoking if the transcript at least mentions
+  // "next session" or "next prompt". Saves an API call on transcripts with
+  // no signal at all.
   if (!/next[- ]session|next\s+prompt|next\s+kickoff/i.test(transcript)) {
     return { prompt: "", tier: null };
   }
   const haiku = options.haikuExtractor ?? defaultHaikuExtractor;
   const tail = transcript.slice(-(options.haikuTailChars ?? 20_000));
   try {
-    const tier3 = await haiku(tail);
-    if (tier3) return { prompt: tier3, tier: 3 };
+    const tier4 = await haiku(tail);
+    if (tier4) return { prompt: tier4, tier: 4 };
   } catch {
     // Haiku fallback failure → treat as NONE rather than crashing the loop.
   }

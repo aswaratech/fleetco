@@ -17,7 +17,7 @@ import { createDetectorState, detectPr, recordBash } from "./pr-detection.js";
 import { computeWaitFromEvent, parseWaitFromException, sleepUntil } from "./rate-limit-recovery.js";
 import { hasCiWorkflows, pollCi } from "./ci-poll.js";
 import { autoMerge } from "./auto-merge.js";
-import { extractNextPrompt } from "./extract-next-prompt.js";
+import { extractNextPrompt, defaultPrBodyFetcher } from "./extract-next-prompt.js";
 import { stripFabricatedPreambles } from "./strip-fabricated.js";
 import type { LoopState, RateLimitWaitInfo } from "./types.js";
 
@@ -218,11 +218,16 @@ async function main(): Promise<void> {
     );
 
     // ---------- Extract next prompt ----------
-    const extracted = await extractNextPrompt(transcript.text);
+    // Tier 3 fetches the just-merged PR's body as a safety net when the agent
+    // placed the next-session prompt only in the PR description rather than
+    // the assistant transcript. The closure binds the prNumber + repoRoot.
+    const extracted = await extractNextPrompt(transcript.text, {
+      prBodyFetcher: () => defaultPrBodyFetcher(prNumber, paths.repoRoot),
+    });
     if (!extracted.prompt) {
       appendDecision({ milestone: "next_prompt_missing", iteration: state.iteration });
       await halt(
-        `Iter ${state.iteration} produced no next-session prompt (all 3 extractor tiers returned NONE). Operator must inspect logs/ and write the next iteration's kickoff manually before relaunching.`,
+        `Iter ${state.iteration} produced no next-session prompt (all 4 extractor tiers returned NONE, including PR #${prNumber}'s body). Operator must inspect logs/ and write the next iteration's kickoff manually before relaunching.`,
         7,
         state,
       );

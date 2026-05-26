@@ -3,12 +3,12 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { extractNextPrompt, extractTier1, extractTier2 } from "../src/extract-next-prompt.js";
-import type { HaikuExtractor } from "../src/extract-next-prompt.js";
+import type { HaikuExtractor, PrBodyFetcher } from "../src/extract-next-prompt.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fix = (name: string) => readFileSync(path.join(here, "fixtures", name), "utf8");
 
-describe("extractNextPrompt — three-tier extractor", () => {
+describe("extractNextPrompt — four-tier extractor", () => {
   describe("Tier 1: heading anchor + fenced body", () => {
     it("extracts the fenced block under `## Next-session prompt`", async () => {
       const t = fix("transcript-heading-fenced.md");
@@ -61,11 +61,97 @@ describe("extractNextPrompt — three-tier extractor", () => {
     });
   });
 
-  describe("Tier 3: AI fallback for transcripts with no clear prompt", () => {
+  describe("Tier 3: PR body fallback (agent put the prompt in PR description)", () => {
+    // The motivating failure: an agent opened a PR successfully, wrote a
+    // thoughtful next-session prompt inside the PR description body, but
+    // emitted no `## Next-session prompt` heading or trailing fenced block in
+    // its assistant transcript. Tiers 1 and 2 miss; tier 3 fetches the PR
+    // body and re-runs the same heading + fenced-block extractors against it.
+    const transcriptWithoutPrompt =
+      "Iter 5 shipped. PR #29 opened. The next-session prompt for iter 6 is in the PR description body.";
+
+    it("extracts the prompt from a PR body that has the heading + fenced block", async () => {
+      const prBody = [
+        "## Summary",
+        "Iter 5 work landed.",
+        "",
+        "## Next-session prompt",
+        "",
+        "```",
+        "## Ticket — iter 6",
+        "Drivers slice read path.",
+        "```",
+      ].join("\n");
+      const fetcher: PrBodyFetcher = vi.fn(async () => prBody);
+      const r = await extractNextPrompt(transcriptWithoutPrompt, { prBodyFetcher: fetcher });
+      expect(r.tier).toBe(3);
+      expect(r.prompt).toContain("Drivers slice read path");
+      expect(fetcher).toHaveBeenCalledOnce();
+    });
+
+    it("falls back to tier-2-on-body when the PR body has only a trailing fenced block", async () => {
+      const prBody = [
+        "## Summary",
+        "Iter 5 work landed.",
+        "",
+        "Iter 6 should add the Drivers slice. The plan is:",
+        "",
+        "```",
+        "Drivers slice read path.",
+        "```",
+      ].join("\n");
+      const fetcher: PrBodyFetcher = vi.fn(async () => prBody);
+      const r = await extractNextPrompt(transcriptWithoutPrompt, { prBodyFetcher: fetcher });
+      expect(r.tier).toBe(3);
+      expect(r.prompt).toContain("Drivers slice read path");
+    });
+
+    it("falls through to Haiku (tier 4) when the fetcher returns null", async () => {
+      const fetcher: PrBodyFetcher = vi.fn(async () => null);
+      const haiku: HaikuExtractor = vi.fn(async () => "## Ticket\n\nFrom Haiku.");
+      const r = await extractNextPrompt(transcriptWithoutPrompt, {
+        prBodyFetcher: fetcher,
+        haikuExtractor: haiku,
+      });
+      expect(r.tier).toBe(4);
+      expect(r.prompt).toContain("From Haiku");
+      expect(fetcher).toHaveBeenCalledOnce();
+      expect(haiku).toHaveBeenCalledOnce();
+    });
+
+    it("falls through to Haiku (tier 4) when the fetcher throws", async () => {
+      const fetcher: PrBodyFetcher = vi.fn(async () => {
+        throw new Error("gh down");
+      });
+      const haiku: HaikuExtractor = vi.fn(async () => "## Ticket\n\nFrom Haiku.");
+      const r = await extractNextPrompt(transcriptWithoutPrompt, {
+        prBodyFetcher: fetcher,
+        haikuExtractor: haiku,
+      });
+      expect(r.tier).toBe(4);
+      expect(r.prompt).toContain("From Haiku");
+    });
+
+    it("falls through when the PR body itself has no extractable prompt", async () => {
+      const prBody = "## Summary\n\nIter 5 work landed. No next-prompt drafted.";
+      const fetcher: PrBodyFetcher = vi.fn(async () => prBody);
+      const haiku: HaikuExtractor = vi.fn(async () => null);
+      const r = await extractNextPrompt(transcriptWithoutPrompt, {
+        prBodyFetcher: fetcher,
+        haikuExtractor: haiku,
+      });
+      expect(r.tier).toBeNull();
+      expect(r.prompt).toBe("");
+      expect(fetcher).toHaveBeenCalledOnce();
+      expect(haiku).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe("Tier 4: AI fallback for transcripts with no clear prompt", () => {
     it("returns NONE for the no-next-prompt fixture (no relevant keywords)", async () => {
       const t = fix("transcript-no-next-prompt.md");
       // This fixture does say "next-session prompt" once ("I did not draft a next-session prompt"), so
-      // the gate is open. But Tier 1 and Tier 2 both miss. So Tier 3 fires.
+      // the gate is open. But Tiers 1, 2, and 3 (skipped — no fetcher) all miss. So Tier 4 fires.
       const haikuShouldReturnNone: HaikuExtractor = vi.fn(async () => null);
       const r = await extractNextPrompt(t, { haikuExtractor: haikuShouldReturnNone });
       expect(r.tier).toBeNull();
@@ -73,17 +159,17 @@ describe("extractNextPrompt — three-tier extractor", () => {
       expect(haikuShouldReturnNone).toHaveBeenCalledOnce();
     });
 
-    it("returns Tier 3 result if Haiku finds something", async () => {
+    it("returns Tier 4 result if Haiku finds something", async () => {
       const transcript =
         "Iteration done. Wait, I forgot to write a clear next-session prompt. " +
         "But the next iteration should add the Drivers slice. Open a PR. Draft next-session prompt.";
       const haikuFinds: HaikuExtractor = vi.fn(async () => "## Ticket\n\nAdd the Drivers slice.");
       const r = await extractNextPrompt(transcript, { haikuExtractor: haikuFinds });
-      expect(r.tier).toBe(3);
+      expect(r.tier).toBe(4);
       expect(r.prompt).toContain("Drivers slice");
     });
 
-    it("skips Tier 3 if transcript has no relevant keywords (saves a Haiku call)", async () => {
+    it("skips Tier 4 if transcript has no relevant keywords (saves a Haiku call)", async () => {
       const transcript = "Just some random output with no mention of the relevant phrases.";
       const haikuMustNotBeCalled: HaikuExtractor = vi.fn(async () => "something");
       const r = await extractNextPrompt(transcript, { haikuExtractor: haikuMustNotBeCalled });
