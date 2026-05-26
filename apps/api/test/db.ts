@@ -21,7 +21,20 @@ import { PrismaClient } from "@prisma/client";
 // The @@map names from schema.prisma (snake_case) are used, not the
 // Prisma model names (PascalCase), because the truncate runs at the
 // SQL level via $executeRawUnsafe and operates on physical table names.
-const TABLES = ["driver", "vehicle", "session", "account", "verification", "user"] as const;
+// Order is purely for human-grep-ability: tables with FKs into other
+// tables come first so a reader sees the dependency direction at a
+// glance (trip → driver/vehicle → user; session/account/verification →
+// user). The actual TRUNCATE uses CASCADE so order has no effect on
+// correctness.
+const TABLES = [
+  "trip",
+  "driver",
+  "vehicle",
+  "session",
+  "account",
+  "verification",
+  "user",
+] as const;
 
 export async function resetDb(prisma: PrismaClient): Promise<void> {
   // Quote each table name so Postgres treats it case-sensitively and a
