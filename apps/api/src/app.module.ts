@@ -9,6 +9,7 @@ import { DriversModule } from "./modules/drivers/drivers.module";
 import { HealthModule } from "./modules/health/health.module";
 import { PrismaModule } from "./modules/prisma/prisma.module";
 import { RedisModule } from "./modules/redis/redis.module";
+import { TripsModule } from "./modules/trips/trips.module";
 import { VehiclesModule } from "./modules/vehicles/vehicles.module";
 
 @Module({
@@ -55,6 +56,7 @@ import { VehiclesModule } from "./modules/vehicles/vehicles.module";
     HealthModule,
     VehiclesModule,
     DriversModule,
+    TripsModule,
   ],
 })
 export class AppModule {}

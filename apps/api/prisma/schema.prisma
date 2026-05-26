@@ -32,6 +32,7 @@ model User {
   accounts        Account[]
   vehiclesCreated Vehicle[] @relation("VehicleCreatedBy")
   driversCreated  Driver[]  @relation("DriverCreatedBy")
+  tripsCreated    Trip[]    @relation("TripCreatedBy")
 
   @@map("user")
 }
@@ -152,6 +153,8 @@ model Vehicle {
   createdById        String
   createdBy          User          @relation("VehicleCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
 
+  trips Trip[] @relation("TripVehicle")
+
   @@index([status])
   @@index([kind])
   @@index([createdById])
@@ -246,8 +249,102 @@ model Driver {
   createdById      String
   createdBy        User         @relation("DriverCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
 
+  trips Trip[] @relation("TripDriver")
+
   @@index([status])
   @@index([licenseClass])
   @@index([createdById])
   @@map("driver")
+}
+
+// Trips module. Owned by apps/api/src/modules/trips/ per ADR-0001.
+// Trip is the central aggregate of the FleetCo domain per ADR-0003:
+// one Trip is one contiguous use of one Vehicle by one Driver, with
+// start/end odometers and start/end timestamps. Vehicles and Drivers
+// exist precisely so Trip can reference them by id.
+//
+// Iter 8 ships the read path only (schema + migration, list/detail
+// API, list/detail UI); iter 9 layers the write path on top
+// (POST/PATCH/DELETE + create/edit/cancel UI), the same staging
+// pattern Vehicles iter-1/iter-2 and Drivers iter-6/iter-7 followed.
+//
+// Tier annotations per ADR-0013: trip records are Tier 3 (operational
+// business data). `notes` is free-form operator commentary and is
+// also Tier 3 — operators are expected not to enter PII there (and
+// the future write-path UI's helper text will say so), but the field
+// is not redacted from logs because over-redacting Tier 3 operational
+// data hides the operational signal pino is meant to surface.
+//
+// FK delete policy: both vehicleId and driverId use onDelete: Restrict
+// — we should not orphan trips by deleting a vehicle or a driver.
+// This is the intentional contract: a Vehicle/Driver delete that
+// would leave Trips dangling is blocked at the database. Today, the
+// Vehicles and Drivers delete paths translate Prisma's P2002 unique-
+// violation to HTTP 409 but do NOT yet translate P2003 (foreign-key
+// restrict) — a delete attempted against a referenced row currently
+// propagates as HTTP 500. The tech-debt entry "Vehicle/Driver delete
+// when Trips reference them" tracks adding the P2003 → 409 mapping
+// service-layer translation per the api-error-mapping runbook.
+
+enum TripStatus {
+  PLANNED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+
+  @@map("trip_status")
+}
+
+model Trip {
+  id              String     @id @default(cuid())
+  /// FK to Vehicle. Indexed individually so list filters by vehicleId
+  /// (the "trips for this vehicle" UI query) hit an index. onDelete:
+  /// Restrict because trips reference vehicles by id throughout their
+  /// lifetime; orphaning a trip from its vehicle would silently
+  /// corrupt per-vehicle profit-and-loss calculations later. See the
+  /// tech-debt entry on the cross-aggregate concern for the planned
+  /// P2003 → 409 service-layer translation.
+  vehicleId       String
+  vehicle         Vehicle    @relation("TripVehicle", fields: [vehicleId], references: [id], onDelete: Restrict)
+  /// FK to Driver. Same indexing and onDelete rationale as vehicleId.
+  driverId        String
+  driver          Driver     @relation("TripDriver", fields: [driverId], references: [id], onDelete: Restrict)
+  status          TripStatus @default(PLANNED)
+  /// Trip start time (when the driver leaves the depot / picks up the
+  /// load). Nullable because a PLANNED trip has no start time yet —
+  /// the iter-9 write path's status transition into IN_PROGRESS sets
+  /// it. ISO/UTC per CLAUDE.md.
+  startedAt       DateTime?
+  /// Trip end time (when the driver returns the vehicle / drops the
+  /// load). Nullable; only COMPLETED and CANCELLED trips carry an end
+  /// time. ISO/UTC per CLAUDE.md.
+  endedAt         DateTime?
+  /// Odometer reading at the Vehicle when the trip started, in
+  /// kilometers. Nullable because PLANNED trips have no start
+  /// odometer reading yet. Integer per the Vehicle.odometer convention
+  /// (no fractional kilometers at the trip-aggregate level; fractional
+  /// distances belong on route-point data, a later slice).
+  startOdometerKm Int?
+  /// Odometer reading at the Vehicle when the trip ended, in
+  /// kilometers. Nullable until COMPLETED. The iter-9 write path's
+  /// status transition into COMPLETED will also update
+  /// Vehicle.odometerCurrentKm — explicitly out of scope for iter 8.
+  endOdometerKm   Int?
+  /// Free-form operator notes. Tier 3 operational data; not PII. The
+  /// future write-path UI's helper text will direct operators not to
+  /// enter PII here. Nullable; the empty case is null rather than "".
+  notes           String?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+  /// References the User who created the trip record (ADR-0021 admin
+  /// user). Audit field; Restrict because the trip's audit chain
+  /// should remain intact for the trip's lifetime.
+  createdById     String
+  createdBy       User       @relation("TripCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@index([status])
+  @@index([vehicleId])
+  @@index([driverId])
+  @@index([createdById])
+  @@map("trip")
 }
