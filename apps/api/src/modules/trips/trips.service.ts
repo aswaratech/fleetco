@@ -1,7 +1,18 @@
-import { Injectable } from "@nestjs/common";
-import type { Prisma, Trip, TripStatus } from "@prisma/client";
+import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import { Prisma, type Trip, type TripStatus } from "@prisma/client";
 
-import type { TripSortColumn, TripSortDir } from "./trips.schemas";
+import type {
+  CreateTripInput,
+  TripSortColumn,
+  TripSortDir,
+  UpdateTripInput,
+} from "./trips.schemas";
+import { isLegalTripStatusTransition, validateTripCrossFields } from "./trips.schemas";
+
+// Re-export the schema-inferred input types so call sites (notably the
+// controller and tests) can pull them from this module — the same
+// convention DriversService follows.
+export type { CreateTripInput, UpdateTripInput };
 
 // PrismaService is injected by NestJS via TypeScript's emitDecoratorMetadata
 // (see apps/api/tsconfig.json); the class reference must remain a value
@@ -204,5 +215,216 @@ export class TripsService {
    */
   async findByIdRaw(id: string): Promise<Trip | null> {
     return this.prisma.trip.findUnique({ where: { id } });
+  }
+
+  /**
+   * Create a Trip. `createdById` is supplied by the controller from
+   * the authenticated session, not by the client. CreateTripSchema's
+   * `.strict()` keeps `createdById` (and any other unknown key) off
+   * the wire; the service trusts that and uses only fields from
+   * `CreateTripInput`.
+   *
+   * Cross-field rules (IN_PROGRESS requires startedAt + startOdometerKm;
+   * COMPLETED requires all four start/end fields and end >= start) are
+   * already validated by the schema's superRefine for the create path,
+   * so this method does not re-run them — re-validation here would
+   * change nothing on a happy path and only obscure error origin on
+   * the failure path.
+   *
+   * P2003 (foreign-key constraint failure) on insert means the
+   * `vehicleId` or `driverId` points at a deleted (or never-existed)
+   * row. We name the failing FK in the BadRequest message so the
+   * operator knows whether to re-pick the vehicle or the driver. The
+   * mapping is HTTP 400 (not 409) because the request body itself is
+   * the problem — an operator submitting a stale form whose selected
+   * vehicle was deleted between page load and submit gets a clear
+   * error about the body shape, not a phantom conflict.
+   */
+  async create(input: CreateTripInput, createdById: string): Promise<TripDetail> {
+    const data: Prisma.TripUncheckedCreateInput = {
+      vehicleId: input.vehicleId,
+      driverId: input.driverId,
+      status: input.status,
+      startedAt: input.startedAt ?? null,
+      endedAt: input.endedAt ?? null,
+      startOdometerKm: input.startOdometerKm ?? null,
+      endOdometerKm: input.endOdometerKm ?? null,
+      notes: input.notes ?? null,
+      createdById,
+    };
+
+    try {
+      return await this.prisma.trip.create({ data, include: DETAIL_INCLUDE });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2003") {
+        // Prisma surfaces the failing constraint name in
+        // `error.meta?.field_name` (e.g. "Trip_vehicleId_fkey"). Walk
+        // both candidate ids before deciding which to call out — a
+        // request that bundles both a stale vehicleId and a stale
+        // driverId would otherwise blame only the first. The DB tells
+        // us which one; the message echoes back the literal id so the
+        // operator can search their bookmark history.
+        const fieldName = String(
+          (error.meta as { field_name?: string; constraint?: string } | undefined)?.field_name ??
+            (error.meta as { field_name?: string; constraint?: string } | undefined)?.constraint ??
+            "",
+        );
+        if (fieldName.toLowerCase().includes("vehicle")) {
+          throw new BadRequestException(`Vehicle "${input.vehicleId}" does not exist.`);
+        }
+        if (fieldName.toLowerCase().includes("driver")) {
+          throw new BadRequestException(`Driver "${input.driverId}" does not exist.`);
+        }
+        if (fieldName.toLowerCase().includes("createdby")) {
+          // Defense-in-depth: the controller pulls createdById from the
+          // session, so this should never fire. If it does, the
+          // session points at a deleted user — a recoverable error
+          // best surfaced as 400 with a clear hint rather than a 500.
+          throw new BadRequestException(
+            `Authenticated user "${createdById}" no longer exists; sign in again.`,
+          );
+        }
+        // Unknown FK name: surface a generic message rather than
+        // throwing the raw Prisma error.
+        throw new BadRequestException(
+          `One of vehicleId or driverId references a record that does not exist.`,
+        );
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Diff-PATCH a Trip. Mirrors DriversService.update in shape:
+   *
+   *   1. Fetch the existing row (404 if missing, surfaced as
+   *      NotFoundException).
+   *   2. Build the merged shape (existing row with the patch applied).
+   *   3. Apply the legal-status-transition guard against the merged
+   *      shape (PLANNED → IN_PROGRESS → COMPLETED, with CANCELLED
+   *      reachable from any non-terminal state). Self-transitions are
+   *      legal so a no-op PATCH does not fail.
+   *   4. Run validateTripCrossFields on the merged shape — Zod's
+   *      schema-level superRefine cannot do this because the schema
+   *      only sees the partial body; a PATCH that sets
+   *      `status: "COMPLETED"` without re-sending the timing fields
+   *      must be validated against what the row would look like after
+   *      the update.
+   *   5. Let Prisma do the write. P2003 on update is rare (only happens
+   *      if the patch sets vehicleId/driverId to a stale value) and is
+   *      surfaced as the same BadRequestException as create.
+   *
+   * Returns the trip's DETAIL_INCLUDE shape so the controller can
+   * respond with the same shape that GET /api/v1/trips/:id returns.
+   */
+  async update(id: string, input: UpdateTripInput): Promise<TripDetail> {
+    const existing = await this.prisma.trip.findUnique({ where: { id } });
+    if (!existing) {
+      throw new NotFoundException(`Trip "${id}" not found.`);
+    }
+
+    // Build the merged shape: existing row, then the patch keys layered
+    // on top. We use `hasOwnProperty` so an explicit `null` in the
+    // patch (e.g., clearing startedAt by setting it to null) is treated
+    // as a real value change rather than "field omitted".
+    const has = (key: keyof UpdateTripInput): boolean =>
+      Object.prototype.hasOwnProperty.call(input, key);
+
+    const merged = {
+      status: (has("status") ? input.status : existing.status) as TripStatus,
+      startedAt: has("startedAt") ? (input.startedAt ?? null) : existing.startedAt,
+      endedAt: has("endedAt") ? (input.endedAt ?? null) : existing.endedAt,
+      startOdometerKm: has("startOdometerKm")
+        ? (input.startOdometerKm ?? null)
+        : existing.startOdometerKm,
+      endOdometerKm: has("endOdometerKm") ? (input.endOdometerKm ?? null) : existing.endOdometerKm,
+    };
+
+    // Legal-status-transition guard. Only enforce when the patch
+    // actually changes status — a PATCH that re-sends the current
+    // status as part of a larger update should not fail at this
+    // guard. The matrix already treats self-transitions as legal, but
+    // routing through `has("status")` first keeps the error message
+    // accurate ("can't go from X to Y" only fires when X actually went
+    // to Y).
+    if (has("status") && input.status !== undefined && input.status !== existing.status) {
+      if (!isLegalTripStatusTransition(existing.status, input.status)) {
+        throw new BadRequestException(
+          `Illegal status transition: ${existing.status} → ${input.status}.`,
+        );
+      }
+    }
+
+    // Cross-field validation against the merged shape.
+    const crossFieldErrors = validateTripCrossFields(merged);
+    if (crossFieldErrors.length > 0) {
+      throw new BadRequestException(crossFieldErrors.join(" "));
+    }
+
+    const data: Prisma.TripUpdateInput = {
+      ...(has("vehicleId") &&
+        input.vehicleId !== undefined && { vehicle: { connect: { id: input.vehicleId } } }),
+      ...(has("driverId") &&
+        input.driverId !== undefined && { driver: { connect: { id: input.driverId } } }),
+      ...(has("status") && input.status !== undefined && { status: input.status }),
+      ...(has("startedAt") && { startedAt: input.startedAt ?? null }),
+      ...(has("endedAt") && { endedAt: input.endedAt ?? null }),
+      ...(has("startOdometerKm") && { startOdometerKm: input.startOdometerKm ?? null }),
+      ...(has("endOdometerKm") && { endOdometerKm: input.endOdometerKm ?? null }),
+      ...(has("notes") && { notes: input.notes ?? null }),
+    };
+
+    try {
+      return await this.prisma.trip.update({
+        where: { id },
+        data,
+        include: DETAIL_INCLUDE,
+      });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2025") {
+        // Row vanished between the findUnique and the update — rare
+        // but possible if a concurrent DELETE landed in between. Map
+        // to NotFoundException so the controller surfaces 404.
+        throw new NotFoundException(`Trip "${id}" not found.`);
+      }
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2003") {
+        // Same FK mapping as create. Reachable only when the patch
+        // sets vehicleId or driverId to a stale id.
+        const fieldName = String(
+          (error.meta as { field_name?: string; constraint?: string } | undefined)?.field_name ??
+            (error.meta as { field_name?: string; constraint?: string } | undefined)?.constraint ??
+            "",
+        );
+        if (fieldName.toLowerCase().includes("vehicle")) {
+          throw new BadRequestException(`Vehicle "${input.vehicleId ?? ""}" does not exist.`);
+        }
+        if (fieldName.toLowerCase().includes("driver")) {
+          throw new BadRequestException(`Driver "${input.driverId ?? ""}" does not exist.`);
+        }
+        throw new BadRequestException(
+          `One of vehicleId or driverId references a record that does not exist.`,
+        );
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Hard delete a Trip. No referencing slice exists in Phase 1 (fuel
+   * logs and GPS pings, which will reference Trip, arrive in Phase 2),
+   * so a P2003 mapping is not needed here today. P2025 (delete
+   * targets a non-existent row) maps to NotFoundException.
+   *
+   * Returns void on success; the controller responds 204 No Content.
+   */
+  async delete(id: string): Promise<void> {
+    try {
+      await this.prisma.trip.delete({ where: { id } });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2025") {
+        throw new NotFoundException(`Trip "${id}" not found.`);
+      }
+      throw error;
+    }
   }
 }
