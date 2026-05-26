@@ -1,7 +1,6 @@
 import {
   Body,
   Controller,
-  DefaultValuePipe,
   Delete,
   Get,
   HttpCode,
@@ -12,7 +11,6 @@ import {
   Post,
   Query,
   Req,
-  ParseIntPipe,
   UseGuards,
 } from "@nestjs/common";
 import type { Vehicle } from "@prisma/client";
@@ -27,9 +25,13 @@ import type { AuthenticatedRequest } from "../auth/auth.types";
 import { VehiclesService, DEFAULT_TAKE } from "./vehicles.service";
 import {
   CreateVehicleSchema,
+  ListVehiclesQuerySchema,
   UpdateVehicleSchema,
   type CreateVehicleInput,
+  type ListVehiclesQuery,
   type UpdateVehicleInput,
+  type VehicleSortColumn,
+  type VehicleSortDir,
 } from "./vehicles.schemas";
 import { ZodValidationPipe } from "./zod-validation.pipe";
 
@@ -38,6 +40,11 @@ export interface VehiclesListResponse {
   total: number;
   skip: number;
   take: number;
+  // Echo the effective sort back so the web client can render the
+  // active-column indicator without re-deriving from URL params. The
+  // defaults match the service: createdAt desc.
+  sortBy: VehicleSortColumn;
+  sortDir: VehicleSortDir;
 }
 
 // Route prefix: `api/v1/vehicles`. The existing AuthController uses no
@@ -51,13 +58,40 @@ export interface VehiclesListResponse {
 export class VehiclesController {
   constructor(private readonly vehicles: VehiclesService) {}
 
+  /**
+   * List vehicles with filter / sort / pagination. ZodValidationPipe
+   * runs `ListVehiclesQuerySchema` over the full query object, which:
+   *   - rejects unknown query keys (`.strict()`) with HTTP 400
+   *   - parses `status` / `kind` from comma-separated strings into
+   *     deduplicated enum arrays
+   *   - parses `skip` / `take` from strings into integers and enforces
+   *     the same 1..200 ceiling as the service
+   *   - validates `sortBy` against the sortable-column whitelist
+   *
+   * Defaults applied here (when the validated query omits the field)
+   * mirror the service's defaults so the response's echoed `sortBy` /
+   * `sortDir` / `skip` / `take` are always the values that actually
+   * ran the query. The same values become anchor points for the web
+   * client's pagination and sort-indicator UI.
+   */
   @Get()
   async list(
-    @Query("skip", new DefaultValuePipe(0), ParseIntPipe) skip: number,
-    @Query("take", new DefaultValuePipe(DEFAULT_TAKE), ParseIntPipe) take: number,
+    @Query(new ZodValidationPipe(ListVehiclesQuerySchema)) query: ListVehiclesQuery,
   ): Promise<VehiclesListResponse> {
-    const { items, total } = await this.vehicles.list({ skip, take });
-    return { items, total, skip, take };
+    const skip = query.skip ?? 0;
+    const take = query.take ?? DEFAULT_TAKE;
+    const sortBy: VehicleSortColumn = query.sortBy ?? "createdAt";
+    const sortDir: VehicleSortDir = query.sortDir ?? "desc";
+
+    const { items, total } = await this.vehicles.list({
+      skip,
+      take,
+      status: query.status,
+      kind: query.kind,
+      sortBy,
+      sortDir,
+    });
+    return { items, total, skip, take, sortBy, sortDir };
   }
 
   @Get(":id")

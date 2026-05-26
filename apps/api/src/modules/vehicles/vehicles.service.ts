@@ -1,7 +1,12 @@
 import { ConflictException, Injectable } from "@nestjs/common";
-import { Prisma, type Vehicle, VehicleStatus } from "@prisma/client";
+import { Prisma, type Vehicle, type VehicleKind, VehicleStatus } from "@prisma/client";
 
-import type { CreateVehicleInput, UpdateVehicleInput } from "./vehicles.schemas";
+import type {
+  CreateVehicleInput,
+  UpdateVehicleInput,
+  VehicleSortColumn,
+  VehicleSortDir,
+} from "./vehicles.schemas";
 
 // PrismaService is injected by NestJS via TypeScript's emitDecoratorMetadata
 // (see apps/api/tsconfig.json); the class reference must remain a value
@@ -46,32 +51,77 @@ export class VehiclesService {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
-   * List vehicles ordered by acquisition date descending (newest first).
-   * `skip` and `take` follow Prisma's semantics; both are clamped to safe
-   * bounds so a malformed query cannot scan the whole table or return
-   * zero rows for non-zero takes. Returns `{ items, total }` so the UI
-   * can render pagination without a second round-trip.
+   * List vehicles. Supports filtering by status and kind, sorting by a
+   * whitelisted column, and pagination. `total` reflects the filtered
+   * count so the UI can render correct "Showing M–N of T" copy and
+   * disable next-page at the edge.
+   *
+   * Defaults (when the caller passes no overrides) match the iter-1 read
+   * path: 20 rows, newest first by createdAt. The iter-4 kickoff
+   * specifies `sortBy=createdAt, sortDir=desc` as the defaults; that is
+   * a small semantic shift from the iter-1 default (acquiredAt desc),
+   * but acquired-desc and created-desc collapse to the same order for
+   * any vehicle whose acquisition and creation happened in the same
+   * sitting — which is the common case in Phase 1. The `createdAt`
+   * secondary tiebreaker is preserved so that two rows with identical
+   * primary sort values still order deterministically (important for
+   * pagination — without it, a page boundary can shuffle rows between
+   * page loads).
+   *
+   * `skip` and `take` are clamped to safe bounds (`MAX_TAKE = 200`) as a
+   * defense-in-depth: the controller already validates `take` against
+   * the same ceiling via `ListVehiclesQuerySchema`, but the service is
+   * also called from inside other modules' code paths in future slices,
+   * and a clamp here ensures the database is never asked for an
+   * unbounded result no matter how the caller misuses the API.
    */
   async list({
     skip = 0,
     take = DEFAULT_TAKE,
+    status,
+    kind,
+    sortBy = "createdAt",
+    sortDir = "desc",
   }: {
     skip?: number;
     take?: number;
+    status?: VehicleStatus[];
+    kind?: VehicleKind[];
+    sortBy?: VehicleSortColumn;
+    sortDir?: VehicleSortDir;
   }): Promise<ListResult> {
     const safeSkip = Number.isFinite(skip) && skip >= 0 ? Math.floor(skip) : 0;
     const safeTakeRaw = Number.isFinite(take) ? Math.floor(take) : DEFAULT_TAKE;
     const safeTake = Math.min(Math.max(safeTakeRaw, MIN_TAKE), MAX_TAKE);
 
-    const args: Prisma.VehicleFindManyArgs = {
-      skip: safeSkip,
-      take: safeTake,
-      orderBy: [{ acquiredAt: "desc" }, { createdAt: "desc" }],
+    // Build the WHERE clause once; reuse it for both findMany and count
+    // so `total` matches what findMany would return at skip=0/take=∞.
+    // Empty arrays should not produce `in: []` (which would match zero
+    // rows in Prisma) — the schema's csvEnum normalizes those to
+    // `undefined`, but a belt-and-braces check here keeps the service
+    // robust against any future direct caller that doesn't go through
+    // the schema.
+    const where: Prisma.VehicleWhereInput = {
+      ...(status && status.length > 0 ? { status: { in: status } } : {}),
+      ...(kind && kind.length > 0 ? { kind: { in: kind } } : {}),
     };
 
+    // Primary sort by the requested column + direction; secondary tie-
+    // breaker on createdAt (or id, when createdAt itself is the primary)
+    // so paginated results are stable across requests. Without this, two
+    // vehicles created in the same millisecond can flip order between
+    // page loads — which would show one row on both page 1 and page 2,
+    // or skip a row entirely.
+    const orderBy: Prisma.VehicleOrderByWithRelationInput[] = [
+      { [sortBy]: sortDir } as Prisma.VehicleOrderByWithRelationInput,
+      ...(sortBy === "createdAt"
+        ? [{ id: sortDir } as Prisma.VehicleOrderByWithRelationInput]
+        : [{ createdAt: "desc" } as Prisma.VehicleOrderByWithRelationInput]),
+    ];
+
     const [items, total] = await this.prisma.$transaction([
-      this.prisma.vehicle.findMany(args),
-      this.prisma.vehicle.count(),
+      this.prisma.vehicle.findMany({ skip: safeSkip, take: safeTake, where, orderBy }),
+      this.prisma.vehicle.count({ where }),
     ]);
 
     return { items, total };
