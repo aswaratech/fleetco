@@ -131,3 +131,127 @@ export const UpdateVehicleSchema = z
   });
 
 export type UpdateVehicleInput = z.infer<typeof UpdateVehicleSchema>;
+
+// GET /api/v1/vehicles query parameters (iter 4 — list-page polish).
+// All four list dimensions (filter, sort, paginate) are validated here
+// against one schema so an unknown query key surfaces as 400 via the
+// existing ZodValidationPipe, the same way bodies do.
+//
+// Wire conventions:
+//   - `status` and `kind` accept either a single value (`?status=ACTIVE`)
+//     or a comma-separated list (`?status=ACTIVE,IN_MAINTENANCE`). Both
+//     shapes normalize to a deduplicated array of enum values; the
+//     service builds a Prisma `in:` filter from it. An empty string
+//     (after splitting) is treated as "no filter on this dimension".
+//   - `sortBy` is restricted to a whitelist of sortable columns to keep
+//     the index footprint visible. The Vehicle model has explicit
+//     indexes on `status` and `kind`; `registrationNumber` is unique
+//     and therefore indexed; `acquiredAt`/`odometerCurrentKm`/
+//     `createdAt` are unindexed today but acceptable for Phase 1 fleet
+//     sizes. Allowing an arbitrary column would invite expensive sorts
+//     and accidental information disclosure (e.g., `sortBy=createdById`
+//     is not useful to the admin and is not in this whitelist).
+//   - `sortDir` defaults to `desc` because the most common use is
+//     "newest first" — most recent acquisitions or registrations.
+//   - `skip` defaults to 0; `take` defaults to DEFAULT_TAKE (20). The
+//     service-side MAX_TAKE clamp (200) is the hard ceiling; the schema
+//     mirrors the same ceiling so a too-large `take` returns 400 with a
+//     clear message rather than being silently clamped.
+const SORTABLE_COLUMNS = [
+  "registrationNumber",
+  "odometerCurrentKm",
+  "acquiredAt",
+  "createdAt",
+] as const;
+export type VehicleSortColumn = (typeof SORTABLE_COLUMNS)[number];
+
+const SORT_DIRECTIONS = ["asc", "desc"] as const;
+export type VehicleSortDir = (typeof SORT_DIRECTIONS)[number];
+
+// Pagination ceiling duplicated from vehicles.service.ts on purpose:
+// the service is the runtime authority (the schema can only validate
+// what the client sent; it cannot speak for the database). Both
+// constants must move together when one changes; the JSDoc above on
+// vehicles.service.ts's MAX_TAKE flags the same coupling.
+const QUERY_MAX_TAKE = 200;
+
+// Helper: turn a single-string-or-comma-separated query value into a
+// validated, deduplicated array of enum members. Reused by `status`
+// and `kind`. An empty result (e.g., `?status=`) is mapped to
+// `undefined` so the service can omit the filter rather than asking
+// Prisma for `where status in ()` — which would match zero rows.
+function csvEnum<T extends readonly [string, ...string[]]>(values: T) {
+  const member = z.enum(values);
+  return z
+    .string()
+    .optional()
+    .transform((raw, ctx): T[number][] | undefined => {
+      if (raw === undefined || raw === "") return undefined;
+      const parts = raw
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+      if (parts.length === 0) return undefined;
+      const seen = new Set<T[number]>();
+      for (const part of parts) {
+        const parsed = member.safeParse(part);
+        if (!parsed.success) {
+          ctx.addIssue({
+            code: "custom",
+            message: `Must be one of: ${values.join(", ")}.`,
+          });
+          return z.NEVER;
+        }
+        seen.add(parsed.data);
+      }
+      return Array.from(seen);
+    });
+}
+
+// Coerce a string-typed query param to a non-negative integer with
+// bounds checking. Express's query parser hands us strings; without
+// coercion the schema would reject every numeric param. Out-of-range
+// values return 400 with a clear message rather than being silently
+// clamped — a deliberate `take=10000` clamped to 200 would surprise an
+// API consumer who expected to receive what they asked for.
+function intParam(min: number, max: number, fieldLabel: string) {
+  return z
+    .string()
+    .optional()
+    .transform((raw, ctx): number | undefined => {
+      if (raw === undefined || raw === "") return undefined;
+      const n = Number(raw);
+      if (!Number.isFinite(n) || !Number.isInteger(n)) {
+        ctx.addIssue({ code: "custom", message: `${fieldLabel} must be an integer.` });
+        return z.NEVER;
+      }
+      if (n < min) {
+        ctx.addIssue({ code: "custom", message: `${fieldLabel} must be ${min} or greater.` });
+        return z.NEVER;
+      }
+      if (n > max) {
+        ctx.addIssue({
+          code: "custom",
+          message: `${fieldLabel} must be ${max} or less.`,
+        });
+        return z.NEVER;
+      }
+      return n;
+    });
+}
+
+export const ListVehiclesQuerySchema = z
+  .object({
+    status: csvEnum(VEHICLE_STATUSES),
+    kind: csvEnum(VEHICLE_KINDS),
+    sortBy: z.enum(SORTABLE_COLUMNS).optional(),
+    sortDir: z.enum(SORT_DIRECTIONS).optional(),
+    skip: intParam(0, Number.MAX_SAFE_INTEGER, "skip"),
+    take: intParam(1, QUERY_MAX_TAKE, "take"),
+  })
+  // Strict so a typo'd query key (e.g., `?kine=TRUCK`) surfaces as 400
+  // rather than being silently ignored. The kickoff explicitly directs
+  // "Reject unknown query keys with 400".
+  .strict();
+
+export type ListVehiclesQuery = z.infer<typeof ListVehiclesQuerySchema>;
