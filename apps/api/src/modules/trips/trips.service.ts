@@ -1,5 +1,5 @@
 import { Injectable } from "@nestjs/common";
-import { Prisma, type Trip, type TripStatus } from "@prisma/client";
+import type { Prisma, Trip, TripStatus } from "@prisma/client";
 
 import type { TripSortColumn, TripSortDir } from "./trips.schemas";
 
