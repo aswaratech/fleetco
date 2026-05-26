@@ -21,7 +21,7 @@ import { PrismaClient } from "@prisma/client";
 // The @@map names from schema.prisma (snake_case) are used, not the
 // Prisma model names (PascalCase), because the truncate runs at the
 // SQL level via $executeRawUnsafe and operates on physical table names.
-const TABLES = ["vehicle", "session", "account", "verification", "user"] as const;
+const TABLES = ["driver", "vehicle", "session", "account", "verification", "user"] as const;
 
 export async function resetDb(prisma: PrismaClient): Promise<void> {
   // Quote each table name so Postgres treats it case-sensitively and a

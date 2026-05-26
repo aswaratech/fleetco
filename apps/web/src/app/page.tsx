@@ -25,6 +25,9 @@ export default async function HomePage() {
           <Button asChild variant="outline" className="w-full justify-start">
             <Link href="/vehicles">Vehicles</Link>
           </Button>
+          <Button asChild variant="outline" className="w-full justify-start">
+            <Link href="/drivers">Drivers</Link>
+          </Button>
         </nav>
         <SignOutButton />
       </div>
