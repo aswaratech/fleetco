@@ -1,6 +1,6 @@
 # API error mapping
 
-> **STATUS: ACTIVE, last verified 2026-05-22.** Introduced in iter 2 of the Vehicles slice (`feat/vehicles-write-path`). This procedure documents the project-wide convention for translating database-layer and validation-layer failures into HTTP status codes. Other modules adopting the write-path pattern follow this mapping rather than inventing their own.
+> **STATUS: ACTIVE, last verified 2026-05-26.** Introduced in iter 2 of the Vehicles slice (`feat/vehicles-write-path`). This procedure documents the project-wide convention for translating database-layer and validation-layer failures into HTTP status codes. Other modules adopting the write-path pattern follow this mapping rather than inventing their own. As of iter 7 of the Drivers slice, both Vehicles and Drivers write paths use this mapping for `P2002` (duplicate `registrationNumber` / `licenseNumber`) and `P2025` (delete or update of a missing row).
 
 ## Why this exists
 
@@ -53,7 +53,7 @@ try {
 }
 ```
 
-For `P2025` (delete-not-found), follow the convention used in `VehiclesService.delete`: catch the error, return a boolean (or null), and let the controller throw `NotFoundException`. This keeps not-found a normal control-flow path rather than an exception path.
+For `P2025` (delete-not-found), follow the convention used in `VehiclesService.delete` and `DriversService.delete`: catch the error, return a boolean (or null), and let the controller throw `NotFoundException`. This keeps not-found a normal control-flow path rather than an exception path.
 
 For zod validation, instantiate `ZodValidationPipe` per route with the schema:
 

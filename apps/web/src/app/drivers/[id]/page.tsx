@@ -1,11 +1,13 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
+import { Button } from "@/components/ui/button";
 import { apiFetch, ApiError } from "@/lib/api";
 import { DRIVER_STATUS_LABELS, LICENSE_CLASS_LABELS } from "@/lib/drivers-schema";
 import { getServerSession } from "@/lib/session";
 
 import type { Driver } from "../types";
+import { DeleteDriverDialog } from "./delete-driver-dialog";
 
 // Driver detail — iter 6 of the Drivers slice. Server-rendered shell
 // (auth gate via getServerSession; redirect to /login if absent);
@@ -13,9 +15,12 @@ import type { Driver } from "../types";
 // notFound() route so /drivers/<bogus-id> renders the framework's
 // standard not-found page.
 //
-// No Edit / Delete CTAs in iter 6 — those land in iter 7 alongside the
-// write-path endpoints. The header keeps space for them so the iter-7
-// PR is additive rather than a layout reshuffle.
+// Edit / Delete CTAs land in the header right-side cluster. Iter 7
+// wired them up alongside the write-path endpoints (POST/PATCH/DELETE).
+// The Delete button opens a confirmation dialog (DeleteDriverDialog,
+// a small client island around shadcn's AlertDialog); the action layer
+// (../actions.ts:deleteDriverAction) issues DELETE and redirects on
+// success.
 //
 // Field layout: a definition list (<dl>) under DESIGN.md §"Data display"
 // typography tokens. Two-column on >= sm; stacks on narrow viewports.
@@ -91,8 +96,12 @@ export default async function DriverDetailPage({
               {DRIVER_STATUS_LABELS[driver.status] ?? driver.status}
             </p>
           </div>
-          {/* Edit and Delete buttons land in iter 7. The empty cluster
-              holds the layout shape so the iter-7 PR is additive. */}
+          <div className="flex items-center gap-2">
+            <Button asChild variant="outline">
+              <Link href={`/drivers/${driver.id}/edit`}>Edit</Link>
+            </Button>
+            <DeleteDriverDialog id={driver.id} fullName={driver.fullName} />
+          </div>
         </header>
 
         <section className="border-border-subtle bg-surface-raised rounded border p-6 shadow-sm">

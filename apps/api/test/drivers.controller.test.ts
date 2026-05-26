@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { BadRequestException, type INestApplication } from "@nestjs/common";
+import { BadRequestException, NotFoundException, type INestApplication } from "@nestjs/common";
 import { Test, type TestingModule } from "@nestjs/testing";
 import { DriverStatus, LicenseClass } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
@@ -7,9 +7,14 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest"
 import { ZodValidationPipe } from "../src/common/zod-validation.pipe";
 import { AuthGuard } from "../src/modules/auth/auth.guard";
 import { AUTH } from "../src/modules/auth/auth.tokens";
+import type { AuthenticatedRequest } from "../src/modules/auth/auth.types";
 import { DriversController } from "../src/modules/drivers/drivers.controller";
 import { DriversService, type CreateDriverInput } from "../src/modules/drivers/drivers.service";
-import { ListDriversQuerySchema } from "../src/modules/drivers/drivers.schemas";
+import {
+  CreateDriverSchema,
+  ListDriversQuerySchema,
+  UpdateDriverSchema,
+} from "../src/modules/drivers/drivers.schemas";
 import { PrismaService } from "../src/modules/prisma/prisma.service";
 import { resetDb } from "./db";
 
@@ -282,5 +287,318 @@ describe("DriversController.list (integration, real Prisma)", () => {
     });
     expect(response.total).toBe(3);
     expect(response.items).toHaveLength(3);
+  });
+});
+
+describe("DriversController write-path schemas (iter-7 contract)", () => {
+  // Pipe-level tests for CreateDriverSchema and UpdateDriverSchema —
+  // the iter-7 write-path schemas. Same cheap pure-code approach as
+  // the iter-6 list-query tests above: instantiate ZodValidationPipe
+  // directly, no TestingModule. The runbook's api-error-mapping table
+  // commits ZodError → BadRequestException → HTTP 400; these tests pin
+  // each branch.
+
+  describe("CreateDriverSchema", () => {
+    const createPipe = new ZodValidationPipe(CreateDriverSchema);
+
+    test("bogus body key → BadRequestException (.strict() defense)", () => {
+      // The schema is `.strict()` so a client cannot smuggle
+      // `createdById` or other server-controlled fields through the
+      // POST body. Same defense the runbook lists for the list query.
+      expect(() =>
+        createPipe.transform({
+          fullName: "Ram Bahadur",
+          licenseNumber: "LIC-001",
+          licenseClass: "HMV",
+          phone: "+977-9800000000",
+          hiredAt: "2022-04-01",
+          licenseExpiresAt: "2028-04-01",
+          createdById: "smuggled-in",
+        }),
+      ).toThrow(BadRequestException);
+    });
+
+    test("missing required field (no fullName) → BadRequestException", () => {
+      // The required-field set is documented inline in CreateDriverSchema
+      // (fullName / licenseNumber / licenseClass / phone / hiredAt /
+      // licenseExpiresAt). status is optional; dateOfBirth is optional.
+      expect(() =>
+        createPipe.transform({
+          licenseNumber: "LIC-001",
+          licenseClass: "HMV",
+          phone: "+977-9800000000",
+          hiredAt: "2022-04-01",
+          licenseExpiresAt: "2028-04-01",
+        }),
+      ).toThrow(BadRequestException);
+    });
+
+    test("invalid Nepal phone shape → BadRequestException", () => {
+      // The phone regex is deliberately loose (CLAUDE.md forbids
+      // tightening without an ADR) but does reject clearly wrong
+      // shapes — a US-style 555-123-4567 has the wrong leading digit
+      // pattern for the Nepali regex's local arm. Pinning a known
+      // rejection so a refactor that drops the regex would fail.
+      expect(() =>
+        createPipe.transform({
+          fullName: "Ram Bahadur",
+          licenseNumber: "LIC-001",
+          licenseClass: "HMV",
+          phone: "abc-not-a-phone",
+          hiredAt: "2022-04-01",
+          licenseExpiresAt: "2028-04-01",
+        }),
+      ).toThrow(BadRequestException);
+    });
+
+    test("invalid date string → BadRequestException", () => {
+      // DateInput uses z.coerce.date(); a string that doesn't parse to
+      // a real Date fails the pipe with the schema's friendlier
+      // "Invalid date" message.
+      expect(() =>
+        createPipe.transform({
+          fullName: "Ram Bahadur",
+          licenseNumber: "LIC-001",
+          licenseClass: "HMV",
+          phone: "+977-9800000000",
+          hiredAt: "not-a-date",
+          licenseExpiresAt: "2028-04-01",
+        }),
+      ).toThrow(BadRequestException);
+    });
+
+    test("invalid licenseClass enum → BadRequestException", () => {
+      expect(() =>
+        createPipe.transform({
+          fullName: "Ram Bahadur",
+          licenseNumber: "LIC-001",
+          licenseClass: "NOT_A_CLASS",
+          phone: "+977-9800000000",
+          hiredAt: "2022-04-01",
+          licenseExpiresAt: "2028-04-01",
+        }),
+      ).toThrow(BadRequestException);
+    });
+
+    test("valid minimal body (no status, no dateOfBirth) parses through with coerced dates", () => {
+      // status and dateOfBirth are optional; the parse should succeed
+      // and produce Date instances for hiredAt / licenseExpiresAt.
+      const parsed = createPipe.transform({
+        fullName: "Ram Bahadur",
+        licenseNumber: "LIC-001",
+        licenseClass: "HMV",
+        phone: "+977-9800000000",
+        hiredAt: "2022-04-01",
+        licenseExpiresAt: "2028-04-01",
+      });
+      expect(parsed.fullName).toBe("Ram Bahadur");
+      expect(parsed.hiredAt).toBeInstanceOf(Date);
+      expect(parsed.licenseExpiresAt).toBeInstanceOf(Date);
+      expect(parsed.status).toBeUndefined();
+      expect(parsed.dateOfBirth).toBeUndefined();
+    });
+  });
+
+  describe("UpdateDriverSchema", () => {
+    const updatePipe = new ZodValidationPipe(UpdateDriverSchema);
+
+    test("empty body → BadRequestException (the at-least-one-field refine)", () => {
+      // An empty PATCH would silently 200 with no change if we let it
+      // through; instead the schema refines on `Object.keys(data).length`
+      // so the client sees a clear 400. Pinned because dropping the
+      // refine would make every empty PATCH a no-op success.
+      expect(() => updatePipe.transform({})).toThrow(BadRequestException);
+    });
+
+    test("bogus body key (e.g. id) → BadRequestException", () => {
+      // The .strict() defense applies on PATCH too: a client cannot
+      // smuggle `id` or `createdById` or any other server-controlled
+      // field through the update body.
+      expect(() => updatePipe.transform({ id: "smuggled" })).toThrow(BadRequestException);
+    });
+
+    test("single-field PATCH (just fullName) parses through", () => {
+      const parsed = updatePipe.transform({ fullName: "Renamed Driver" });
+      expect(parsed.fullName).toBe("Renamed Driver");
+    });
+
+    test("explicit terminatedAt: null is accepted (the 'clear' branch)", () => {
+      // The schema declares terminatedAt as `.nullable().optional()`
+      // so an operator can clear a previously-set terminatedAt by
+      // sending null explicitly. The service distinguishes "client
+      // provided null" from "client did not mention" via
+      // hasOwnProperty; both branches need to parse through here.
+      const parsed = updatePipe.transform({ terminatedAt: null });
+      expect(parsed.terminatedAt).toBeNull();
+    });
+
+    test("invalid date inside an otherwise valid PATCH → BadRequestException", () => {
+      expect(() => updatePipe.transform({ hiredAt: "not-a-date" })).toThrow(BadRequestException);
+    });
+  });
+});
+
+describe("DriversController.create / update / remove (integration, real Prisma)", () => {
+  // Full controller-level integration for the iter-7 write path. Same
+  // TestingModule shape as the list integration above: real
+  // DriversController + DriversService + PrismaService, AuthGuard
+  // overridden to pass-through, AUTH provider stubbed. The kickoff
+  // (iter-7 deliverable 2) is the spec under test here — HTTP status
+  // codes are checked via the @HttpCode decorator's effect indirectly
+  // (we call controller methods directly, not through an HTTP server),
+  // so the assertions focus on the response body shape, the NotFound
+  // path, and the side effects (DB row created / updated / removed).
+
+  let module: TestingModule;
+  let app: INestApplication;
+  let prisma: PrismaService;
+  let controller: DriversController;
+  let service: DriversService;
+  let adminId: string;
+  let fakeRequest: AuthenticatedRequest;
+
+  beforeAll(async () => {
+    module = await Test.createTestingModule({
+      controllers: [DriversController],
+      providers: [
+        DriversService,
+        PrismaService,
+        { provide: AUTH, useValue: { api: { getSession: () => null } } },
+      ],
+    })
+      .overrideGuard(AuthGuard)
+      .useValue({ canActivate: () => true })
+      .compile();
+
+    app = module.createNestApplication();
+    await app.init();
+
+    prisma = module.get(PrismaService);
+    service = module.get(DriversService);
+    controller = module.get(DriversController);
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  beforeEach(async () => {
+    await resetDb(prisma);
+    adminId = `user_${randomUUID()}`;
+    await prisma.user.create({
+      data: {
+        id: adminId,
+        email: `admin-${adminId}@fleetco.test`,
+        name: "Test Admin",
+      },
+    });
+    // The controller reads `request.session.user.id`. In production the
+    // AuthGuard populates request.session per ADR-0021; here the guard
+    // is overridden, so we hand the controller a minimal fake. Cast is
+    // necessary because AuthenticatedRequest extends express.Request,
+    // which we don't construct in full.
+    fakeRequest = { session: { user: { id: adminId } } } as unknown as AuthenticatedRequest;
+  });
+
+  test("create() persists the driver with createdById from the session", async () => {
+    // The body shape here matches what ZodValidationPipe would emit
+    // after parsing the wire JSON — Date instances rather than ISO
+    // strings, no `createdById` (the schema's .strict() rejects it).
+    const created = await controller.create(
+      {
+        fullName: "Sita Pradhan",
+        licenseNumber: "LIC-CREATE-001",
+        licenseClass: LicenseClass.HMV,
+        phone: "+977-9811111111",
+        hiredAt: new Date("2023-01-15"),
+        licenseExpiresAt: new Date("2029-01-15"),
+      },
+      fakeRequest,
+    );
+    expect(created.id).toBeTruthy();
+    expect(created.fullName).toBe("Sita Pradhan");
+    // The kickoff spec: createdById comes from the session, not the
+    // body. Pinning that path so a refactor that accidentally reads
+    // it from the body would fail.
+    expect(created.createdById).toBe(adminId);
+
+    const refetched = await prisma.driver.findUnique({ where: { id: created.id } });
+    expect(refetched?.licenseNumber).toBe("LIC-CREATE-001");
+  });
+
+  test("update() returns the updated driver on success", async () => {
+    const before = await service.create(
+      {
+        fullName: "Original Name",
+        licenseNumber: "LIC-UPDATE-001",
+        licenseClass: LicenseClass.LMV,
+        phone: "+977-9812222222",
+        hiredAt: new Date("2022-04-01"),
+        licenseExpiresAt: new Date("2028-04-01"),
+      },
+      adminId,
+    );
+
+    const after = await controller.update(before.id, { fullName: "Renamed" });
+    expect(after.id).toBe(before.id);
+    expect(after.fullName).toBe("Renamed");
+    // Other fields stay put — diff-PATCH semantics confirmed at the
+    // controller level (the service layer's tests cover the broader
+    // matrix; this is the controller's contract that "the response
+    // body reflects the post-update state, not just the patch input").
+    expect(after.licenseNumber).toBe("LIC-UPDATE-001");
+  });
+
+  test("update() of an unknown id throws NotFoundException (HTTP 404)", async () => {
+    // The service returns null when findUnique misses; the controller
+    // translates that into NotFoundException, which Nest's default
+    // exception filter renders as HTTP 404 with the message in the
+    // body. The runbook commits to "Driver {id} not found" wording;
+    // we assert the id appears so a future message refactor that
+    // dropped it would fail.
+    try {
+      await controller.update("nonexistent-id", { fullName: "X" });
+      throw new Error("expected NotFoundException");
+    } catch (error) {
+      expect(error).toBeInstanceOf(NotFoundException);
+      expect((error as NotFoundException).message).toContain("nonexistent-id");
+    }
+  });
+
+  test("remove() deletes the row and resolves without a body", async () => {
+    const created = await service.create(
+      {
+        fullName: "To Be Deleted",
+        licenseNumber: "LIC-DELETE-001",
+        licenseClass: LicenseClass.HTV,
+        phone: "+977-9813333333",
+        hiredAt: new Date("2022-04-01"),
+        licenseExpiresAt: new Date("2028-04-01"),
+      },
+      adminId,
+    );
+
+    // @HttpCode(HttpStatus.NO_CONTENT) is applied at the decorator
+    // level; calling the method directly we only see the resolved
+    // value (void). The HTTP status is verified indirectly via the
+    // method's declared return type — if a refactor changed
+    // remove() to return a body, the type system would catch it.
+    const result = await controller.remove(created.id);
+    expect(result).toBeUndefined();
+
+    const refetched = await prisma.driver.findUnique({ where: { id: created.id } });
+    expect(refetched).toBeNull();
+  });
+
+  test("remove() of an unknown id throws NotFoundException (HTTP 404)", async () => {
+    // Service returns false on P2025; controller throws
+    // NotFoundException with the id named in the message.
+    try {
+      await controller.remove("nonexistent-id");
+      throw new Error("expected NotFoundException");
+    } catch (error) {
+      expect(error).toBeInstanceOf(NotFoundException);
+      expect((error as NotFoundException).message).toContain("nonexistent-id");
+    }
   });
 });

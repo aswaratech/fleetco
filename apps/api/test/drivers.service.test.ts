@@ -436,4 +436,32 @@ describe("DriversService (integration, real Postgres)", () => {
       expect(result.total).toBe(5);
     });
   });
+
+  describe("delete() — iter-7 hard-delete with P2025 → false", () => {
+    // Hard delete is the Phase-1 policy (see the comment on
+    // DriversService.delete and the controller-side mirror). The
+    // service returns true when the row is removed and false when the
+    // id does not exist; the controller maps false → HTTP 404 via
+    // NotFoundException per the api-error-mapping runbook entry for
+    // P2025. These two tests pin both branches.
+
+    test("removes the row and returns true", async () => {
+      const created = await service.create(makeCreateInput(), adminId);
+      const ok = await service.delete(created.id);
+      expect(ok).toBe(true);
+
+      const refetched = await prisma.driver.findUnique({ where: { id: created.id } });
+      expect(refetched).toBeNull();
+    });
+
+    test("returns false on unknown id (P2025 branch)", async () => {
+      // Prisma raises PrismaClientKnownRequestError with code "P2025"
+      // when a targeted row does not exist for a delete. The service
+      // catches that specific code and returns false so the controller
+      // can shape the 404. Pinned here so a refactor that lets P2025
+      // propagate as a 500 would fail loudly.
+      const ok = await service.delete("nonexistent-id");
+      expect(ok).toBe(false);
+    });
+  });
 });

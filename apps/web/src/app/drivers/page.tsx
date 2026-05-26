@@ -352,21 +352,38 @@ export default async function DriversPage({
                 : `${data.total} registered.`}
             </p>
           </div>
-          {/* No "New driver" CTA in iter 6; the write path lands in
-              iter 7. The header keeps the same layout as Vehicles so
-              the iter-7 PR adds the button without re-shaping the
-              header. */}
+          {/* Primary action right-aligned per DESIGN.md §"Page header".
+              `asChild` lets the Button render as a Next.js <Link>, which
+              gets us client-side navigation without a wrapping <a>.
+              Iter 7 wired the "New driver" CTA up to the write path. */}
+          <Button asChild>
+            <Link href="/drivers/new">New driver</Link>
+          </Button>
         </header>
 
         <DriversFilters status={status} licenseClass={licenseClass} />
 
         <section className="border-border-subtle bg-surface-raised rounded border shadow-sm">
           {data.items.length === 0 ? (
+            // Two empty-state copy variants per DESIGN.md voice. The
+            // "no drivers at all" path repeats the CTA inline so the
+            // user doesn't have to look up at the header to take the
+            // expected next step. Mirrors the Vehicles list empty state.
             <div className="text-text-secondary space-y-3 p-8 text-sm">
               {hasActiveFilter ? (
                 <p>No drivers match the current filters.</p>
               ) : (
-                <p>No drivers registered.</p>
+                <>
+                  <p>No drivers registered.</p>
+                  <p>
+                    <Link
+                      href="/drivers/new"
+                      className="text-text-primary underline underline-offset-4"
+                    >
+                      Register the first driver.
+                    </Link>
+                  </p>
+                </>
               )}
             </div>
           ) : (

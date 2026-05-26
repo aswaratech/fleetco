@@ -1,7 +1,20 @@
 import { ConflictException, Injectable } from "@nestjs/common";
 import { Prisma, type Driver, DriverStatus, type LicenseClass } from "@prisma/client";
 
-import type { DriverSortColumn, DriverSortDir } from "./drivers.schemas";
+import type {
+  CreateDriverInput,
+  DriverSortColumn,
+  DriverSortDir,
+  UpdateDriverInput,
+} from "./drivers.schemas";
+
+// Re-export the schema-inferred types so existing call sites that
+// import { CreateDriverInput, UpdateDriverInput } from this module
+// (notably the iter-6 test suites) keep working without churn. The
+// authoritative shape lives next to the schema in drivers.schemas.ts;
+// the iter-7 refactor replaced the local interface declarations with
+// these imports per the kickoff item 1.
+export type { CreateDriverInput, UpdateDriverInput };
 
 // PrismaService is injected by NestJS via TypeScript's emitDecoratorMetadata
 // (see apps/api/tsconfig.json); the class reference must remain a value
@@ -9,42 +22,6 @@ import type { DriverSortColumn, DriverSortDir } from "./drivers.schemas";
 // override as the Vehicles service.
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports
 import { PrismaService } from "../prisma/prisma.service";
-
-// Service input shapes. The iter-6 controller does not expose POST or
-// PATCH (the kickoff scopes those to iter 7), but the service exports
-// `create()` and `update()` today so the iter-7 write-path PR can layer
-// the controller on top without churning this file again, and so the
-// iter-6 tests can exercise the terminatedAt-transition rule that
-// belongs at the service layer regardless of HTTP surface.
-//
-// Both shapes are local interfaces rather than zod-inferred types from
-// drivers.schemas.ts (which does not export Create/Update schemas in
-// iter 6 — those land in iter 7). The shapes here mirror what the
-// iter-7 schemas will produce so adopting them is a one-line import
-// change rather than a refactor.
-
-export interface CreateDriverInput {
-  fullName: string;
-  licenseNumber: string;
-  licenseClass: LicenseClass;
-  phone: string;
-  dateOfBirth?: Date | null;
-  hiredAt: Date;
-  licenseExpiresAt: Date;
-  status?: DriverStatus;
-}
-
-export interface UpdateDriverInput {
-  fullName?: string;
-  licenseNumber?: string;
-  licenseClass?: LicenseClass;
-  phone?: string;
-  dateOfBirth?: Date | null;
-  hiredAt?: Date;
-  licenseExpiresAt?: Date;
-  status?: DriverStatus;
-  terminatedAt?: Date | null;
-}
 
 export interface ListResult {
   items: Driver[];
@@ -280,6 +257,40 @@ export class DriversService {
         throw new ConflictException(
           `A driver with license number "${input.licenseNumber ?? ""}" already exists.`,
         );
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Hard delete. Acceptable in iter 7 because no Trip aggregate exists
+   * yet — once Trips reference Driver by id, hard-deleting a driver
+   * who has trips would either orphan the trips (data loss) or fail
+   * at the DB layer (foreign-key Restrict → Prisma P2003, which we
+   * would then map to HTTP 409 the same way P2002 is mapped today).
+   * The decision between "switch to soft-delete" and "block-when-
+   * referenced" is deferred until Trips lands and we see the
+   * dependency direction in practice. The controller-side comment on
+   * `remove()` carries the same plan so a reader of the public
+   * surface finds it without opening this file.
+   *
+   * Returns true on delete, false when the driver was not found, so
+   * the controller can shape the 404 response (api-error-mapping
+   * runbook entry for P2025).
+   */
+  async delete(id: string): Promise<boolean> {
+    try {
+      await this.prisma.driver.delete({ where: { id } });
+      return true;
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        // P2025 = "An operation failed because it depends on one or
+        // more records that were required but not found." Prisma raises
+        // this when delete targets a non-existent row.
+        error.code === "P2025"
+      ) {
+        return false;
       }
       throw error;
     }
