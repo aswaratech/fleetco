@@ -1,11 +1,13 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
+import { Button } from "@/components/ui/button";
 import { apiFetch, ApiError } from "@/lib/api";
 import { CUSTOMER_STATUS_LABELS } from "@/lib/customers-schema";
 import { getServerSession } from "@/lib/session";
 
 import type { Customer } from "../types";
+import { DeleteCustomerDialog } from "./delete-customer-dialog";
 
 // Customer detail — iter 15 of the Customers slice. Server-rendered
 // shell (auth gate via getServerSession; redirect to /login if
@@ -13,9 +15,12 @@ import type { Customer } from "../types";
 // Next.js's notFound() route so /customers/<bogus-id> renders the
 // framework's standard not-found page.
 //
-// Iter 15 is the read path only — no Edit / Delete CTAs in the header
-// right-side cluster (the slot stays empty, same as Drivers iter 6
-// before the iter-7 write path landed). Iter 16 will add them.
+// Iter 16 wired the Edit / Delete CTAs into the header right-side
+// cluster (mirror of the Drivers iter-7 detail-page layout). The
+// Delete button opens a confirmation dialog (DeleteCustomerDialog, a
+// small client island around shadcn's AlertDialog); the action layer
+// (../actions.ts:deleteCustomerAction) issues DELETE and redirects on
+// success.
 //
 // Field layout: a definition list (<dl>) under DESIGN.md §"Data
 // display" typography tokens. Two-column on >= sm; stacks on narrow
@@ -86,9 +91,12 @@ export default async function CustomerDetailPage({
               {CUSTOMER_STATUS_LABELS[customer.status] ?? customer.status}
             </p>
           </div>
-          {/* Iter 15 read path only; Edit / Delete CTAs land in iter 16.
-              The empty right cluster matches Drivers iter 6 prior to
-              the iter-7 write path. */}
+          <div className="flex items-center gap-2">
+            <Button asChild variant="outline">
+              <Link href={`/customers/${customer.id}/edit`}>Edit</Link>
+            </Button>
+            <DeleteCustomerDialog id={customer.id} name={customer.name} />
+          </div>
         </header>
 
         <section className="border-border-subtle bg-surface-raised rounded border p-6 shadow-sm">
