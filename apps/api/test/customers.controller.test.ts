@@ -1,5 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { BadRequestException, NotFoundException, type INestApplication } from "@nestjs/common";
+import {
+  BadRequestException,
+  HttpException,
+  HttpStatus,
+  NotFoundException,
+  type INestApplication,
+} from "@nestjs/common";
 import { Test, type TestingModule } from "@nestjs/testing";
 import { CustomerStatus } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
@@ -7,9 +13,14 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest"
 import { ZodValidationPipe } from "../src/common/zod-validation.pipe";
 import { AuthGuard } from "../src/modules/auth/auth.guard";
 import { AUTH } from "../src/modules/auth/auth.tokens";
+import type { AuthenticatedRequest } from "../src/modules/auth/auth.types";
 import { CustomersController } from "../src/modules/customers/customers.controller";
 import { CustomersService } from "../src/modules/customers/customers.service";
-import { ListCustomersQuerySchema } from "../src/modules/customers/customers.schemas";
+import {
+  CreateCustomerSchema,
+  ListCustomersQuerySchema,
+  UpdateCustomerSchema,
+} from "../src/modules/customers/customers.schemas";
 import { PrismaService } from "../src/modules/prisma/prisma.service";
 import { resetDb } from "./db";
 
@@ -355,6 +366,371 @@ describe("CustomersController.getById (integration, real Prisma)", () => {
     } catch (error) {
       expect(error).toBeInstanceOf(NotFoundException);
       expect((error as NotFoundException).message).toContain("nonexistent-customer-id");
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// Iter 16 — write-path schemas. Mirror of the iter-7 Drivers controller
+// write-path schema describe block. Pipe-level tests for
+// CreateCustomerSchema and UpdateCustomerSchema; same cheap pure-code
+// approach as the iter-15 list-query tests above.
+// ─────────────────────────────────────────────────────────────────────
+describe("CustomersController write-path schemas (iter-16 contract)", () => {
+  describe("CreateCustomerSchema", () => {
+    const createPipe = new ZodValidationPipe(CreateCustomerSchema);
+
+    test("bogus body key → BadRequestException (.strict() defense)", () => {
+      // The schema is `.strict()` so a client cannot smuggle
+      // `createdById` or other server-controlled fields through the
+      // POST body. Same defense the runbook lists for the list query.
+      expect(() =>
+        createPipe.transform({
+          name: "Acme",
+          phone: "+977-9800000000",
+          createdById: "smuggled-in",
+        }),
+      ).toThrow(BadRequestException);
+    });
+
+    test("missing required name → BadRequestException", () => {
+      expect(() =>
+        createPipe.transform({
+          phone: "+977-9800000000",
+        }),
+      ).toThrow(BadRequestException);
+    });
+
+    test("missing required phone → BadRequestException", () => {
+      expect(() =>
+        createPipe.transform({
+          name: "Acme",
+        }),
+      ).toThrow(BadRequestException);
+    });
+
+    test("invalid Nepal phone shape → BadRequestException", () => {
+      // The phone regex is shared with the Drivers slice — deliberately
+      // loose (CLAUDE.md forbids tightening without an ADR) but does
+      // reject clearly wrong shapes. Same pattern the iter-7 Drivers
+      // controller tests pin.
+      expect(() =>
+        createPipe.transform({
+          name: "Acme",
+          phone: "abc-not-a-phone",
+        }),
+      ).toThrow(BadRequestException);
+    });
+
+    test("invalid email shape → BadRequestException", () => {
+      // The email validator is loose (ADR-0013) but does reject
+      // values without an `@` between non-empty parts.
+      expect(() =>
+        createPipe.transform({
+          name: "Acme",
+          phone: "+977-9800000000",
+          email: "not-an-email",
+        }),
+      ).toThrow(BadRequestException);
+    });
+
+    test("invalid status enum → BadRequestException", () => {
+      expect(() =>
+        createPipe.transform({
+          name: "Acme",
+          phone: "+977-9800000000",
+          status: "PENDING",
+        }),
+      ).toThrow(BadRequestException);
+    });
+
+    test("valid minimal body (name + phone only) parses through", () => {
+      // contactPerson, email, panNumber, address, status are all
+      // optional. A minimal body should succeed.
+      const parsed = createPipe.transform({
+        name: "Acme",
+        phone: "+977-9800000000",
+      });
+      expect(parsed.name).toBe("Acme");
+      expect(parsed.phone).toBe("+977-9800000000");
+      expect(parsed.status).toBeUndefined();
+    });
+
+    test("valid full body parses through with all fields", () => {
+      const parsed = createPipe.transform({
+        name: "Acme Construction",
+        contactPerson: "Ram Bahadur",
+        phone: "+977-9800000000",
+        email: "billing@acme.test",
+        panNumber: "PAN-001",
+        address: "Kathmandu",
+        status: "INACTIVE",
+      });
+      expect(parsed.name).toBe("Acme Construction");
+      expect(parsed.contactPerson).toBe("Ram Bahadur");
+      expect(parsed.panNumber).toBe("PAN-001");
+      expect(parsed.status).toBe("INACTIVE");
+    });
+
+    test("nullable optional fields accept null explicitly", () => {
+      // The schema declares contactPerson / email / panNumber /
+      // address as `.nullable().optional()` so a client can send
+      // `null` to mean "no value" — distinct from "did not mention",
+      // which `undefined` carries. Both shapes normalize to `null`
+      // at the service layer.
+      const parsed = createPipe.transform({
+        name: "Acme",
+        phone: "+977-9800000000",
+        contactPerson: null,
+        email: null,
+        panNumber: null,
+        address: null,
+      });
+      expect(parsed.contactPerson).toBeNull();
+      expect(parsed.email).toBeNull();
+      expect(parsed.panNumber).toBeNull();
+      expect(parsed.address).toBeNull();
+    });
+  });
+
+  describe("UpdateCustomerSchema", () => {
+    const updatePipe = new ZodValidationPipe(UpdateCustomerSchema);
+
+    test("empty body → BadRequestException (the at-least-one-field refine)", () => {
+      // Mirror of the iter-7 Drivers UpdateDriverSchema test. An empty
+      // PATCH would silently 200 with no change if we let it through;
+      // instead the schema refines on `Object.keys(data).length` so
+      // the client sees a clear 400.
+      expect(() => updatePipe.transform({})).toThrow(BadRequestException);
+    });
+
+    test("bogus body key (e.g. id) → BadRequestException", () => {
+      // The .strict() defense applies on PATCH too: a client cannot
+      // smuggle `id` or `createdById` or any other server-controlled
+      // field through the update body.
+      expect(() => updatePipe.transform({ id: "smuggled" })).toThrow(BadRequestException);
+    });
+
+    test("single-field PATCH (just name) parses through", () => {
+      const parsed = updatePipe.transform({ name: "Renamed Customer" });
+      expect(parsed.name).toBe("Renamed Customer");
+    });
+
+    test("explicit panNumber: null is accepted (the 'clear' branch)", () => {
+      // The schema declares panNumber as `.nullable().optional()` so
+      // an operator can clear a previously-set PAN by sending null
+      // explicitly. The service distinguishes "client provided null"
+      // from "client did not mention" via hasOwnProperty; both
+      // branches need to parse through here.
+      const parsed = updatePipe.transform({ panNumber: null });
+      expect(parsed.panNumber).toBeNull();
+    });
+
+    test("invalid phone inside an otherwise valid PATCH → BadRequestException", () => {
+      expect(() => updatePipe.transform({ phone: "abc" })).toThrow(BadRequestException);
+    });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// Iter 16 — full controller-level integration for the write path. Same
+// TestingModule shape as the list/getById integration above: real
+// CustomersController + CustomersService + PrismaService, AuthGuard
+// overridden to pass-through, AUTH provider stubbed. The kickoff calls
+// for specific assertions:
+//   - happy-path create returns 201 + created row
+//   - PAN-conflict → HttpException 409 with `field: "panNumber"`
+//   - happy-path patch returns 200 + updated row
+//   - 404 patch (unknown id)
+//   - 204 delete + 404 delete (unknown id)
+// HTTP status codes are not visible from a direct method call (the
+// @HttpCode decorator only applies through the HTTP layer); the
+// assertions focus on exception types, response body shape, and side
+// effects (DB row created / updated / removed).
+// ─────────────────────────────────────────────────────────────────────
+describe("CustomersController.create / update / remove (integration, real Prisma)", () => {
+  let module: TestingModule;
+  let app: INestApplication;
+  let prisma: PrismaService;
+  let controller: CustomersController;
+  let service: CustomersService;
+  let adminId: string;
+  let fakeRequest: AuthenticatedRequest;
+
+  beforeAll(async () => {
+    module = await Test.createTestingModule({
+      controllers: [CustomersController],
+      providers: [
+        CustomersService,
+        PrismaService,
+        { provide: AUTH, useValue: { api: { getSession: () => null } } },
+      ],
+    })
+      .overrideGuard(AuthGuard)
+      .useValue({ canActivate: () => true })
+      .compile();
+
+    app = module.createNestApplication();
+    await app.init();
+
+    prisma = module.get(PrismaService);
+    service = module.get(CustomersService);
+    controller = module.get(CustomersController);
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  beforeEach(async () => {
+    await resetDb(prisma);
+    adminId = `user_${randomUUID()}`;
+    await prisma.user.create({
+      data: {
+        id: adminId,
+        email: `admin-${adminId}@fleetco.test`,
+        name: "Test Admin",
+      },
+    });
+    // The controller reads `request.session.user.id`. In production
+    // AuthGuard populates request.session per ADR-0021; here the
+    // guard is overridden, so we hand the controller a minimal fake.
+    fakeRequest = { session: { user: { id: adminId } } } as unknown as AuthenticatedRequest;
+  });
+
+  test("create() persists the customer with createdById from the session (HTTP 201 + body)", async () => {
+    const created = await controller.create(
+      {
+        name: "Acme Construction Pvt. Ltd.",
+        phone: "+977-9811111111",
+        panNumber: "PAN-CREATE-001",
+      },
+      fakeRequest,
+    );
+    expect(created.id).toBeTruthy();
+    expect(created.name).toBe("Acme Construction Pvt. Ltd.");
+    // The kickoff spec: createdById comes from the session, not the
+    // body. Pinning that path so a refactor that accidentally reads
+    // it from the body would fail.
+    expect(created.createdById).toBe(adminId);
+
+    const refetched = await prisma.customer.findUnique({ where: { id: created.id } });
+    expect(refetched?.panNumber).toBe("PAN-CREATE-001");
+  });
+
+  test("create() with duplicate panNumber → HTTP 409 with field: 'panNumber' in the body", async () => {
+    // First create succeeds.
+    await controller.create(
+      { name: "Acme A", phone: "+977-9800000000", panNumber: "DUP-PAN" },
+      fakeRequest,
+    );
+
+    // Second create with the same PAN must surface as HttpException
+    // (409) with the field token in the response body. Asserted via
+    // HttpException.getResponse() because Nest's default exception
+    // filter renders that object as the JSON body verbatim.
+    let thrown: unknown = null;
+    try {
+      await controller.create(
+        { name: "Acme B", phone: "+977-9800000001", panNumber: "DUP-PAN" },
+        fakeRequest,
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(HttpException);
+    expect((thrown as HttpException).getStatus()).toBe(HttpStatus.CONFLICT);
+    const response = (thrown as HttpException).getResponse() as {
+      statusCode: number;
+      message: string;
+      field: string;
+    };
+    expect(response.statusCode).toBe(HttpStatus.CONFLICT);
+    expect(response.field).toBe("panNumber");
+    // The message is the service's verbatim string; the normalizer
+    // uppercased the input PAN so the message includes the canonical
+    // form ("DUP-PAN") regardless of the case the client typed.
+    expect(response.message).toContain("DUP-PAN");
+  });
+
+  test("update() returns the updated customer on success", async () => {
+    const before = await service.create(
+      {
+        name: "Original Name",
+        phone: "+977-9812222222",
+      },
+      adminId,
+    );
+
+    const after = await controller.update(before.id, { name: "Renamed" });
+    expect(after.id).toBe(before.id);
+    expect(after.name).toBe("Renamed");
+    // Other fields stay put — diff-PATCH semantics confirmed at the
+    // controller level. The service tests cover the broader matrix;
+    // this is the controller's contract that "the response body
+    // reflects the post-update state".
+    expect(after.phone).toBe("+977-9812222222");
+  });
+
+  test("update() of an unknown id throws NotFoundException (HTTP 404)", async () => {
+    try {
+      await controller.update("nonexistent-id", { name: "X" });
+      throw new Error("expected NotFoundException");
+    } catch (error) {
+      expect(error).toBeInstanceOf(NotFoundException);
+      expect((error as NotFoundException).message).toContain("nonexistent-id");
+    }
+  });
+
+  test("update() with a colliding panNumber → HTTP 409 with field: 'panNumber'", async () => {
+    // Two customers with PANs; rename one to the other's PAN.
+    const a = await service.create(
+      { name: "A", phone: "+977-9800000000", panNumber: "PAN-X" },
+      adminId,
+    );
+    await service.create({ name: "B", phone: "+977-9800000001", panNumber: "PAN-Y" }, adminId);
+
+    let thrown: unknown = null;
+    try {
+      await controller.update(a.id, { panNumber: "PAN-Y" });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(HttpException);
+    expect((thrown as HttpException).getStatus()).toBe(HttpStatus.CONFLICT);
+    const response = (thrown as HttpException).getResponse() as {
+      field: string;
+      message: string;
+    };
+    expect(response.field).toBe("panNumber");
+    expect(response.message).toContain("PAN-Y");
+  });
+
+  test("remove() deletes the row and resolves without a body (HTTP 204)", async () => {
+    const created = await service.create(
+      { name: "To Be Deleted", phone: "+977-9813333333" },
+      adminId,
+    );
+
+    // @HttpCode(HttpStatus.NO_CONTENT) is applied at the decorator
+    // level; calling the method directly we only see the resolved
+    // value (void). The HTTP status is verified indirectly via the
+    // method's declared return type — if a refactor changed
+    // remove() to return a body, the type system would catch it.
+    const result = await controller.remove(created.id);
+    expect(result).toBeUndefined();
+
+    const refetched = await prisma.customer.findUnique({ where: { id: created.id } });
+    expect(refetched).toBeNull();
+  });
+
+  test("remove() of an unknown id throws NotFoundException (HTTP 404)", async () => {
+    try {
+      await controller.remove("nonexistent-id");
+      throw new Error("expected NotFoundException");
+    } catch (error) {
+      expect(error).toBeInstanceOf(NotFoundException);
+      expect((error as NotFoundException).message).toContain("nonexistent-id");
     }
   });
 });
