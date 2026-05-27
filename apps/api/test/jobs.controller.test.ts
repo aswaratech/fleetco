@@ -7,8 +7,13 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest"
 import { ZodValidationPipe } from "../src/common/zod-validation.pipe";
 import { AuthGuard } from "../src/modules/auth/auth.guard";
 import { AUTH } from "../src/modules/auth/auth.tokens";
+import type { AuthenticatedRequest } from "../src/modules/auth/auth.types";
 import { JobsController } from "../src/modules/jobs/jobs.controller";
-import { ListJobsQuerySchema } from "../src/modules/jobs/jobs.schemas";
+import {
+  CreateJobSchema,
+  ListJobsQuerySchema,
+  UpdateJobSchema,
+} from "../src/modules/jobs/jobs.schemas";
 import { JobsService } from "../src/modules/jobs/jobs.service";
 import { PrismaService } from "../src/modules/prisma/prisma.service";
 import { resetDb } from "./db";
@@ -429,6 +434,194 @@ describe("JobsController.getById (integration, real Prisma)", () => {
     } catch (error) {
       expect(error).toBeInstanceOf(NotFoundException);
       expect((error as NotFoundException).message).toContain("nonexistent-job-id");
+    }
+  });
+});
+
+describe("Jobs write-path schemas (iter-18 contract, pipe layer)", () => {
+  // Pure pipe-level tests of CreateJobSchema / UpdateJobSchema. Cheap —
+  // no TestingModule. Mirror of the Customers / Drivers write-schema
+  // pipe blocks.
+  const createPipe = new ZodValidationPipe(CreateJobSchema);
+  const updatePipe = new ZodValidationPipe(UpdateJobSchema);
+
+  test("CreateJobSchema: bogus body key → 400 (.strict())", () => {
+    // A client trying to set the server-controlled jobNumber (or any
+    // unknown key) is rejected — the generator owns jobNumber.
+    expect(() =>
+      createPipe.transform({
+        customerId: "cust_1",
+        description: "Work",
+        jobNumber: "JOB-2026-00001",
+      }),
+    ).toThrow(BadRequestException);
+  });
+
+  test("CreateJobSchema: missing required field (no description) → 400", () => {
+    expect(() => createPipe.transform({ customerId: "cust_1" })).toThrow(BadRequestException);
+  });
+
+  test("CreateJobSchema: scheduledEnd before scheduledStart → 400 (cross-field rule)", () => {
+    expect(() =>
+      createPipe.transform({
+        customerId: "cust_1",
+        description: "Work",
+        scheduledStartDate: "2026-06-10",
+        scheduledEndDate: "2026-06-01",
+      }),
+    ).toThrow(BadRequestException);
+  });
+
+  test("CreateJobSchema: valid minimal body parses (status defaults at service)", () => {
+    const parsed = createPipe.transform({ customerId: "cust_1", description: "Foundation pour" });
+    expect(parsed.customerId).toBe("cust_1");
+    expect(parsed.description).toBe("Foundation pour");
+    expect(parsed.status).toBeUndefined();
+  });
+
+  test("UpdateJobSchema: empty body → 400 (at-least-one-field refine)", () => {
+    expect(() => updatePipe.transform({})).toThrow(BadRequestException);
+  });
+
+  test("UpdateJobSchema: customerId / jobNumber are not updatable → 400", () => {
+    expect(() => updatePipe.transform({ customerId: "cust_2" })).toThrow(BadRequestException);
+    expect(() => updatePipe.transform({ jobNumber: "JOB-2026-00002" })).toThrow(
+      BadRequestException,
+    );
+  });
+
+  test("UpdateJobSchema: single-field status patch parses", () => {
+    const parsed = updatePipe.transform({ status: "IN_PROGRESS" });
+    expect(parsed.status).toBe("IN_PROGRESS");
+  });
+});
+
+describe("JobsController.create / update / remove (integration, real Prisma)", () => {
+  // Full controller-level integration for the iter-18 write path:
+  // real JobsController + JobsService + PrismaService, AuthGuard
+  // overridden, AUTH stubbed. The controller's create() reads
+  // createdById from request.session.user.id; we hand it a minimal
+  // fake request (cast, since AuthenticatedRequest extends
+  // express.Request which we don't construct in full) — same approach
+  // as the iter-12 vehicles.controller stats tests.
+
+  let module: TestingModule;
+  let app: INestApplication;
+  let prisma: PrismaService;
+  let controller: JobsController;
+  let adminId: string;
+  let customerId: string;
+  let fakeRequest: AuthenticatedRequest;
+
+  beforeAll(async () => {
+    module = await Test.createTestingModule({
+      controllers: [JobsController],
+      providers: [
+        JobsService,
+        PrismaService,
+        { provide: AUTH, useValue: { api: { getSession: () => null } } },
+      ],
+    })
+      .overrideGuard(AuthGuard)
+      .useValue({ canActivate: () => true })
+      .compile();
+
+    app = module.createNestApplication();
+    await app.init();
+
+    prisma = module.get(PrismaService);
+    controller = module.get(JobsController);
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  beforeEach(async () => {
+    await resetDb(prisma);
+    adminId = `user_${randomUUID()}`;
+    await prisma.user.create({
+      data: { id: adminId, email: `admin-${adminId}@fleetco.test`, name: "Test Admin" },
+    });
+    const customer = await prisma.customer.create({
+      data: {
+        name: `Acme Construction ${randomUUID().slice(0, 6)}`,
+        phone: "+977-9800000000",
+        createdById: adminId,
+      },
+    });
+    customerId = customer.id;
+    fakeRequest = { session: { user: { id: adminId } } } as unknown as AuthenticatedRequest;
+  });
+
+  test("create() generates a JOB-YYYY-NNNNN number, persists, and sets createdById from session", async () => {
+    const created = await controller.create(
+      { customerId, description: "Foundation pour at Block A" },
+      fakeRequest,
+    );
+    const year = new Date().getUTCFullYear();
+    expect(created.jobNumber).toBe(`JOB-${year}-00001`);
+    expect(created.description).toBe("Foundation pour at Block A");
+    expect(created.status).toBe(JobStatus.PLANNED); // service default
+    expect(created.createdById).toBe(adminId);
+    expect(created.customer.id).toBe(customerId);
+  });
+
+  test("create() increments the jobNumber sequence within the year", async () => {
+    const first = await controller.create({ customerId, description: "Job one" }, fakeRequest);
+    const second = await controller.create({ customerId, description: "Job two" }, fakeRequest);
+    const year = new Date().getUTCFullYear();
+    expect(first.jobNumber).toBe(`JOB-${year}-00001`);
+    expect(second.jobNumber).toBe(`JOB-${year}-00002`);
+  });
+
+  test("create() with a non-existent customerId → BadRequestException (P2003 → 400)", async () => {
+    try {
+      await controller.create(
+        { customerId: "cust_does_not_exist", description: "Orphan job" },
+        fakeRequest,
+      );
+      throw new Error("expected BadRequestException");
+    } catch (error) {
+      expect(error).toBeInstanceOf(BadRequestException);
+      expect((error as BadRequestException).message).toContain("cust_does_not_exist");
+    }
+  });
+
+  test("update() applies a diff-PATCH and returns the updated job", async () => {
+    const created = await controller.create({ customerId, description: "Original" }, fakeRequest);
+    const updated = await controller.update(created.id, {
+      status: JobStatus.IN_PROGRESS,
+      description: "Revised scope",
+    });
+    expect(updated.status).toBe(JobStatus.IN_PROGRESS);
+    expect(updated.description).toBe("Revised scope");
+    // jobNumber is immutable + untouched.
+    expect(updated.jobNumber).toBe(created.jobNumber);
+  });
+
+  test("update() unknown id → NotFoundException", async () => {
+    try {
+      await controller.update("nonexistent-job", { status: JobStatus.COMPLETED });
+      throw new Error("expected NotFoundException");
+    } catch (error) {
+      expect(error).toBeInstanceOf(NotFoundException);
+      expect((error as NotFoundException).message).toContain("nonexistent-job");
+    }
+  });
+
+  test("remove() hard-deletes and resolves without a body; 404 on unknown id", async () => {
+    const created = await controller.create({ customerId, description: "To delete" }, fakeRequest);
+    const result = await controller.remove(created.id);
+    expect(result).toBeUndefined();
+    const refetched = await prisma.job.findUnique({ where: { id: created.id } });
+    expect(refetched).toBeNull();
+
+    try {
+      await controller.remove("nonexistent-job");
+      throw new Error("expected NotFoundException");
+    } catch (error) {
+      expect(error).toBeInstanceOf(NotFoundException);
     }
   });
 });

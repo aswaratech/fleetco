@@ -1,7 +1,23 @@
-import { Controller, Get, Param, Query, UseGuards } from "@nestjs/common";
+import {
+  Body,
+  ConflictException,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  HttpException,
+  HttpStatus,
+  Param,
+  Patch,
+  Post,
+  Query,
+  Req,
+  UseGuards,
+} from "@nestjs/common";
 
 import { ZodValidationPipe } from "../../common/zod-validation.pipe";
 import { AuthGuard } from "../auth/auth.guard";
+import type { AuthenticatedRequest } from "../auth/auth.types";
 
 // JobsService is injected by NestJS via emitDecoratorMetadata; the
 // class reference must remain a value import at runtime. Same pattern
@@ -10,10 +26,14 @@ import { AuthGuard } from "../auth/auth.guard";
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports
 import { JobsService, LIST_TAKE_DEFAULT, type JobDetail, type JobListItem } from "./jobs.service";
 import {
+  CreateJobSchema,
   ListJobsQuerySchema,
+  UpdateJobSchema,
+  type CreateJobInput,
   type JobSortColumn,
   type JobSortDir,
   type ListJobsQuery,
+  type UpdateJobInput,
 } from "./jobs.schemas";
 
 // Wire response shape for GET /api/v1/jobs. Mirror of TripsListResponse
@@ -43,10 +63,10 @@ export interface JobsListResponse {
 // explicit decorator, which is the right direction for an admin-only
 // surface in Phase 1.
 //
-// Iter 17 ships the read path only (GET list + GET :id); iter 18 will
-// layer the write path (POST create / PATCH update / DELETE remove)
+// Iter 17 ships the read path (GET list + GET :id); iter 18 layers
+// the write path (POST create / PATCH update / DELETE remove) on top
 // the same way Trips iter 8 → iter 9 and Customers iter 15 → iter 16
-// staged. The TODO at the bottom marks the slot.
+// staged.
 @Controller("api/v1/jobs")
 @UseGuards(AuthGuard)
 export class JobsController {
@@ -101,10 +121,105 @@ export class JobsController {
     return this.jobs.getById(id);
   }
 
-  // TODO(iter 18): @Post() create (HTTP 201) — pulls createdById from
-  // request.session.user.id, surfaces P2002 on the generated
-  // jobNumber as 409 with `field: "jobNumber"` (mirror of Customers
-  // PAN-conflict iter 16), surfaces P2003 on customerId as 400
-  // naming `customer` (mirror of Trips P2003 naming `vehicle` /
-  // `driver`). @Patch(":id") update; @Delete(":id") remove (204).
+  /**
+   * Create a Job. The body is validated by ZodValidationPipe against
+   * CreateJobSchema (jobs.schemas.ts); malformed payloads return HTTP
+   * 400 with a clear per-field message. `createdById` comes from the
+   * authenticated session (AuthGuard populates request.session per
+   * ADR-0021 §6); it is never read from the body — the schema's
+   * `.strict()` rejects it. `jobNumber` is generated server-side by
+   * JobsService.create and is also never accepted from the body for
+   * the same reason.
+   *
+   * Wire shape on the rare jobNumber-collision-after-retry conflict:
+   *
+   *   {
+   *     "statusCode": 409,
+   *     "message": "Could not generate a unique jobNumber after 3 attempts.",
+   *     "field": "jobNumber"
+   *   }
+   *
+   * Same field-token convention Customers (panNumber) / Drivers
+   * (licenseNumber) / Vehicles (registrationNumber) use. The
+   * translation from the service's ConflictException to this richer
+   * response body lives here rather than in the service so the
+   * service stays usable from other modules without the controller's
+   * response shape leaking in. In practice the service's retry loop
+   * makes this branch effectively unreachable; the mapping ships
+   * defensively per the iter-18 kickoff.
+   *
+   * BadRequestException from the P2003 path (stale customerId) is
+   * passed through unchanged — Nest's default exception filter
+   * renders it as `{ statusCode: 400, message: "Customer <id> does
+   * not exist." }`, which is the shape the web action layer parses
+   * to surface an inline error on the customer picker.
+   */
+  @Post()
+  @HttpCode(HttpStatus.CREATED)
+  async create(
+    @Body(new ZodValidationPipe(CreateJobSchema)) body: CreateJobInput,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<JobDetail> {
+    try {
+      return await this.jobs.create(body, request.session.user.id);
+    } catch (error) {
+      throw remapJobNumberConflict(error);
+    }
+  }
+
+  /**
+   * Partial update. UpdateJobSchema enforces "at least one field"
+   * and rejects unknown keys (so a client cannot smuggle `id`,
+   * `createdById`, `customerId`, or `jobNumber` through this
+   * endpoint). 404 on missing record. The cross-field rule on date
+   * pairs is checked at the service layer against the merged shape;
+   * a PATCH that touches a single date without its pair re-uses the
+   * stored value for the rule.
+   */
+  @Patch(":id")
+  async update(
+    @Param("id") id: string,
+    @Body(new ZodValidationPipe(UpdateJobSchema)) body: UpdateJobInput,
+  ): Promise<JobDetail> {
+    return this.jobs.update(id, body);
+  }
+
+  /**
+   * Hard delete. Returns HTTP 204 (no body) on success; 404 when the
+   * job does not exist (service throws NotFoundException on P2025).
+   *
+   * No referencing slice exists yet in Phase 1 (Trips don't FK Job
+   * today; that lands when a future slice introduces `Trip.jobId`).
+   * When it does, this surface will gain a 409 delete-blocker branch
+   * mirroring the Customer delete-blocker (iter 17) — see the
+   * TODO(trip→job FK slice) note on JobsService.delete.
+   */
+  @Delete(":id")
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async remove(@Param("id") id: string): Promise<void> {
+    await this.jobs.delete(id);
+  }
+}
+
+// Translate the service's jobNumber-uniqueness ConflictException into
+// a richer HTTP 409 body that names the offending field. Nest's
+// default exception filter renders ConflictException as
+// `{ statusCode: 409, message: "..." }`; the web action layer needs
+// the field token to surface the error inline next to the (read-only)
+// jobNumber display, although in practice the retry loop in
+// JobsService.create makes this branch effectively unreachable.
+//
+// The function preserves the original message verbatim; only the
+// response body shape is extended. Non-conflict errors pass through
+// unchanged. Same shape and rationale as the Customers
+// `remapPanConflict` helper in customers.controller.ts (iter 16).
+function remapJobNumberConflict(error: unknown): unknown {
+  if (error instanceof ConflictException) {
+    const message = error.message;
+    return new HttpException(
+      { statusCode: HttpStatus.CONFLICT, message, field: "jobNumber" },
+      HttpStatus.CONFLICT,
+    );
+  }
+  return error;
 }
