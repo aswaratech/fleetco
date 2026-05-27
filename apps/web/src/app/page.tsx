@@ -34,6 +34,9 @@ export default async function HomePage() {
           <Button asChild variant="outline" className="w-full justify-start">
             <Link href="/customers">Customers</Link>
           </Button>
+          <Button asChild variant="outline" className="w-full justify-start">
+            <Link href="/jobs">Jobs</Link>
+          </Button>
         </nav>
         <SignOutButton />
       </div>
