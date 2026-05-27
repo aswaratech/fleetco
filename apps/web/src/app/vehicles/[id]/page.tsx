@@ -2,12 +2,39 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
 import { getServerSession } from "@/lib/session";
 import { VEHICLE_KIND_LABELS, VEHICLE_STATUS_LABELS } from "@/lib/vehicles-schema";
 
+import { TRIP_STATUS_LABELS, type TripListItem, type TripStatus } from "../../trips/types";
 import type { Vehicle } from "../types";
 import { DeleteVehicleDialog } from "./delete-vehicle-dialog";
+
+// Cross-slice read — iter 10. The "Recent trips" section below issues
+// a second authenticated fetch against the iter-8 `?vehicleId=` query
+// param on the trips list endpoint. The section caps at 10 rows and
+// surfaces a "View all →" link when the total exceeds that cap. The
+// shape mirrors the trips list rows but omits `vehicle.registrationNumber`
+// (redundant — the page is already scoped to one vehicle) and omits
+// the driver's `phone` (Tier 2 PII not needed at a glance).
+interface TripsListResponse {
+  items: TripListItem[];
+  total: number;
+  skip: number;
+  take: number;
+  sortBy: string;
+  sortDir: string;
+}
+
+const RECENT_TRIPS_LIMIT = 10;
 
 // Vehicle detail — iter 3 of the Vehicles slice. Server-rendered shell
 // (auth gate via getServerSession; redirect to /login if absent); fetches
@@ -54,6 +81,21 @@ function formatTimestamp(iso: string | null): string {
   return date.toISOString().replace("T", " ").slice(0, 19) + " UTC";
 }
 
+// Render an ISO date+time as YYYY-MM-DD HH:MM (no seconds, no zone
+// suffix — the trips list page uses the same minute-precision
+// rendering). Matches `formatDateTime` in apps/web/src/app/trips/page.tsx.
+function formatDateTime(iso: string | null): string {
+  if (!iso) return "—";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "—";
+  const y = date.getUTCFullYear();
+  const m = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(date.getUTCDate()).padStart(2, "0");
+  const hh = String(date.getUTCHours()).padStart(2, "0");
+  const mm = String(date.getUTCMinutes()).padStart(2, "0");
+  return `${y}-${m}-${d} ${hh}:${mm}`;
+}
+
 export default async function VehicleDetailPage({
   params,
 }: DetailPageProps): Promise<React.ReactElement> {
@@ -75,6 +117,23 @@ export default async function VehicleDetailPage({
       if (error.status === 404) {
         notFound();
       }
+    }
+    throw error;
+  }
+
+  // Cross-slice read: fetch the 10 most recent trips for this vehicle.
+  // 401 → login (consistent with the primary fetch above). Any other
+  // failure is allowed to propagate; the user has already seen the
+  // vehicle, and a 5xx on the section fetch is loud enough at the
+  // error-boundary that swallowing it would be the worse outcome.
+  let trips: TripsListResponse;
+  try {
+    trips = await apiFetch<TripsListResponse>(
+      `/api/v1/trips?vehicleId=${encodeURIComponent(vehicle.id)}&sortBy=createdAt&sortDir=desc&take=${RECENT_TRIPS_LIMIT}`,
+    );
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      redirect("/login");
     }
     throw error;
   }
@@ -137,6 +196,61 @@ export default async function VehicleDetailPage({
             <DetailRow label="Created at" value={formatTimestamp(vehicle.createdAt)} />
             <DetailRow label="Updated at" value={formatTimestamp(vehicle.updatedAt)} />
           </dl>
+        </section>
+
+        <section className="border-border-subtle bg-surface-raised rounded border shadow-sm">
+          <header className="border-border-subtle flex items-center justify-between gap-4 border-b px-6 py-4">
+            <h2 className="text-text-muted text-xs font-medium uppercase tracking-wide">
+              Recent trips
+            </h2>
+            {trips.total > RECENT_TRIPS_LIMIT ? (
+              <Link
+                href={`/trips?vehicleId=${encodeURIComponent(vehicle.id)}`}
+                className="text-text-secondary hover:text-text-primary text-sm"
+              >
+                View all trips on this vehicle →
+              </Link>
+            ) : null}
+          </header>
+          {trips.items.length === 0 ? (
+            <p className="text-text-secondary px-6 py-6 text-sm">No trips on this vehicle yet.</p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Driver</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead className="text-right tabular-nums">Started</TableHead>
+                  <TableHead className="text-right tabular-nums">Ended</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {trips.items.map((t) => (
+                  // Stretched-link pattern mirrors the trips list: the
+                  // first cell's anchor expands to cover the row.
+                  <TableRow key={t.id} className="relative cursor-pointer">
+                    <TableCell className="text-text-primary">
+                      <Link
+                        href={`/trips/${t.id}`}
+                        className="focus-visible:outline-border-focus before:absolute before:inset-0 focus-visible:outline-2 focus-visible:outline-offset-[-2px]"
+                      >
+                        {t.driver.fullName}
+                      </Link>
+                    </TableCell>
+                    <TableCell className="text-text-secondary">
+                      {TRIP_STATUS_LABELS[t.status as TripStatus] ?? t.status}
+                    </TableCell>
+                    <TableCell className="text-text-secondary text-right tabular-nums">
+                      {formatDateTime(t.startedAt)}
+                    </TableCell>
+                    <TableCell className="text-text-secondary text-right tabular-nums">
+                      {formatDateTime(t.endedAt)}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
         </section>
       </div>
     </main>

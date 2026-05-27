@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useState, useTransition } from "react";
 
 import {
@@ -16,6 +17,19 @@ import {
 import { Button } from "@/components/ui/button";
 
 import { deleteVehicleAction } from "./actions";
+
+// The API formats the 409 message as
+//   "Cannot delete vehicle: 3 trips reference this vehicle."
+// (or "1 trip" in the singular case). We parse the count out so the
+// link can read "View 3 trips" / "View 1 trip"; on no-match we fall
+// back to "View trips" — the link is still useful without the count.
+// See apps/api/src/modules/vehicles/vehicles.service.ts.
+function parseTripCount(message: string): number | null {
+  const match = /(\d+) trips?\b/.exec(message);
+  if (!match) return null;
+  const n = Number(match[1]);
+  return Number.isFinite(n) ? n : null;
+}
 
 interface DeleteVehicleDialogProps {
   id: string;
@@ -69,9 +83,28 @@ export function DeleteVehicleDialog({
           <AlertDialogDescription>This cannot be undone.</AlertDialogDescription>
         </AlertDialogHeader>
         {error ? (
-          <p role="alert" className="text-status-error text-sm">
-            {error}
-          </p>
+          <div role="alert" className="text-status-error space-y-1 text-sm">
+            <p>{error}</p>
+            {/* Iter 10 affordance — pivot from "I can't delete" to
+                "what's blocking me?" without leaving the dialog. The
+                link is rendered whenever there's an error message,
+                not only on a count-match, because the worst case is
+                a "View trips" link that lands on an empty filtered
+                list — still cheaper than re-deriving the deep link
+                from the operator's memory of the vehicle id. */}
+            <p>
+              <Link
+                href={`/trips?vehicleId=${encodeURIComponent(id)}`}
+                className="underline underline-offset-4"
+              >
+                {(() => {
+                  const n = parseTripCount(error);
+                  if (n === null) return "View trips";
+                  return `View ${n} trip${n === 1 ? "" : "s"}`;
+                })()}
+              </Link>
+            </p>
+          </div>
         ) : null}
         <AlertDialogFooter>
           <AlertDialogCancel disabled={isPending}>Keep vehicle</AlertDialogCancel>
