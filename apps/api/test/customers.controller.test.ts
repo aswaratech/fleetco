@@ -195,10 +195,12 @@ describe("CustomersController.list (integration, real Prisma)", () => {
     });
   });
 
-  async function seedCustomer(overrides: {
-    name?: string;
-    status?: CustomerStatus;
-  } = {}) {
+  async function seedCustomer(
+    overrides: {
+      name?: string;
+      status?: CustomerStatus;
+    } = {},
+  ) {
     return prisma.customer.create({
       data: {
         name: overrides.name ?? `Acme Construction ${randomUUID().slice(0, 6)}`,
