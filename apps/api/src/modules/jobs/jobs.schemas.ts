@@ -171,9 +171,183 @@ export const ListJobsQuerySchema = z
 
 export type ListJobsQuery = z.infer<typeof ListJobsQuerySchema>;
 
-// Iter 18 (Jobs write path) will add CreateJobSchema / UpdateJobSchema
-// here, plus a JOB-YYYY-NNNNN generator at the service layer and the
-// `field: "jobNumber"` body shape on P2002 (mirror of Customers'
-// PAN-conflict pattern from iter 16). The slot is intentionally left
-// blank in iter 17 so the read-path PR stays scoped.
-// TODO(iter 18): CreateJobSchema, UpdateJobSchema.
+// ---------------------------------------------------------------------
+// Write-path schemas (iter 18) — POST and PATCH bodies.
+// ---------------------------------------------------------------------
+//
+// Both schemas are `.strict()` so an unexpected key (e.g. a client
+// trying to set `createdById` or `jobNumber` directly, or a typo'd
+// field name) surfaces as HTTP 400 with a clear message rather than
+// being silently dropped. Two server-controlled fields rely on this:
+//
+//   - `createdById` is derived from the session and must never be
+//     accepted from the wire.
+//   - `jobNumber` is generated server-side (JOB-YYYY-NNNNN format,
+//     see JobsService.create) and is permanent for a job's lifetime
+//     — neither create nor update accepts it.
+//
+// `customerId` is also NOT updatable: re-assigning a job to a
+// different customer is out of scope this iter, and `.strict()`
+// rejects it on PATCH (it's required on POST).
+
+// Description bounds. The Prisma column is `String` (unbounded in
+// Postgres) but a 2048-character ceiling keeps the surface predictable
+// (the iter-17 schema doc-comment names 2048 explicitly). Operators
+// wanting a longer scope-of-work get an attachments slice in Phase 2.
+const DESCRIPTION_MAX = 2048;
+
+// Notes upper bound. The Prisma column is `String?` (unbounded); the
+// iter-17 schema doc-comment names 4096. Same rationale as
+// description — predictable upper bound, attachments in Phase 2.
+const NOTES_MAX = 4096;
+
+const Description = z
+  .string()
+  .trim()
+  .min(1, "Description is required.")
+  .max(DESCRIPTION_MAX, `Description must be at most ${DESCRIPTION_MAX} characters.`);
+
+const Notes = z.string().max(NOTES_MAX, `Notes must be at most ${NOTES_MAX} characters.`);
+
+const JobStatusEnum = z.enum(JOB_STATUSES, {
+  error: () => `Status must be one of: ${JOB_STATUSES.join(", ")}.`,
+});
+
+// Date fields use `z.coerce.date()` so a web form's YYYY-MM-DD string
+// (or an API client's ISO datetime) is coerced into a Date before the
+// service writes it. Invalid input fails the schema with a clear
+// message rather than producing an Invalid Date at the database
+// boundary. Mirror of the Trips schema's approach to timestamps but
+// using `coerce` instead of a separate ISO-string regex — Jobs uses
+// date-only fields (scheduledStartDate is "what day", not "what
+// timestamp"), so the coercion path is the more ergonomic fit. An
+// invalid value (e.g., "not-a-date") fails parse with the configured
+// error message.
+const JobDate = z.coerce.date({
+  error: () => "Must be a valid date (YYYY-MM-DD or ISO 8601).",
+});
+
+// Shape used by the cross-field validator. Exported so the service
+// can re-run the same validation against the merged shape after a
+// PATCH (mirror of the Trips approach with validateTripCrossFields).
+export interface JobCrossFieldShape {
+  scheduledStartDate?: Date | null | undefined;
+  scheduledEndDate?: Date | null | undefined;
+  actualStartDate?: Date | null | undefined;
+  actualEndDate?: Date | null | undefined;
+}
+
+/**
+ * Validate the Jobs cross-field rules against a merged shape. Returns
+ * a list of human-readable error messages; an empty array means valid.
+ *
+ * Rules (iter-18 kickoff):
+ *   - When both `scheduledStartDate` and `scheduledEndDate` are
+ *     present, `scheduledEndDate >= scheduledStartDate`.
+ *   - When both `actualStartDate` and `actualEndDate` are present,
+ *     `actualEndDate >= actualStartDate`.
+ *
+ * No constraint when either end is null/undefined — a job that has
+ * been scheduled with only a start (no firm end yet) is legitimate,
+ * as is a job currently in progress (actual start set, actual end
+ * still null). The schema-level superRefine calls this on the full
+ * create body; the service can call it again against a merged shape
+ * during update for defense-in-depth.
+ */
+export function validateJobCrossFields(shape: JobCrossFieldShape): string[] {
+  const errors: string[] = [];
+  const { scheduledStartDate, scheduledEndDate, actualStartDate, actualEndDate } = shape;
+
+  if (scheduledStartDate && scheduledEndDate) {
+    const start = scheduledStartDate.getTime();
+    const end = scheduledEndDate.getTime();
+    if (Number.isFinite(start) && Number.isFinite(end) && end < start) {
+      errors.push("scheduledEndDate must be greater than or equal to scheduledStartDate.");
+    }
+  }
+  if (actualStartDate && actualEndDate) {
+    const start = actualStartDate.getTime();
+    const end = actualEndDate.getTime();
+    if (Number.isFinite(start) && Number.isFinite(end) && end < start) {
+      errors.push("actualEndDate must be greater than or equal to actualStartDate.");
+    }
+  }
+  return errors;
+}
+
+// POST /api/v1/jobs body schema. Required: customerId, description.
+// Optional: status (defaults to PLANNED at the service), the four
+// date fields (nullable + optional), and notes (nullable + optional).
+//
+// `jobNumber` is intentionally NOT in this schema — it's generated
+// server-side from the JOB-YYYY-NNNNN format and `.strict()` rejects
+// any client attempt to set it. `createdById` is excluded for the
+// same reason; the controller pulls it from the session.
+export const CreateJobSchema = z
+  .object({
+    customerId: z.string().min(1, "customerId is required."),
+    description: Description,
+    status: JobStatusEnum.optional(),
+    scheduledStartDate: JobDate.nullable().optional(),
+    scheduledEndDate: JobDate.nullable().optional(),
+    actualStartDate: JobDate.nullable().optional(),
+    actualEndDate: JobDate.nullable().optional(),
+    notes: Notes.nullable().optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    for (const message of validateJobCrossFields({
+      scheduledStartDate: value.scheduledStartDate ?? null,
+      scheduledEndDate: value.scheduledEndDate ?? null,
+      actualStartDate: value.actualStartDate ?? null,
+      actualEndDate: value.actualEndDate ?? null,
+    })) {
+      ctx.addIssue({ code: "custom", message });
+    }
+  });
+
+export type CreateJobInput = z.infer<typeof CreateJobSchema>;
+
+// PATCH /api/v1/jobs/:id body schema. Every mutable field is optional
+// (diff-PATCH semantics, as in CustomersService.update and
+// DriversService.update). Two server-controlled / immutable fields
+// are NOT in the shape and so `.strict()` rejects any attempt to set
+// them:
+//
+//   - `jobNumber` — permanent for a job's lifetime (iter-18 kickoff:
+//     "a job's number is permanent").
+//   - `customerId` — reassigning a job to a different customer is
+//     out of scope this iter (iter-18 kickoff: "reassigning a job to
+//     a different customer is out of scope").
+//
+// The cross-field refine runs on the partial body alone; for the
+// merged shape the service re-runs validateJobCrossFields after
+// folding the patch into the existing row — same defense-in-depth
+// pattern Trips uses for its merged-shape validation.
+export const UpdateJobSchema = z
+  .object({
+    description: Description,
+    status: JobStatusEnum,
+    scheduledStartDate: JobDate.nullable(),
+    scheduledEndDate: JobDate.nullable(),
+    actualStartDate: JobDate.nullable(),
+    actualEndDate: JobDate.nullable(),
+    notes: Notes.nullable(),
+  })
+  .strict()
+  .partial()
+  .refine((data) => Object.keys(data).length > 0, {
+    message: "At least one field is required.",
+  })
+  .superRefine((value, ctx) => {
+    for (const message of validateJobCrossFields({
+      scheduledStartDate: value.scheduledStartDate,
+      scheduledEndDate: value.scheduledEndDate,
+      actualStartDate: value.actualStartDate,
+      actualEndDate: value.actualEndDate,
+    })) {
+      ctx.addIssue({ code: "custom", message });
+    }
+  });
+
+export type UpdateJobInput = z.infer<typeof UpdateJobSchema>;

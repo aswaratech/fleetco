@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { NotFoundException } from "@nestjs/common";
+import { BadRequestException, NotFoundException } from "@nestjs/common";
 import { Test, type TestingModule } from "@nestjs/testing";
 import { JobStatus, type Customer } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 
+import { CreateJobSchema, UpdateJobSchema } from "../src/modules/jobs/jobs.schemas";
 import { JobsService, LIST_TAKE_MAX } from "../src/modules/jobs/jobs.service";
 import { PrismaService } from "../src/modules/prisma/prisma.service";
 import { resetDb } from "./db";
@@ -348,6 +349,367 @@ describe("JobsService (integration, real Postgres)", () => {
       // shape-change requiring a contract review per ADR-0013 PII
       // tiering.
       expect(Object.keys(result.items[0]?.customer ?? {}).sort()).toEqual(["id", "name"]);
+    });
+  });
+
+  // -------------------------------------------------------------------
+  // Iter 18 — write path. JOB-YYYY-NNNNN generator, create with FK
+  // validation, diff-PATCH update, delete + 404 + no-op + cross-field
+  // merged-shape rule. Mirror of the iter-16 Customers write-path
+  // service tests in shape; the kickoff Checkpoint 1 last bullet
+  // names the required coverage.
+  // -------------------------------------------------------------------
+  describe("create() — jobNumber generation + FK validation", () => {
+    test("first job of the year gets sequence 00001", async () => {
+      const created = await service.create(
+        {
+          customerId: customer.id,
+          description: "First job",
+        },
+        adminId,
+      );
+      const year = new Date().getUTCFullYear();
+      expect(created.jobNumber).toBe(`JOB-${year}-00001`);
+    });
+
+    test("second job of the year gets sequence 00002 (increment)", async () => {
+      await service.create({ customerId: customer.id, description: "First" }, adminId);
+      const second = await service.create(
+        { customerId: customer.id, description: "Second" },
+        adminId,
+      );
+      const year = new Date().getUTCFullYear();
+      expect(second.jobNumber).toBe(`JOB-${year}-00002`);
+    });
+
+    test("year prefix is the current UTC year", async () => {
+      const created = await service.create(
+        { customerId: customer.id, description: "Year-prefix check" },
+        adminId,
+      );
+      const year = new Date().getUTCFullYear();
+      expect(created.jobNumber.startsWith(`JOB-${year}-`)).toBe(true);
+      // 5-digit zero-padded suffix
+      expect(created.jobNumber).toMatch(/^JOB-\d{4}-\d{5}$/);
+    });
+
+    test("existing higher-numbered job from the same year is honored", async () => {
+      // Seed a job with a pre-existing high sequence value; the
+      // generator should compute next as 00043 + 1 = 00044.
+      const year = new Date().getUTCFullYear();
+      await seedJob({ jobNumber: `JOB-${year}-00043` });
+      const created = await service.create(
+        { customerId: customer.id, description: "After 00043" },
+        adminId,
+      );
+      expect(created.jobNumber).toBe(`JOB-${year}-00044`);
+    });
+
+    test("existing job from a different year does NOT affect the current-year sequence", async () => {
+      // A job from a prior year should not influence this year's
+      // sequence — pinned so a refactor that dropped the year prefix
+      // from the find-highest query would surface here.
+      await seedJob({ jobNumber: "JOB-2020-09999" });
+      const created = await service.create(
+        { customerId: customer.id, description: "Cross-year independence" },
+        adminId,
+      );
+      const year = new Date().getUTCFullYear();
+      expect(created.jobNumber).toBe(`JOB-${year}-00001`);
+    });
+
+    test("create persists all the supplied fields including the four date fields", async () => {
+      const created = await service.create(
+        {
+          customerId: customer.id,
+          description: "Full create",
+          status: JobStatus.IN_PROGRESS,
+          scheduledStartDate: new Date("2026-04-01T00:00:00Z"),
+          scheduledEndDate: new Date("2026-04-15T00:00:00Z"),
+          actualStartDate: new Date("2026-04-02T00:00:00Z"),
+          notes: "Some notes.",
+        },
+        adminId,
+      );
+      expect(created.description).toBe("Full create");
+      expect(created.status).toBe(JobStatus.IN_PROGRESS);
+      expect(created.scheduledStartDate?.toISOString()).toBe(
+        new Date("2026-04-01T00:00:00Z").toISOString(),
+      );
+      expect(created.scheduledEndDate?.toISOString()).toBe(
+        new Date("2026-04-15T00:00:00Z").toISOString(),
+      );
+      expect(created.actualStartDate?.toISOString()).toBe(
+        new Date("2026-04-02T00:00:00Z").toISOString(),
+      );
+      expect(created.actualEndDate).toBeNull();
+      expect(created.notes).toBe("Some notes.");
+      expect(created.customer.id).toBe(customer.id);
+      // createdById comes from the controller-supplied second arg, not
+      // the body — pinned here so a refactor that read it from the
+      // body would surface as a test failure.
+      expect(created.createdById).toBe(adminId);
+    });
+
+    test("status defaults to PLANNED when the body omits it", async () => {
+      const created = await service.create(
+        { customerId: customer.id, description: "Default status" },
+        adminId,
+      );
+      expect(created.status).toBe(JobStatus.PLANNED);
+    });
+
+    test("create with a non-existent customerId → BadRequestException naming the bad FK", async () => {
+      try {
+        await service.create(
+          {
+            customerId: "nonexistent-customer-id",
+            description: "Bad customer FK",
+          },
+          adminId,
+        );
+        throw new Error("expected BadRequestException");
+      } catch (error) {
+        expect(error).toBeInstanceOf(BadRequestException);
+        // The message names the bad id so the operator knows what
+        // failed. Mirror of the Trips P2003 mapping (which names
+        // the vehicle or driver id).
+        expect((error as BadRequestException).message).toContain("nonexistent-customer-id");
+      }
+    });
+  });
+
+  describe("CreateJobSchema — cross-field rule (schema layer)", () => {
+    test("scheduledEndDate before scheduledStartDate is rejected", () => {
+      const result = CreateJobSchema.safeParse({
+        customerId: "cust-1",
+        description: "Bad scheduled pair",
+        scheduledStartDate: "2026-04-15",
+        scheduledEndDate: "2026-04-01",
+      });
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(JSON.stringify(result.error.issues)).toContain("scheduledEndDate");
+      }
+    });
+
+    test("actualEndDate before actualStartDate is rejected", () => {
+      const result = CreateJobSchema.safeParse({
+        customerId: "cust-1",
+        description: "Bad actual pair",
+        actualStartDate: "2026-04-15",
+        actualEndDate: "2026-04-01",
+      });
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(JSON.stringify(result.error.issues)).toContain("actualEndDate");
+      }
+    });
+
+    test("equal start and end dates are allowed (>=, not >)", () => {
+      const result = CreateJobSchema.safeParse({
+        customerId: "cust-1",
+        description: "Same-day job",
+        scheduledStartDate: "2026-04-15",
+        scheduledEndDate: "2026-04-15",
+      });
+      expect(result.success).toBe(true);
+    });
+
+    test("only one date present → no cross-field error", () => {
+      const result = CreateJobSchema.safeParse({
+        customerId: "cust-1",
+        description: "Only start",
+        scheduledStartDate: "2026-04-15",
+      });
+      expect(result.success).toBe(true);
+    });
+
+    test("jobNumber in the body is rejected (.strict())", () => {
+      const result = CreateJobSchema.safeParse({
+        customerId: "cust-1",
+        description: "Smuggled jobNumber",
+        jobNumber: "JOB-2026-99999",
+      });
+      expect(result.success).toBe(false);
+    });
+
+    test("createdById in the body is rejected (.strict())", () => {
+      const result = CreateJobSchema.safeParse({
+        customerId: "cust-1",
+        description: "Smuggled createdById",
+        createdById: "user-smuggled",
+      });
+      expect(result.success).toBe(false);
+    });
+
+    test("empty description is rejected", () => {
+      const result = CreateJobSchema.safeParse({
+        customerId: "cust-1",
+        description: "",
+      });
+      expect(result.success).toBe(false);
+    });
+  });
+
+  describe("UpdateJobSchema — partial + cross-field + immutable fields", () => {
+    test("empty body is rejected by the at-least-one-field refine", () => {
+      const result = UpdateJobSchema.safeParse({});
+      expect(result.success).toBe(false);
+    });
+
+    test("customerId in the PATCH body is rejected (immutable per iter-18 kickoff)", () => {
+      const result = UpdateJobSchema.safeParse({ customerId: "different-customer" });
+      expect(result.success).toBe(false);
+    });
+
+    test("jobNumber in the PATCH body is rejected (immutable per iter-18 kickoff)", () => {
+      const result = UpdateJobSchema.safeParse({ jobNumber: "JOB-2026-99999" });
+      expect(result.success).toBe(false);
+    });
+
+    test("single-field PATCH (just description) parses through", () => {
+      const result = UpdateJobSchema.safeParse({ description: "Renamed" });
+      expect(result.success).toBe(true);
+    });
+
+    test("PATCH with both scheduled dates in the body is checked", () => {
+      const result = UpdateJobSchema.safeParse({
+        scheduledStartDate: "2026-04-15",
+        scheduledEndDate: "2026-04-01",
+      });
+      expect(result.success).toBe(false);
+    });
+  });
+
+  describe("update() — diff-PATCH + 404 + merged-shape cross-field rule", () => {
+    test("update of an unknown id throws NotFoundException", async () => {
+      try {
+        await service.update("nonexistent-id", { description: "X" });
+        throw new Error("expected NotFoundException");
+      } catch (error) {
+        expect(error).toBeInstanceOf(NotFoundException);
+        expect((error as NotFoundException).message).toContain("nonexistent-id");
+      }
+    });
+
+    test("single-field PATCH updates only the named field (diff-PATCH semantics)", async () => {
+      const created = await service.create(
+        { customerId: customer.id, description: "Before" },
+        adminId,
+      );
+      const updated = await service.update(created.id, { description: "After" });
+      expect(updated.description).toBe("After");
+      // Other fields are untouched.
+      expect(updated.status).toBe(JobStatus.PLANNED);
+      expect(updated.notes).toBeNull();
+      // jobNumber is immutable — pinned here so a refactor that ever
+      // let it change would fail loudly.
+      expect(updated.jobNumber).toBe(created.jobNumber);
+    });
+
+    test("no-op PATCH (re-setting the same value) succeeds and returns the row", async () => {
+      const created = await service.create(
+        {
+          customerId: customer.id,
+          description: "No-op test",
+          status: JobStatus.PLANNED,
+        },
+        adminId,
+      );
+      const updated = await service.update(created.id, { status: JobStatus.PLANNED });
+      expect(updated.status).toBe(JobStatus.PLANNED);
+      expect(updated.id).toBe(created.id);
+    });
+
+    test("clear a nullable field by sending null explicitly", async () => {
+      const created = await service.create(
+        {
+          customerId: customer.id,
+          description: "Will clear notes",
+          notes: "initial notes",
+        },
+        adminId,
+      );
+      expect(created.notes).toBe("initial notes");
+      const updated = await service.update(created.id, { notes: null });
+      expect(updated.notes).toBeNull();
+    });
+
+    test("merged-shape cross-field rule: PATCH end before existing start → BadRequest", async () => {
+      // The schema-level refine only sees the PATCH body; this test
+      // pins the service-level merged-shape re-validation. We create
+      // a job with scheduledStartDate set, then PATCH a
+      // scheduledEndDate that's before that existing start. The
+      // service must reject the merged shape even though the PATCH
+      // body alone is fine.
+      const created = await service.create(
+        {
+          customerId: customer.id,
+          description: "Merged-shape check",
+          scheduledStartDate: new Date("2026-04-15T00:00:00Z"),
+        },
+        adminId,
+      );
+      try {
+        await service.update(created.id, {
+          scheduledEndDate: new Date("2026-04-01T00:00:00Z"),
+        });
+        throw new Error("expected BadRequestException");
+      } catch (error) {
+        expect(error).toBeInstanceOf(BadRequestException);
+        expect((error as BadRequestException).message).toContain("scheduledEndDate");
+      }
+    });
+  });
+
+  describe("delete() — 204 + 404", () => {
+    test("delete() removes the row", async () => {
+      const created = await service.create(
+        { customerId: customer.id, description: "Delete me" },
+        adminId,
+      );
+      await service.delete(created.id);
+      const refetched = await prisma.job.findUnique({ where: { id: created.id } });
+      expect(refetched).toBeNull();
+    });
+
+    test("delete() of an unknown id throws NotFoundException", async () => {
+      try {
+        await service.delete("nonexistent-id");
+        throw new Error("expected NotFoundException");
+      } catch (error) {
+        expect(error).toBeInstanceOf(NotFoundException);
+        expect((error as NotFoundException).message).toContain("nonexistent-id");
+      }
+    });
+  });
+
+  describe("jobNumber uniqueness retry — sequential creates remain unique", () => {
+    test("creating five jobs in a row produces five distinct sequential jobNumbers", async () => {
+      // Indirect test of the retry loop: even back-to-back creates
+      // (no manual concurrency) exercise the find-highest path. If
+      // the generator ever returned a duplicate the @unique
+      // constraint would either fire P2002 (and retry) or fail with
+      // a thrown ConflictException — either path is observable as a
+      // test failure or duplicate values here.
+      const created = [
+        await service.create({ customerId: customer.id, description: "1" }, adminId),
+        await service.create({ customerId: customer.id, description: "2" }, adminId),
+        await service.create({ customerId: customer.id, description: "3" }, adminId),
+        await service.create({ customerId: customer.id, description: "4" }, adminId),
+        await service.create({ customerId: customer.id, description: "5" }, adminId),
+      ];
+      const numbers = created.map((j) => j.jobNumber);
+      expect(new Set(numbers).size).toBe(5);
+      const year = new Date().getUTCFullYear();
+      expect(numbers).toEqual([
+        `JOB-${year}-00001`,
+        `JOB-${year}-00002`,
+        `JOB-${year}-00003`,
+        `JOB-${year}-00004`,
+        `JOB-${year}-00005`,
+      ]);
     });
   });
 });
