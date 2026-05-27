@@ -1,9 +1,12 @@
+import { BadRequestException, ConflictException, NotFoundException } from "@nestjs/common";
 import { Test, type TestingModule } from "@nestjs/testing";
-import { Prisma, TripStatus, type Vehicle, type Driver } from "@prisma/client";
+import { TripStatus, type Vehicle, type Driver } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 
+import { DriversService } from "../src/modules/drivers/drivers.service";
 import { PrismaService } from "../src/modules/prisma/prisma.service";
 import { TripsService, LIST_TAKE_MAX } from "../src/modules/trips/trips.service";
+import { VehiclesService } from "../src/modules/vehicles/vehicles.service";
 import { resetDb } from "./db";
 import { seedDriver, seedTrip, seedUser, seedVehicle } from "./fixtures/trip";
 
@@ -26,6 +29,12 @@ describe("TripsService (integration, real Postgres)", () => {
   let module: TestingModule;
   let prisma: PrismaService;
   let service: TripsService;
+  // iter-9 adds the VehiclesService / DriversService refs so the FK
+  // Restrict block at the end of this file can assert the new 409
+  // mapping (ConflictException with referencing-trip count) instead
+  // of the iter-8 baseline of "Prisma P2003 propagates as 500".
+  let vehiclesService: VehiclesService;
+  let driversService: DriversService;
 
   // Each test seeds its own parents inside beforeEach so the tests
   // can refer to them by id and the resetDb in beforeEach truncates
@@ -36,12 +45,14 @@ describe("TripsService (integration, real Postgres)", () => {
 
   beforeAll(async () => {
     module = await Test.createTestingModule({
-      providers: [TripsService, PrismaService],
+      providers: [TripsService, VehiclesService, DriversService, PrismaService],
     }).compile();
     await module.init();
 
     prisma = module.get(PrismaService);
     service = module.get(TripsService);
+    vehiclesService = module.get(VehiclesService);
+    driversService = module.get(DriversService);
   });
 
   afterAll(async () => {
@@ -331,53 +342,335 @@ describe("TripsService (integration, real Postgres)", () => {
     });
   });
 
-  describe("FK Restrict — deleting a referenced Vehicle is blocked at the DB", () => {
-    // The schema declares onDelete: Restrict on trip.vehicleId. The
-    // iter-8 kickoff (deliverable 5, last sub-bullet) asks us to pin
-    // the CURRENT behavior: Prisma raises P2003 which today propagates
-    // as HTTP 500 (no service-layer translation yet). The iter-9 or
-    // iter-10 fix will add the P2003 → 409 mapping per the
-    // api-error-mapping runbook and the docs/tech-debt.md entry; this
-    // test is the baseline that fix will need to update.
-    test("deleting a Vehicle with trips → Prisma P2003 (currently surfaces as 500)", async () => {
+  describe("FK Restrict — deleting a referenced Vehicle/Driver throws 409", () => {
+    // The schema declares onDelete: Restrict on trip.vehicleId and
+    // trip.driverId. The iter-8 baseline was "Prisma P2003 propagates
+    // as HTTP 500"; iter-9 (this iter) folds the P2003 → 409 mapping
+    // into both VehiclesService.delete and DriversService.delete, and
+    // these tests pin the new ConflictException-with-count contract.
+    // The matching tech-debt entry "Vehicle/Driver delete must map
+    // P2003 to HTTP 409 once Trip write path lands" is paid off in the
+    // same PR.
+    test("VehiclesService.delete on a vehicle with trips → ConflictException with trip count", async () => {
+      // Seed two trips so the count check is more than a "count > 0"
+      // assertion — the count must equal the real number of
+      // referencing rows, which is the contract operators rely on
+      // when deciding which trips to reassign or cancel.
       await seedTrip(prisma, {
         vehicleId: vehicle.id,
         driverId: driver.id,
         createdById: adminId,
       });
-
-      // Bypass the (yet-to-exist) Vehicles service-layer P2003 mapping
-      // by going directly through Prisma. The point is to pin the
-      // database-level guarantee, not the service-layer translation.
-      await expect(prisma.vehicle.delete({ where: { id: vehicle.id } })).rejects.toMatchObject({
-        // Either the Prisma error class or its `.code` field is the
-        // contract — we assert `.code === "P2003"` because that is what
-        // the future service-layer translation will key on.
-        code: "P2003",
+      await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.IN_PROGRESS,
+        startedAt: new Date("2026-01-10T08:00:00Z"),
+        startOdometerKm: 80000,
       });
 
-      // Sanity: the trip and vehicle should both still exist.
+      await expect(vehiclesService.delete(vehicle.id)).rejects.toBeInstanceOf(ConflictException);
+      try {
+        await vehiclesService.delete(vehicle.id);
+      } catch (error) {
+        expect(error).toBeInstanceOf(ConflictException);
+        // The message must name the count so operators learn from the
+        // error alone how many trips block the delete.
+        expect((error as ConflictException).message).toContain("2");
+        expect((error as ConflictException).message.toLowerCase()).toContain("trip");
+      }
+
+      // Sanity: the vehicle should still exist after the rejected
+      // delete attempt — the catch arm must not swallow the rollback.
       const stillVehicle = await prisma.vehicle.findUnique({ where: { id: vehicle.id } });
       expect(stillVehicle).not.toBeNull();
     });
 
-    test("deleting a Driver with trips → Prisma P2003 (currently surfaces as 500)", async () => {
+    test("DriversService.delete on a driver with trips → ConflictException with trip count", async () => {
       await seedTrip(prisma, {
         vehicleId: vehicle.id,
         driverId: driver.id,
         createdById: adminId,
       });
-      await expect(prisma.driver.delete({ where: { id: driver.id } })).rejects.toBeInstanceOf(
-        Prisma.PrismaClientKnownRequestError,
-      );
-      // Use the catch-then-assert pattern so we can read `.code`
-      // explicitly.
+
+      await expect(driversService.delete(driver.id)).rejects.toBeInstanceOf(ConflictException);
       try {
-        await prisma.driver.delete({ where: { id: driver.id } });
+        await driversService.delete(driver.id);
       } catch (error) {
-        expect(error).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
-        expect((error as Prisma.PrismaClientKnownRequestError).code).toBe("P2003");
+        expect(error).toBeInstanceOf(ConflictException);
+        expect((error as ConflictException).message).toContain("1");
+        expect((error as ConflictException).message.toLowerCase()).toContain("trip");
       }
+    });
+  });
+
+  // -------------------------------------------------------------------
+  // iter-9 write-path tests.
+  // -------------------------------------------------------------------
+
+  describe("create()", () => {
+    test("happy path: persists the row, returns DETAIL_INCLUDE shape", async () => {
+      const result = await service.create(
+        {
+          vehicleId: vehicle.id,
+          driverId: driver.id,
+          status: TripStatus.PLANNED,
+        },
+        adminId,
+      );
+      expect(result.id).toBeTruthy();
+      expect(result.status).toBe(TripStatus.PLANNED);
+      // DETAIL_INCLUDE shape: the nested Vehicle and Driver objects
+      // should be present so the controller can return the same shape
+      // as GET /api/v1/trips/:id.
+      expect(result.vehicle.id).toBe(vehicle.id);
+      expect(result.driver.id).toBe(driver.id);
+      // createdById is server-derived; the wire body never carried it.
+      expect(result.createdById).toBe(adminId);
+    });
+
+    test("happy path with full COMPLETED shape persists timing/odometer", async () => {
+      // A COMPLETED create exercises the cross-field happy path
+      // (already validated by the schema, but we pin that the service
+      // also writes through the timing and odometer columns).
+      const result = await service.create(
+        {
+          vehicleId: vehicle.id,
+          driverId: driver.id,
+          status: TripStatus.COMPLETED,
+          startedAt: "2026-01-10T08:00:00Z",
+          endedAt: "2026-01-10T17:00:00Z",
+          startOdometerKm: 80000,
+          endOdometerKm: 80250,
+          notes: "Pokhara run",
+        },
+        adminId,
+      );
+      expect(result.startedAt?.toISOString()).toBe("2026-01-10T08:00:00.000Z");
+      expect(result.endedAt?.toISOString()).toBe("2026-01-10T17:00:00.000Z");
+      expect(result.startOdometerKm).toBe(80000);
+      expect(result.endOdometerKm).toBe(80250);
+      expect(result.notes).toBe("Pokhara run");
+    });
+
+    test("create with unknown vehicleId → BadRequestException naming the vehicle", async () => {
+      await expect(
+        service.create(
+          { vehicleId: "vehicle-does-not-exist", driverId: driver.id, status: TripStatus.PLANNED },
+          adminId,
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      try {
+        await service.create(
+          { vehicleId: "vehicle-does-not-exist", driverId: driver.id, status: TripStatus.PLANNED },
+          adminId,
+        );
+      } catch (error) {
+        expect(error).toBeInstanceOf(BadRequestException);
+        expect((error as BadRequestException).message.toLowerCase()).toContain("vehicle");
+      }
+    });
+
+    test("create with unknown driverId → BadRequestException naming the driver", async () => {
+      await expect(
+        service.create(
+          { vehicleId: vehicle.id, driverId: "driver-does-not-exist", status: TripStatus.PLANNED },
+          adminId,
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      try {
+        await service.create(
+          { vehicleId: vehicle.id, driverId: "driver-does-not-exist", status: TripStatus.PLANNED },
+          adminId,
+        );
+      } catch (error) {
+        expect(error).toBeInstanceOf(BadRequestException);
+        expect((error as BadRequestException).message.toLowerCase()).toContain("driver");
+      }
+    });
+  });
+
+  describe("update()", () => {
+    test("no-op (empty patch) returns the row unchanged", async () => {
+      const created = await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        notes: "before",
+      });
+      const result = await service.update(created.id, {});
+      expect(result.id).toBe(created.id);
+      expect(result.notes).toBe("before");
+      // The merged-shape check must still pass on a no-op — a PLANNED
+      // trip with no timing fields is a legal merged shape.
+      expect(result.status).toBe(TripStatus.PLANNED);
+    });
+
+    test("legal transition PLANNED → IN_PROGRESS with start fields", async () => {
+      const created = await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.PLANNED,
+      });
+      const result = await service.update(created.id, {
+        status: TripStatus.IN_PROGRESS,
+        startedAt: "2026-01-10T08:00:00Z",
+        startOdometerKm: 80000,
+      });
+      expect(result.status).toBe(TripStatus.IN_PROGRESS);
+      expect(result.startedAt?.toISOString()).toBe("2026-01-10T08:00:00.000Z");
+      expect(result.startOdometerKm).toBe(80000);
+    });
+
+    test("legal transition IN_PROGRESS → COMPLETED with end fields", async () => {
+      // Seed directly into IN_PROGRESS so this is a single-step
+      // transition exercise — independent of the PLANNED step.
+      const created = await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.IN_PROGRESS,
+        startedAt: new Date("2026-01-10T08:00:00Z"),
+        startOdometerKm: 80000,
+      });
+      const result = await service.update(created.id, {
+        status: TripStatus.COMPLETED,
+        endedAt: "2026-01-10T17:00:00Z",
+        endOdometerKm: 80250,
+      });
+      expect(result.status).toBe(TripStatus.COMPLETED);
+      expect(result.endedAt?.toISOString()).toBe("2026-01-10T17:00:00.000Z");
+    });
+
+    test("CANCELLED is reachable from any state (PLANNED → CANCELLED)", async () => {
+      const created = await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.PLANNED,
+      });
+      const result = await service.update(created.id, { status: TripStatus.CANCELLED });
+      expect(result.status).toBe(TripStatus.CANCELLED);
+    });
+
+    test("illegal transition PLANNED → COMPLETED → BadRequestException", async () => {
+      // The kickoff names this rule explicitly: no jumping from
+      // PLANNED to COMPLETED without going through IN_PROGRESS. The
+      // guard fires before the cross-field merge check, so the error
+      // message must mention the transition, not the missing fields.
+      const created = await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.PLANNED,
+      });
+      await expect(
+        service.update(created.id, {
+          status: TripStatus.COMPLETED,
+          startedAt: "2026-01-10T08:00:00Z",
+          endedAt: "2026-01-10T17:00:00Z",
+          startOdometerKm: 80000,
+          endOdometerKm: 80250,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    test("illegal transition COMPLETED → PLANNED → BadRequestException", async () => {
+      // COMPLETED is terminal in the matrix; "uncompleting" a trip is
+      // illegal. Operators correcting a mis-marked-completed trip
+      // should delete-and-recreate, which preserves the audit trail.
+      const created = await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.COMPLETED,
+        startedAt: new Date("2026-01-10T08:00:00Z"),
+        endedAt: new Date("2026-01-10T17:00:00Z"),
+        startOdometerKm: 80000,
+        endOdometerKm: 80250,
+      });
+      await expect(
+        service.update(created.id, { status: TripStatus.PLANNED }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    test("cross-field violation: COMPLETED without end fields → BadRequestException", async () => {
+      // The merged-shape check fires here: the row was IN_PROGRESS
+      // with timing/odometer set, and the patch sets status to
+      // COMPLETED but does not supply endedAt or endOdometerKm. The
+      // legal-transition guard accepts this (IN_PROGRESS → COMPLETED
+      // is in the matrix); the merged-shape rule catches it because
+      // a COMPLETED row must have all four start/end fields.
+      const created = await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.IN_PROGRESS,
+        startedAt: new Date("2026-01-10T08:00:00Z"),
+        startOdometerKm: 80000,
+      });
+      await expect(
+        service.update(created.id, { status: TripStatus.COMPLETED }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    test("cross-field violation: endOdometerKm < startOdometerKm → BadRequestException", async () => {
+      const created = await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.IN_PROGRESS,
+        startedAt: new Date("2026-01-10T08:00:00Z"),
+        startOdometerKm: 80000,
+      });
+      await expect(
+        service.update(created.id, {
+          status: TripStatus.COMPLETED,
+          endedAt: "2026-01-10T17:00:00Z",
+          // End odometer is less than start — physically nonsensical.
+          endOdometerKm: 79500,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    test("update on non-existent trip → NotFoundException", async () => {
+      await expect(
+        service.update("trip-does-not-exist", { status: TripStatus.CANCELLED }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    test("update can clear a nullable field by sending null", async () => {
+      // PATCH semantics distinguish "field omitted" from "field set
+      // to null". A patch that explicitly clears `notes` by sending
+      // null must persist that as a database null, not as the string
+      // "null" or as a no-op.
+      const created = await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        notes: "to be cleared",
+      });
+      const result = await service.update(created.id, { notes: null as unknown as string });
+      expect(result.notes).toBeNull();
+    });
+  });
+
+  describe("delete()", () => {
+    test("happy path: row gone from the database", async () => {
+      const created = await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+      });
+      await service.delete(created.id);
+      const fetched = await prisma.trip.findUnique({ where: { id: created.id } });
+      expect(fetched).toBeNull();
+    });
+
+    test("delete on non-existent trip → NotFoundException", async () => {
+      await expect(service.delete("trip-does-not-exist")).rejects.toBeInstanceOf(NotFoundException);
     });
   });
 });

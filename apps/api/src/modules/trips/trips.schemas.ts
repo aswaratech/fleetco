@@ -1,9 +1,8 @@
 import { z } from "zod";
 
-// Zod schemas for the Trips slice — iter 8 ships the read path only
-// (ListTripsQuerySchema). The iter-9 write path will add
-// CreateTripSchema and UpdateTripSchema next to this file, mirroring
-// the Drivers iter-6/iter-7 staging.
+// Zod schemas for the Trips slice — iter 8 shipped the read path
+// (ListTripsQuerySchema); iter 9 adds the write path (CreateTripSchema,
+// UpdateTripSchema), mirroring the Drivers iter-6/iter-7 staging.
 //
 // Mirrors apps/api/src/modules/drivers/drivers.schemas.ts in shape and
 // convention: enum lists duplicated from Prisma enums (so this file
@@ -165,3 +164,213 @@ export const ListTripsQuerySchema = z
   .strict();
 
 export type ListTripsQuery = z.infer<typeof ListTripsQuerySchema>;
+
+// ---------------------------------------------------------------------
+// Write-path schemas (iter 9) — POST and PATCH bodies.
+// ---------------------------------------------------------------------
+//
+// Both schemas are `.strict()` so an unexpected key (e.g. a client
+// trying to set `createdById` directly, or a typo'd field name)
+// surfaces as HTTP 400 with a clear message rather than being silently
+// dropped. `createdById` is server-derived from the session and must
+// never be accepted from the wire — `.strict()` is what enforces that.
+//
+// Field-level validators mirror what the database can store
+// (odometer bounds, notes length) and the wire shape (ISO datetime
+// strings for the timing fields). Cross-field rules — "if status is
+// IN_PROGRESS then startedAt and startOdometerKm must be set",
+// "if status is COMPLETED then all four start/end fields must be set
+// and end >= start" — are layered on via `.superRefine`. CANCELLED is
+// deliberately unconstrained: a trip planned and then cancelled before
+// starting has no startedAt, and the operator should be able to record
+// that.
+
+// ISO-8601 datetime string. We accept the broad ISO surface here (with
+// or without milliseconds, with or without an offset) because the web
+// form will normalize to UTC `Z` form before sending; a stricter regex
+// would reject legitimate timestamps from API clients in other tools.
+// Prisma coerces strings to Date at write time.
+const TripDateTime = z.iso.datetime({ offset: true, local: true });
+
+// Odometer bounds: the bigger end of the range matches the Phase 1
+// "no vehicle has clocked more than 10 million kilometers" assumption
+// from the Vehicles schema; the lower bound is 0 (negative odometers
+// are nonsensical). Storing as integer matches the Prisma schema's
+// `Int?` column.
+const ODOMETER_MIN = 0;
+const ODOMETER_MAX = 9_999_999;
+
+// Notes upper bound mirrors the Driver/Vehicle free-form-text caps —
+// the column is unbounded in Postgres but a 1000-character ceiling
+// keeps the surface predictable (a 100MB note would 500 the API for
+// reasons of memory, not validation). Operators wanting a longer log
+// will get an attachments slice in Phase 2.
+const NOTES_MAX = 1000;
+
+const OdometerInt = z
+  .number()
+  .int("Odometer must be an integer.")
+  .min(ODOMETER_MIN, `Odometer must be ${ODOMETER_MIN} or greater.`)
+  .max(ODOMETER_MAX, `Odometer must be ${ODOMETER_MAX} or less.`);
+
+// `superRefine` callback shared by the create and update schemas. It
+// receives the merged shape (for update: pre-fetched row + patch
+// applied; for create: just the body) and enforces the cross-field
+// rules from the iter-9 kickoff. Surfaced as a separate function so
+// the service can re-invoke it after merging a PATCH against the
+// existing row — Zod's `.superRefine` runs on the validated body
+// only, but the merged shape is what carries the semantic constraint.
+//
+// The function takes the trip-shaped fields the rule looks at, not the
+// full Zod ctx, so it can be called either inside a Zod schema (which
+// builds the ctx) or directly from the service (which throws
+// BadRequestException with the same message).
+export interface TripCrossFieldShape {
+  status: (typeof TRIP_STATUSES)[number];
+  startedAt?: string | Date | null | undefined;
+  endedAt?: string | Date | null | undefined;
+  startOdometerKm?: number | null | undefined;
+  endOdometerKm?: number | null | undefined;
+}
+
+/**
+ * Validate the trip cross-field rules against a merged shape. Returns
+ * a list of human-readable error messages; an empty array means valid.
+ *
+ * Rules:
+ *   - IN_PROGRESS: startedAt and startOdometerKm MUST be set.
+ *   - COMPLETED:   all four start/end fields MUST be set;
+ *                  endOdometerKm >= startOdometerKm;
+ *                  endedAt >= startedAt.
+ *   - PLANNED / CANCELLED: no constraint (a planned trip may have
+ *     startedAt prefilled for scheduling; a cancelled trip may have
+ *     been cancelled at any lifecycle stage and so any combination of
+ *     timing fields is legitimate).
+ *
+ * The service calls this after merging a PATCH; the schema calls this
+ * (via superRefine) on the body alone — for `create` that is also the
+ * full shape, so the two callsites converge.
+ */
+export function validateTripCrossFields(shape: TripCrossFieldShape): string[] {
+  const errors: string[] = [];
+  const { status, startedAt, endedAt, startOdometerKm, endOdometerKm } = shape;
+  const hasStartedAt = startedAt !== null && startedAt !== undefined;
+  const hasEndedAt = endedAt !== null && endedAt !== undefined;
+  const hasStartOdo = startOdometerKm !== null && startOdometerKm !== undefined;
+  const hasEndOdo = endOdometerKm !== null && endOdometerKm !== undefined;
+
+  if (status === "IN_PROGRESS") {
+    if (!hasStartedAt) {
+      errors.push("startedAt is required when status is IN_PROGRESS.");
+    }
+    if (!hasStartOdo) {
+      errors.push("startOdometerKm is required when status is IN_PROGRESS.");
+    }
+  }
+  if (status === "COMPLETED") {
+    if (!hasStartedAt) errors.push("startedAt is required when status is COMPLETED.");
+    if (!hasEndedAt) errors.push("endedAt is required when status is COMPLETED.");
+    if (!hasStartOdo) errors.push("startOdometerKm is required when status is COMPLETED.");
+    if (!hasEndOdo) errors.push("endOdometerKm is required when status is COMPLETED.");
+    if (hasStartOdo && hasEndOdo) {
+      const start = startOdometerKm as number;
+      const end = endOdometerKm as number;
+      if (end < start) {
+        errors.push("endOdometerKm must be greater than or equal to startOdometerKm.");
+      }
+    }
+    if (hasStartedAt && hasEndedAt) {
+      const start = new Date(startedAt as string | Date).getTime();
+      const end = new Date(endedAt as string | Date).getTime();
+      if (Number.isFinite(start) && Number.isFinite(end) && end < start) {
+        errors.push("endedAt must be greater than or equal to startedAt.");
+      }
+    }
+  }
+  return errors;
+}
+
+// POST /api/v1/trips body schema. Required: vehicleId, driverId,
+// status. Optional + nullable: timing and odometer fields. The client
+// must include `status` explicitly even though `PLANNED` is the
+// natural default — making it explicit forces the operator to pick a
+// lifecycle stage at create time, which prevents the "I clicked
+// Create and now I have a phantom PLANNED trip I didn't mean" foot-gun.
+export const CreateTripSchema = z
+  .object({
+    vehicleId: z.string().min(1, "vehicleId is required."),
+    driverId: z.string().min(1, "driverId is required."),
+    status: z.enum(TRIP_STATUSES),
+    startedAt: TripDateTime.nullable().optional(),
+    endedAt: TripDateTime.nullable().optional(),
+    startOdometerKm: OdometerInt.nullable().optional(),
+    endOdometerKm: OdometerInt.nullable().optional(),
+    notes: z.string().max(NOTES_MAX, `notes must be at most ${NOTES_MAX} characters.`).optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    for (const message of validateTripCrossFields(value)) {
+      ctx.addIssue({ code: "custom", message });
+    }
+  });
+
+export type CreateTripInput = z.infer<typeof CreateTripSchema>;
+
+// PATCH /api/v1/trips/:id body schema. Every field is optional (diff-
+// PATCH semantics, as in DriversService.update). Cross-field rules
+// CANNOT be enforced here because Zod sees only the partial body — a
+// PATCH that sets `status: "COMPLETED"` without touching the other
+// fields must be validated against the merged shape, not the body.
+// The service is responsible for that merge-then-validate step using
+// `validateTripCrossFields` directly. `.strict()` still rejects
+// unexpected keys (including `createdById` and `id`).
+export const UpdateTripSchema = z
+  .object({
+    vehicleId: z.string().min(1, "vehicleId must be non-empty."),
+    driverId: z.string().min(1, "driverId must be non-empty."),
+    status: z.enum(TRIP_STATUSES),
+    startedAt: TripDateTime.nullable(),
+    endedAt: TripDateTime.nullable(),
+    startOdometerKm: OdometerInt.nullable(),
+    endOdometerKm: OdometerInt.nullable(),
+    notes: z.string().max(NOTES_MAX, `notes must be at most ${NOTES_MAX} characters.`),
+  })
+  .strict()
+  .partial();
+
+export type UpdateTripInput = z.infer<typeof UpdateTripSchema>;
+
+// Status-transition matrix for PATCH. CANCELLED is reachable from any
+// state (an operator may abort at any lifecycle stage). Other
+// transitions follow the lifecycle: PLANNED → IN_PROGRESS → COMPLETED.
+// Jumping PLANNED → COMPLETED directly is illegal because it implies
+// the operator never recorded that the trip started, which would
+// corrupt downstream reporting on average trip duration.
+//
+// Self-transitions (e.g., IN_PROGRESS → IN_PROGRESS on a no-op PATCH)
+// are allowed: the service-side `update()` treats the matrix as a
+// guard on actual changes only.
+//
+// Exported so the service and its tests can share the source of truth.
+export const TRIP_STATUS_TRANSITIONS: Record<
+  (typeof TRIP_STATUSES)[number],
+  readonly (typeof TRIP_STATUSES)[number][]
+> = {
+  PLANNED: ["IN_PROGRESS", "CANCELLED"],
+  IN_PROGRESS: ["COMPLETED", "CANCELLED"],
+  COMPLETED: [],
+  CANCELLED: [],
+};
+
+/**
+ * Returns true if a transition from `from` to `to` is legal. Self-
+ * transitions (from === to) are legal by convention so a PATCH that
+ * resends an unchanged status field does not fail at this guard.
+ */
+export function isLegalTripStatusTransition(
+  from: (typeof TRIP_STATUSES)[number],
+  to: (typeof TRIP_STATUSES)[number],
+): boolean {
+  if (from === to) return true;
+  return TRIP_STATUS_TRANSITIONS[from].includes(to);
+}

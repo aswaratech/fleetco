@@ -1,10 +1,12 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
+import { Button } from "@/components/ui/button";
 import { apiFetch, ApiError } from "@/lib/api";
 import { getServerSession } from "@/lib/session";
 
 import { TRIP_STATUS_LABELS, type TripDetail } from "../types";
+import { DeleteTripDialog } from "./delete-trip-dialog";
 
 // Trip detail — iter 8 of the Trips slice. Server-rendered shell
 // (auth gate via getServerSession; redirect to /login if absent);
@@ -13,12 +15,14 @@ import { TRIP_STATUS_LABELS, type TripDetail } from "../types";
 // standard not-found page. Mirrors apps/web/src/app/drivers/[id]/page.tsx
 // in shape.
 //
-// Iter 8 ships the read path only — no Edit / Cancel CTAs (the iter-9
-// write path adds them). The detail page renders the full Vehicle +
-// Driver nested objects (`TripDetail`, the include shape on the API).
-// Vehicle.registrationNumber and Driver.fullName link back to their
-// own detail pages, so an operator looking at a trip can pivot to the
-// vehicle or driver master record without losing scroll position.
+// Iter 9 wired the Edit + Delete CTAs alongside the write-path
+// endpoints (POST/PATCH/DELETE). The Delete button opens a
+// confirmation dialog (DeleteTripDialog, a small client island around
+// shadcn's AlertDialog); the action layer (../actions.ts:deleteTripAction)
+// issues DELETE and redirects on success. The detail page renders the
+// full Vehicle + Driver nested objects (`TripDetail`, the include
+// shape on the API). Vehicle.registrationNumber and Driver.fullName
+// link back to their own detail pages.
 //
 // Field layout: a definition list (<dl>) under DESIGN.md §"Data display"
 // typography tokens. Two-column on >= sm; stacks on narrow viewports.
@@ -126,8 +130,15 @@ export default async function TripDetailPage({
               {statusLabel} · {trip.startedAt ? formatDateTime(trip.startedAt) : "Not yet started"}
             </p>
           </div>
-          {/* Iter 8 ships the read path; the Edit / Cancel CTAs land
-              with the iter-9 write path. */}
+          <div className="flex items-center gap-2">
+            <Button asChild variant="outline">
+              <Link href={`/trips/${trip.id}/edit`}>Edit</Link>
+            </Button>
+            <DeleteTripDialog
+              id={trip.id}
+              summary={`${trip.vehicle.registrationNumber} · ${trip.driver.fullName}`}
+            />
+          </div>
         </header>
 
         <section className="border-border-subtle bg-surface-raised rounded border p-6 shadow-sm">

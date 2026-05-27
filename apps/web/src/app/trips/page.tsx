@@ -356,8 +356,11 @@ export default async function TripsPage({
                 : `${data.total} recorded.`}
             </p>
           </div>
-          {/* Iter 8 ships the read path; the "New trip" CTA lands
-              with the iter-9 write path alongside the create form. */}
+          {/* Primary action right-aligned per DESIGN.md §"Page header".
+              Iter 9 wired the "New trip" CTA up to the write path. */}
+          <Button asChild>
+            <Link href="/trips/new">New trip</Link>
+          </Button>
         </header>
 
         <TripsFilters status={status} />
@@ -368,10 +371,17 @@ export default async function TripsPage({
               {hasActiveFilter ? (
                 <p>No trips match the current filters.</p>
               ) : (
-                <p>
-                  No trips recorded yet. Trips will appear here once the write path lands in the
-                  next iter.
-                </p>
+                <>
+                  <p>No trips recorded yet.</p>
+                  <p>
+                    <Link
+                      href="/trips/new"
+                      className="text-text-primary underline underline-offset-4"
+                    >
+                      Plan or record the first trip.
+                    </Link>
+                  </p>
+                </>
               )}
             </div>
           ) : (
