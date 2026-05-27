@@ -374,11 +374,74 @@ export class TripsService {
       ...(has("notes") && { notes: input.notes ?? null }),
     };
 
+    // Iter 11: when a Trip *transitions* into COMPLETED (i.e., the
+    // existing row was not already COMPLETED and the patch flips it
+    // to COMPLETED), the referenced Vehicle's `odometerCurrentKm`
+    // should advance to the trip's `endOdometerKm` — but only when
+    // that reading is strictly greater than the vehicle's current
+    // value. The `>` check (not `>=`) avoids a no-op write; the
+    // `> current` clause prevents a backdated correction trip from
+    // moving the vehicle's odometer backwards. The two writes (trip
+    // row and vehicle row) run inside a single Prisma interactive
+    // transaction so a mid-flight database failure cannot leave the
+    // trip COMPLETED with a stale vehicle odometer, nor the vehicle
+    // bumped without its triggering trip having been saved.
+    //
+    // Per the legal-status-transition matrix
+    // (TRIP_STATUS_TRANSITIONS), the canonical bump path is
+    // IN_PROGRESS → COMPLETED. PLANNED → COMPLETED and CANCELLED →
+    // COMPLETED are not legal transitions and are already rejected
+    // by the guard above, so the bump path is reached only via
+    // IN_PROGRESS → COMPLETED. The "from === to" self-transition
+    // (COMPLETED → COMPLETED) is permitted by the matrix but is a
+    // no-op for the odometer: we only bump when the status actually
+    // *changed* into COMPLETED, so a second PATCH that re-sends
+    // status=COMPLETED on an already-COMPLETED row is idempotent.
+    //
+    // The vehicle-bump effect — "once forward, stays forward" — is
+    // intentional and documented in the iter-11 kickoff: a later
+    // COMPLETED → CANCELLED (which is itself disallowed by the
+    // matrix today) or a Trip deletion does NOT roll the vehicle's
+    // odometer back. The compensating action is an operator
+    // manually editing the Vehicle's odometerCurrentKm via the
+    // Vehicle edit form; see the Odometer entry in docs/glossary.md.
+    const isCompletedTransition =
+      has("status") &&
+      input.status === "COMPLETED" &&
+      existing.status !== "COMPLETED" &&
+      merged.endOdometerKm !== null;
+
     try {
-      return await this.prisma.trip.update({
-        where: { id },
-        data,
-        include: DETAIL_INCLUDE,
+      return await this.prisma.$transaction(async (tx) => {
+        const updatedTrip = await tx.trip.update({
+          where: { id },
+          data,
+          include: DETAIL_INCLUDE,
+        });
+
+        if (isCompletedTransition && merged.endOdometerKm !== null) {
+          const vehicle = await tx.vehicle.findUniqueOrThrow({
+            where: { id: updatedTrip.vehicleId },
+            select: { odometerCurrentKm: true },
+          });
+          if (merged.endOdometerKm > vehicle.odometerCurrentKm) {
+            await tx.vehicle.update({
+              where: { id: updatedTrip.vehicleId },
+              data: { odometerCurrentKm: merged.endOdometerKm },
+            });
+            // Refresh the eager-included Vehicle on the returned
+            // trip so callers (controllers, tests) observe the
+            // newly bumped value without a follow-up read. Cheaper
+            // than a second `findUnique({ include: DETAIL_INCLUDE })`
+            // because we already know the new value.
+            updatedTrip.vehicle = {
+              ...updatedTrip.vehicle,
+              odometerCurrentKm: merged.endOdometerKm,
+            };
+          }
+        }
+
+        return updatedTrip;
       });
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2025") {
