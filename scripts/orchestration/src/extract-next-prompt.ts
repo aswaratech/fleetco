@@ -127,6 +127,32 @@ export const defaultHaikuExtractor: HaikuExtractor = async (recentTranscript) =>
   return text;
 };
 
+// ---------- Length floor ----------
+
+// Minimum acceptable length (characters) for an extracted next-prompt.
+//
+// Operator-written kickoffs run ~8,000–9,000 chars (full Program /
+// Discipline / Commit discipline / system-reminder / Ticket / Required
+// output / Critical structure). Agent-drafted next-prompts that
+// silently compressed away those structural + hardening sections came
+// back 500–2,100 chars, and each time the *next* iter halted — the
+// thinned kickoff dropped the discipline rules (commit-early, no plan
+// mode, no defensive refusal) so the next agent re-hit a failure those
+// rules exist to prevent. 4,000 sits well below a complete kickoff and
+// well above the compressed failures, so it flags a thin prompt without
+// false-positiving on a legitimately terse-but-complete one. Raise it
+// only if a genuinely complete kickoff ever trips it.
+export const MIN_NEXT_PROMPT_LENGTH = 4000;
+
+// True when a prompt was extracted (non-empty) but falls below the
+// length floor — the "agent wrote something, but it's too thin to be a
+// complete kickoff" case. An empty prompt is NOT "too short" (that's
+// the distinct next_prompt_missing case the caller checks first).
+export function isNextPromptTooShort(prompt: string): boolean {
+  const trimmed = prompt.trim();
+  return trimmed.length > 0 && trimmed.length < MIN_NEXT_PROMPT_LENGTH;
+}
+
 // ---------- Public API ----------
 
 export interface ExtractOptions {

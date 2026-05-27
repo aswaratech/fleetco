@@ -30,6 +30,7 @@ const EMOJI: Record<Milestone, string> = {
   pr_merged: ":tada:",
   next_prompt_extracted: ":mag:",
   next_prompt_missing: ":mailbox_with_no_mail:",
+  next_prompt_too_short: ":straight_ruler:",
   fabricated_preamble_stripped: ":warning:",
   stop_sentinel_detected: ":octagonal_sign:",
   program_complete: ":checkered_flag:",

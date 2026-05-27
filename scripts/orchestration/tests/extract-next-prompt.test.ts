@@ -2,7 +2,13 @@ import { describe, it, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { extractNextPrompt, extractTier1, extractTier2 } from "../src/extract-next-prompt.js";
+import {
+  extractNextPrompt,
+  extractTier1,
+  extractTier2,
+  isNextPromptTooShort,
+  MIN_NEXT_PROMPT_LENGTH,
+} from "../src/extract-next-prompt.js";
 import type { HaikuExtractor, PrBodyFetcher } from "../src/extract-next-prompt.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -205,5 +211,47 @@ LATER_FENCED_BLOCK_THAT_SHOULD_BE_IGNORED
       expect(r.tier).toBe(1);
       expect(r.prompt).toBe("HEADING_ANCHORED_BLOCK");
     });
+  });
+});
+
+describe("isNextPromptTooShort — length floor", () => {
+  // The floor catches agent-compressed next-prompts that dropped the
+  // structural / hardening sections. The actual iter-13→iter-14 failure
+  // was a 2101-char prompt; a complete operator kickoff is ~8–9k chars.
+
+  it("flags a prompt below the floor as too short", () => {
+    const thin = "x".repeat(MIN_NEXT_PROMPT_LENGTH - 1);
+    expect(isNextPromptTooShort(thin)).toBe(true);
+  });
+
+  it("flags the real iter-14 failure size (2101 chars)", () => {
+    // Regression pin: the actual compressed prompt that halted iter 14.
+    expect(isNextPromptTooShort("y".repeat(2101))).toBe(true);
+  });
+
+  it("passes a prompt exactly at the floor", () => {
+    const atFloor = "z".repeat(MIN_NEXT_PROMPT_LENGTH);
+    expect(isNextPromptTooShort(atFloor)).toBe(false);
+  });
+
+  it("passes a full-length operator kickoff (~9k chars)", () => {
+    const full = "k".repeat(9000);
+    expect(isNextPromptTooShort(full)).toBe(false);
+  });
+
+  it("does NOT flag an empty prompt (that's the distinct missing case)", () => {
+    // An empty / whitespace-only prompt is next_prompt_missing, handled
+    // by the caller's `!extracted.prompt` check before the floor runs.
+    // isNextPromptTooShort must return false for empty so the two halt
+    // milestones stay distinct.
+    expect(isNextPromptTooShort("")).toBe(false);
+    expect(isNextPromptTooShort("   \n  ")).toBe(false);
+  });
+
+  it("measures the trimmed length (leading/trailing whitespace doesn't pad)", () => {
+    // A prompt that is short once trimmed should still be flagged even
+    // if whitespace padding pushes its raw length over the floor.
+    const padded = " ".repeat(MIN_NEXT_PROMPT_LENGTH) + "short body" + " ".repeat(100);
+    expect(isNextPromptTooShort(padded)).toBe(true);
   });
 });

@@ -17,7 +17,12 @@ import { createDetectorState, detectPr, recordBash } from "./pr-detection.js";
 import { computeWaitFromEvent, parseWaitFromException, sleepUntil } from "./rate-limit-recovery.js";
 import { hasCiWorkflows, pollCi } from "./ci-poll.js";
 import { autoMerge } from "./auto-merge.js";
-import { extractNextPrompt, defaultPrBodyFetcher } from "./extract-next-prompt.js";
+import {
+  extractNextPrompt,
+  defaultPrBodyFetcher,
+  isNextPromptTooShort,
+  MIN_NEXT_PROMPT_LENGTH,
+} from "./extract-next-prompt.js";
 import { stripFabricatedPreambles } from "./strip-fabricated.js";
 import type { LoopState, RateLimitWaitInfo } from "./types.js";
 
@@ -228,6 +233,26 @@ async function main(): Promise<void> {
       appendDecision({ milestone: "next_prompt_missing", iteration: state.iteration });
       await halt(
         `Iter ${state.iteration} produced no next-session prompt (all 4 extractor tiers returned NONE, including PR #${prNumber}'s body). Operator must inspect logs/ and write the next iteration's kickoff manually before relaunching.`,
+        7,
+        state,
+      );
+    }
+    // Length floor: a prompt that extracted cleanly but is too short is
+    // almost always an agent-compressed kickoff that dropped the
+    // structural + hardening sections. Writing it to kickoff.md would
+    // doom the next iter (the thinned prompt loses the discipline rules
+    // that prevent plan-mode waits / defensive refusals). Halt here
+    // instead — distinct from next_prompt_missing so decisions.log
+    // tells the operator "something was written, but it was too thin"
+    // rather than "nothing was written."
+    if (isNextPromptTooShort(extracted.prompt)) {
+      appendDecision({
+        milestone: "next_prompt_too_short",
+        iteration: state.iteration,
+        details: `tier=${extracted.tier} length=${extracted.prompt.length} floor=${MIN_NEXT_PROMPT_LENGTH}`,
+      });
+      await halt(
+        `Iter ${state.iteration}'s next-session prompt is only ${extracted.prompt.length} chars (floor ${MIN_NEXT_PROMPT_LENGTH}); the agent likely compressed away the structural / hardening sections. Operator must write a complete kickoff manually before relaunching.`,
         7,
         state,
       );

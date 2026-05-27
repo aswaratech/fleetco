@@ -19,6 +19,7 @@ export type Milestone =
   | "pr_merged"
   | "next_prompt_extracted"
   | "next_prompt_missing"
+  | "next_prompt_too_short"
   | "fabricated_preamble_stripped"
   | "stop_sentinel_detected"
   | "program_complete"
