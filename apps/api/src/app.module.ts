@@ -5,6 +5,7 @@ import { LoggerModule } from "nestjs-pino";
 
 import { env } from "./config/env";
 import { AuthModule } from "./modules/auth/auth.module";
+import { CustomersModule } from "./modules/customers/customers.module";
 import { DriversModule } from "./modules/drivers/drivers.module";
 import { HealthModule } from "./modules/health/health.module";
 import { PrismaModule } from "./modules/prisma/prisma.module";
@@ -38,6 +39,7 @@ import { VehiclesModule } from "./modules/vehicles/vehicles.module";
             "*.driverName",
             "*.licenseNumber",
             "*.phoneNumber",
+            "*.contactPerson",
           ],
           censor: "[Redacted]",
         },
@@ -57,6 +59,7 @@ import { VehiclesModule } from "./modules/vehicles/vehicles.module";
     VehiclesModule,
     DriversModule,
     TripsModule,
+    CustomersModule,
   ],
 })
 export class AppModule {}

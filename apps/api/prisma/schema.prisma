@@ -19,20 +19,21 @@ datasource db {
 // Triple-slash comments surface as JSDoc on the generated Prisma client.
 
 model User {
-  id              String    @id
+  id               String     @id
   /// Tier 2 PII per ADR-0013 — excluded from default logging (pino redact covers *.email).
-  email           String    @unique
-  emailVerified   Boolean   @default(false)
+  email            String     @unique
+  emailVerified    Boolean    @default(false)
   /// Tier 2 PII per ADR-0013 — admin display name.
-  name            String
-  image           String?
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
-  sessions        Session[]
-  accounts        Account[]
-  vehiclesCreated Vehicle[] @relation("VehicleCreatedBy")
-  driversCreated  Driver[]  @relation("DriverCreatedBy")
-  tripsCreated    Trip[]    @relation("TripCreatedBy")
+  name             String
+  image            String?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+  sessions         Session[]
+  accounts         Account[]
+  vehiclesCreated  Vehicle[]  @relation("VehicleCreatedBy")
+  driversCreated   Driver[]   @relation("DriverCreatedBy")
+  tripsCreated     Trip[]     @relation("TripCreatedBy")
+  customersCreated Customer[] @relation("CustomerCreatedBy")
 
   @@map("user")
 }
@@ -168,30 +169,30 @@ model Vehicle {
   // Phase 3 reminders will key off the three `*ExpiresAt` columns to
   // surface expiring-soon nudges.
   /// Tier 3 per ADR-0013 — Bluebook (नीलो किताब) registration number.
-  bluebookNumber       String?
+  bluebookNumber        String?
   /// Tier 3 per ADR-0013 — Bluebook expiry date.
-  bluebookExpiresAt    DateTime?
+  bluebookExpiresAt     DateTime?
   /// Tier 3 per ADR-0013 — name of the insurance carrier.
-  insurer              String?
+  insurer               String?
   /// Tier 3 per ADR-0013 — insurance policy number.
   insurancePolicyNumber String?
   /// Tier 3 per ADR-0013 — coverage type (THIRD_PARTY or COMPREHENSIVE).
   /// Single-row model: one active policy per vehicle.
-  insuranceType        InsuranceType?
+  insuranceType         InsuranceType?
   /// Tier 3 per ADR-0013 — insurance expiry date.
-  insuranceExpiresAt   DateTime?
+  insuranceExpiresAt    DateTime?
   /// Tier 3 per ADR-0013 — route-permit number for the routes this
   /// vehicle is authorized to operate on.
-  routePermitNumber    String?
+  routePermitNumber     String?
   /// Tier 3 per ADR-0013 — route-permit expiry date.
-  routePermitExpiresAt DateTime?
+  routePermitExpiresAt  DateTime?
 
-  createdAt          DateTime      @default(now())
-  updatedAt          DateTime      @updatedAt
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
   /// References the User who created the record (ADR-0021 admin user).
   /// Audit field; restrict deletion of users with vehicles (Restrict).
-  createdById        String
-  createdBy          User          @relation("VehicleCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  createdById String
+  createdBy   User     @relation("VehicleCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
 
   trips Trip[] @relation("TripVehicle")
 
@@ -387,4 +388,90 @@ model Trip {
   @@index([driverId])
   @@index([createdById])
   @@map("trip")
+}
+
+// Customers module. Owned by apps/api/src/modules/customers/ per ADR-0001.
+// Third Phase 1 vertical slice per the roadmap. A Customer is a party
+// who hires FleetCo's vehicles for jobs (see docs/glossary.md). Customer
+// is master data — it does NOT FK into Trip directly; the future Jobs
+// aggregate will reference Customer, and Trips will belong to Jobs.
+//
+// Iter 15 ships the read path only (schema + migration, list/detail
+// API, list/detail UI, tests) — same staging pattern Vehicles iter-1
+// / iter-2 and Drivers iter-6 / iter-7 followed. Iter 16 layers the
+// write path (POST/PATCH/DELETE + create/edit/delete UI) on top,
+// including the PAN-uniqueness P2002 → 409 mapping the runbook's
+// api-error-mapping entry already anticipates.
+//
+// Tier annotations per ADR-0013: customer records mix Tier 2 PII
+// (contactPerson, phone, email — all individual-person identifiers)
+// with Tier 3 operational fields (name, panNumber, address, status).
+// `name` is the business counterparty's name (company or individual);
+// when the customer is an individual the name itself is personal,
+// but on average the field carries business-counterparty data, so we
+// treat it as Tier 3 with the caveat noted on the field. The pino
+// redact paths in apps/api/src/app.module.ts cover *.email and
+// *.phoneNumber; iter 15 adds *.contactPerson because the Tier 2 PII
+// field is a person's name that does not match an existing redact path.
+
+enum CustomerStatus {
+  ACTIVE
+  INACTIVE
+
+  @@map("customer_status")
+}
+
+model Customer {
+  id            String         @id @default(cuid())
+  /// Tier 3 per ADR-0013 — business counterparty name (company or
+  /// individual). When the customer is an individual person, this is
+  /// arguably Tier 2 PII; on aggregate the field carries business
+  /// names, so we annotate Tier 3 and rely on contactPerson for the
+  /// always-individual PII case. A future tightening (e.g., a
+  /// customerKind enum that splits BUSINESS vs INDIVIDUAL) can
+  /// re-classify per-row if the calculus changes.
+  name          String
+  /// Tier 2 PII per ADR-0013 — the individual at the customer org
+  /// FleetCo deals with day-to-day. Nullable: a small or one-off
+  /// customer may not have a named contact distinct from the
+  /// business itself. Pino redact path `*.contactPerson` covers it.
+  contactPerson String?
+  /// Tier 2 PII per ADR-0013 — phone number, stored loosely (no
+  /// E.164 normalization) per the same CLAUDE.md "no PII-heavy
+  /// regex" rationale that Driver.phone follows. Pino redact path
+  /// `*.phoneNumber` covers it.
+  phone         String
+  /// Tier 2 PII per ADR-0013 — email address, loose validation
+  /// (presence of `@`; CLAUDE.md forbids gold-plating). Nullable;
+  /// not every customer org has a usable contact email. Pino redact
+  /// path `*.email` covers it.
+  email         String?
+  /// Tier 3 per ADR-0013 — Nepal PAN (Permanent Account Number,
+  /// the tax ID issued by the Inland Revenue Department).
+  /// Unique-when-present: Postgres allows multiple NULLs under a
+  /// UNIQUE index, so customers without a PAN do not collide. A
+  /// duplicate PAN surfaces as Prisma P2002 → ConflictException →
+  /// HTTP 409 per docs/runbook/api-error-mapping.md (the runbook
+  /// already anticipates "Customers' PAN" in its P2002 table); the
+  /// translation lives in CustomersService.create on the iter-16
+  /// write path. PAN format validation beyond uniqueness (Nepal PAN
+  /// is 9 digits) is deferred — tightening requires an ADR.
+  panNumber     String?        @unique
+  /// Tier 3 per ADR-0013 — billing or correspondence address. Free
+  /// form, not parsed into street/city/postal-code sub-fields in
+  /// Phase 1; the operator types what is on the paperwork. Nullable.
+  address       String?
+  status        CustomerStatus @default(ACTIVE)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  /// References the User who created the customer record (ADR-0021
+  /// admin user). Audit field; Restrict because the customer's audit
+  /// chain should remain intact for the customer's lifetime, and
+  /// because the future Jobs aggregate will reference Customer by id.
+  createdById   String
+  createdBy     User           @relation("CustomerCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@index([status])
+  @@index([createdById])
+  @@map("customer")
 }
