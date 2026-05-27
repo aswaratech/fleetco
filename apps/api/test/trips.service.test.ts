@@ -1189,4 +1189,205 @@ describe("TripsService (integration, real Postgres)", () => {
       expect(stats.totalKmLogged).toBe(400);
     });
   });
+
+  describe("statsForDriver() — iter 13 per-driver aggregations", () => {
+    // The symmetric mirror of the iter-12 statsForVehicle block above.
+    // Same three scalar aggregations the Driver detail page renders;
+    // same single-$transaction snapshot guarantee; same policy
+    // decisions documented on the service method (COMPLETED-only count
+    // + sum; most-recent vehicle across trips with non-null startedAt,
+    // so PLANNED is excluded). Tests mirror the vehicle variant 1:1,
+    // swapping vehicle ↔ driver and the "most recent X" framing.
+
+    test("zero trips → count 0, total 0, mostRecentVehicle null", async () => {
+      const stats = await service.statsForDriver(driver.id);
+      expect(stats.completedTripCount).toBe(0);
+      expect(stats.totalKmLogged).toBe(0);
+      expect(stats.mostRecentVehicle).toBeNull();
+    });
+
+    test("only PLANNED trips → count 0, total 0, mostRecentVehicle null", async () => {
+      // PLANNED trips have startedAt = null per the fixture default,
+      // so they neither count toward completedTripCount nor surface as
+      // the most-recent vehicle. Pinned so a refactor that broadened
+      // the count to "all trips" would fail.
+      await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.PLANNED,
+      });
+      await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.PLANNED,
+      });
+      const stats = await service.statsForDriver(driver.id);
+      expect(stats.completedTripCount).toBe(0);
+      expect(stats.totalKmLogged).toBe(0);
+      expect(stats.mostRecentVehicle).toBeNull();
+    });
+
+    test("mix of statuses — count + sum cover COMPLETED only; mostRecentVehicle picks max startedAt", async () => {
+      // Five trips for `driver`, of varied status. Only the two
+      // COMPLETED contribute to count + sum. mostRecentVehicle picks
+      // the trip with the largest non-null startedAt — here, the
+      // IN_PROGRESS one, which started after both completions.
+      await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.COMPLETED,
+        startedAt: new Date("2026-04-01T08:00:00Z"),
+        endedAt: new Date("2026-04-01T18:00:00Z"),
+        startOdometerKm: 1000,
+        endOdometerKm: 1250,
+      });
+      await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.COMPLETED,
+        startedAt: new Date("2026-04-02T08:00:00Z"),
+        endedAt: new Date("2026-04-02T18:00:00Z"),
+        startOdometerKm: 1250,
+        endOdometerKm: 1500,
+      });
+      const inProgressVehicle = await seedVehicle(prisma, adminId);
+      await seedTrip(prisma, {
+        vehicleId: inProgressVehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.IN_PROGRESS,
+        startedAt: new Date("2026-04-03T08:00:00Z"),
+        startOdometerKm: 1500,
+      });
+      await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.PLANNED,
+      });
+      await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.CANCELLED,
+        startedAt: new Date("2026-03-15T08:00:00Z"),
+        startOdometerKm: 950,
+      });
+
+      const stats = await service.statsForDriver(driver.id);
+      expect(stats.completedTripCount).toBe(2);
+      // Two COMPLETED trips: (1250 − 1000) + (1500 − 1250) = 500.
+      expect(stats.totalKmLogged).toBe(500);
+      // Most-recent by startedAt is the IN_PROGRESS trip on 2026-04-03.
+      expect(stats.mostRecentVehicle).not.toBeNull();
+      expect(stats.mostRecentVehicle?.id).toBe(inProgressVehicle.id);
+      expect(stats.mostRecentVehicle?.startedAt.toISOString()).toBe("2026-04-03T08:00:00.000Z");
+    });
+
+    test("cross-driver isolation — trips on Driver B do not leak into Driver A stats", async () => {
+      const otherDriver = await seedDriver(prisma, adminId);
+      // Driver A gets 1 COMPLETED.
+      await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.COMPLETED,
+        startedAt: new Date("2026-04-01T08:00:00Z"),
+        endedAt: new Date("2026-04-01T18:00:00Z"),
+        startOdometerKm: 100,
+        endOdometerKm: 200,
+      });
+      // Driver B gets 3 COMPLETED — should not show up in A's count.
+      for (let i = 0; i < 3; i++) {
+        await seedTrip(prisma, {
+          vehicleId: vehicle.id,
+          driverId: otherDriver.id,
+          createdById: adminId,
+          status: TripStatus.COMPLETED,
+          startedAt: new Date("2026-04-02T08:00:00Z"),
+          endedAt: new Date("2026-04-02T18:00:00Z"),
+          startOdometerKm: 1000,
+          endOdometerKm: 1100,
+        });
+      }
+
+      const statsA = await service.statsForDriver(driver.id);
+      expect(statsA.completedTripCount).toBe(1);
+      expect(statsA.totalKmLogged).toBe(100);
+    });
+
+    test("mostRecentVehicle picks max startedAt, not max createdAt", async () => {
+      // Two trips for the same driver. The one created LATER has an
+      // earlier startedAt. The query orders by startedAt desc, so the
+      // earlier-started trip should NOT be the most-recent vehicle
+      // even though it was inserted into the table later. Pins the
+      // policy decision documented on the service method.
+      const earlierVehicle = await seedVehicle(prisma, adminId);
+      const laterVehicle = await seedVehicle(prisma, adminId);
+
+      // laterVehicle's trip has earlier startedAt and is inserted last.
+      await seedTrip(prisma, {
+        vehicleId: earlierVehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.IN_PROGRESS,
+        startedAt: new Date("2026-04-10T08:00:00Z"),
+        startOdometerKm: 100,
+      });
+      await seedTrip(prisma, {
+        vehicleId: laterVehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.IN_PROGRESS,
+        startedAt: new Date("2026-04-05T08:00:00Z"),
+        startOdometerKm: 200,
+      });
+
+      const stats = await service.statsForDriver(driver.id);
+      // earlierVehicle has the LATER startedAt (the 10th vs. the 5th),
+      // so it should be the most-recent vehicle.
+      expect(stats.mostRecentVehicle?.id).toBe(earlierVehicle.id);
+    });
+
+    test("non-monotonic endOdometerKm (backdated trip) still sums arithmetically", async () => {
+      // The iter-11 odometer-bump rule only moves the vehicle's
+      // odometerCurrentKm forward, but the per-driver stats sum is a
+      // pure arithmetic sum: each COMPLETED trip's
+      // (endOdometerKm − startOdometerKm) contributes regardless of
+      // whether it moved the vehicle's odometer or not. This pins the
+      // scope decision documented on the service.
+      await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.COMPLETED,
+        startedAt: new Date("2026-04-01T08:00:00Z"),
+        endedAt: new Date("2026-04-01T18:00:00Z"),
+        startOdometerKm: 5000,
+        endOdometerKm: 5300,
+      });
+      // Backdated COMPLETED with smaller numbers — the iter-11 rule
+      // would NOT move the vehicle odometer; but the sum here is
+      // straightforward (end − start = 100).
+      await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.COMPLETED,
+        startedAt: new Date("2026-01-01T08:00:00Z"),
+        endedAt: new Date("2026-01-01T18:00:00Z"),
+        startOdometerKm: 100,
+        endOdometerKm: 200,
+      });
+
+      const stats = await service.statsForDriver(driver.id);
+      expect(stats.completedTripCount).toBe(2);
+      // 300 + 100 = 400.
+      expect(stats.totalKmLogged).toBe(400);
+    });
+  });
 });
