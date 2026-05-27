@@ -1,9 +1,13 @@
 import { z } from "zod";
 
 // Zod schemas for the Customers slice. Iter 15 ships the read path
-// (`ListCustomersQuerySchema`); iter 16 will add `CreateCustomerSchema`
-// and `UpdateCustomerSchema` for the write path the same way Drivers
-// staged iter-6 → iter-7. This file deliberately mirrors
+// (`ListCustomersQuerySchema`); iter 16 layers the write path:
+// `CreateCustomerSchema` and `UpdateCustomerSchema`. The previous
+// "absent in iter 15 by design" comment is no longer applicable —
+// both surfaces now live here, mirroring the iter-6 → iter-7 staging
+// the Drivers slice followed.
+//
+// This file deliberately mirrors
 // apps/api/src/modules/drivers/drivers.schemas.ts in shape and
 // convention: enum lists duplicated from Prisma enums (so the
 // validation file does not pull the Prisma runtime), `.strict()` to
@@ -17,6 +21,122 @@ import { z } from "zod";
 // simpler status set than Drivers/Vehicles — a customer is either
 // current business or dormant business.
 const CUSTOMER_STATUSES = ["ACTIVE", "INACTIVE"] as const;
+
+// Reusable field validators for the write path. These mirror the Tier-2
+// / Tier-3 rules from the Customer model in prisma/schema.prisma:
+//
+//   - name is trimmed and required non-empty (an all-whitespace value
+//     collapses to "" after trim and fails). Max length is loose (256)
+//     to accommodate Nepali transliterated company names and the
+//     occasional very long legal form.
+//   - contactPerson is optional and nullable — many small or one-off
+//     customers do not have a named contact distinct from the business
+//     itself. Trimmed when present.
+//   - phone is loose per CLAUDE.md "no PII-heavy regex": same Nepal
+//     phone regex the Drivers slice uses. Pattern accepts either a
+//     `+977-`-prefixed number or a 10-digit local number with optional
+//     separators. Tightening requires an ADR (CLAUDE.md).
+//   - email is loose per ADR-0013 (no gold-plating). We accept any
+//     string containing an `@` between non-empty parts and let the
+//     server be the authoritative validator. Optional + nullable.
+//   - panNumber is optional + nullable. PAN format validation beyond
+//     the unique-when-present rule is deferred (a Nepal PAN is 9
+//     digits, but a future ADR will tighten if needed; today we keep
+//     the surface permissive). Service-layer normalization (trim +
+//     uppercase) lives in CustomersService, NOT here — the schema
+//     accepts a wider input shape and the service normalizes before
+//     persisting. Mirror of how DriversService treats licenseNumber.
+//   - address is optional + nullable; free-form string, no parsing
+//     into street/city/postal-code sub-fields in Phase 1.
+
+const Name = z.string().trim().min(1, "Name is required.").max(256, "Name is too long.");
+
+const ContactPerson = z.string().trim().max(128, "Contact person is too long.");
+
+// Nepal phone regex — identical to drivers.schemas.ts. Promoting to a
+// shared helper is deferred; CLAUDE.md forbids tightening either copy
+// without an ADR, which keeps drift bounded.
+const NEPAL_PHONE_REGEX = /^(?:\+977[- ]?[\d][\d\s-]{6,14}|[\d][\d\s-]{8,14})$/;
+
+const Phone = z
+  .string()
+  .trim()
+  .min(1, "Phone is required.")
+  .regex(
+    NEPAL_PHONE_REGEX,
+    "Phone must be a Nepal number (e.g. +977-9800000000 or a 10-digit local number).",
+  );
+
+// Loose email validator per ADR-0013. We avoid Zod's stricter built-in
+// email check because the iter-15 PAN-conflict note in the runbook
+// explicitly anchors on "loose validation; let users type what's on
+// the paperwork". A future ADR can tighten — this validator is the
+// only place that needs to change.
+const Email = z
+  .string()
+  .trim()
+  .min(1, "Email is required when provided.")
+  .max(256, "Email is too long.")
+  .refine((value) => /^[^\s@]+@[^\s@]+$/.test(value), {
+    message: "Email must contain a single @ between two non-empty parts.",
+  });
+
+const PanNumber = z
+  .string()
+  .trim()
+  .min(1, "PAN number is required when provided.")
+  .max(32, "PAN number is too long.");
+
+const Address = z.string().trim().max(512, "Address is too long.");
+
+const CustomerStatusEnum = z.enum(CUSTOMER_STATUSES, {
+  error: () => `Status must be one of: ${CUSTOMER_STATUSES.join(", ")}.`,
+});
+
+// POST /api/v1/customers request body. Required fields match the
+// iter-16 kickoff (name, phone). Optional fields: contactPerson,
+// email, panNumber, address, status. `createdById` is NOT accepted
+// from the client — the controller pulls it from
+// `request.session.user.id`. `.strict()` rejects unknown keys with
+// HTTP 400 so a stray field never reaches Prisma.
+//
+// Optional-and-nullable fields accept `null` as an explicit "absent"
+// marker; a missing key is treated the same. Both shapes normalize to
+// `null` at the service layer for the database, mirroring how Drivers
+// handles dateOfBirth. The `status` default lives at the service layer
+// (CustomerStatus.ACTIVE).
+export const CreateCustomerSchema = z
+  .object({
+    name: Name,
+    contactPerson: ContactPerson.nullable().optional(),
+    phone: Phone,
+    email: Email.nullable().optional(),
+    panNumber: PanNumber.nullable().optional(),
+    address: Address.nullable().optional(),
+    status: CustomerStatusEnum.optional(),
+  })
+  .strict();
+
+export type CreateCustomerInput = z.infer<typeof CreateCustomerSchema>;
+
+// PATCH /api/v1/customers/:id — partial update. Mirrors the Drivers
+// pattern: take CreateCustomerSchema's shape as `.partial()` and
+// reject empty bodies via `.refine` so a no-op PATCH surfaces as 400
+// rather than silently returning the unchanged row. (Drivers and
+// Vehicles use the identical refine — see drivers.schemas.ts's
+// UpdateDriverSchema and vehicles.schemas.ts's UpdateVehicleSchema.)
+//
+// Every field stays nullable-where-it-was-nullable: the operator can
+// clear a previously-entered contactPerson by sending `null` explicitly
+// (the service distinguishes "client provided null" from "client did
+// not mention" via hasOwnProperty).
+export const UpdateCustomerSchema = CreateCustomerSchema.partial()
+  .strict()
+  .refine((data) => Object.keys(data).length > 0, {
+    message: "At least one field is required.",
+  });
+
+export type UpdateCustomerInput = z.infer<typeof UpdateCustomerSchema>;
 
 // GET /api/v1/customers query parameters (iter 15 — read path).
 // Filter / sort / pagination contract mirrors the Drivers list
