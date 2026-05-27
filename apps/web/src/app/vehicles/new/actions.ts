@@ -48,6 +48,29 @@ export async function createVehicleAction(
     return { ok: false, message: issues, status: 400 };
   }
 
+  // Compliance metadata (iter 14): include only the fields the operator
+  // actually filled in. Empty strings are omitted so the API's schema
+  // sees `undefined` (the "not set" branch) rather than "" (which its
+  // ComplianceString min(1) would reject) — the same omit-empties
+  // convention the Drivers / Trips create actions use.
+  const compliance: Record<string, string> = {};
+  const complianceFields = [
+    "bluebookNumber",
+    "bluebookExpiresAt",
+    "insurer",
+    "insurancePolicyNumber",
+    "insuranceType",
+    "insuranceExpiresAt",
+    "routePermitNumber",
+    "routePermitExpiresAt",
+  ] as const;
+  for (const key of complianceFields) {
+    const value = parsed.data[key];
+    if (typeof value === "string" && value.length > 0) {
+      compliance[key] = value;
+    }
+  }
+
   try {
     await apiFetch<unknown>("/api/v1/vehicles", {
       method: "POST",
@@ -65,6 +88,7 @@ export async function createVehicleAction(
         // the common case of a vehicle joining the fleet at a known
         // odometer reading.
         acquiredAt: parsed.data.acquiredAt,
+        ...compliance,
       },
     });
   } catch (error) {

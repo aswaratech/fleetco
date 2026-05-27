@@ -58,12 +58,37 @@ export async function updateVehicleAction(
     return { ok: false, message: issues, status: 400 };
   }
 
+  // Compliance metadata (iter 14): a cleared field arrives in the diff
+  // as "" (the form input was emptied). The API's UpdateVehicleSchema
+  // rejects "" on these fields (ComplianceString requires min length 1)
+  // — to *clear* a column the API expects an explicit null. So map any
+  // empty-string compliance value to null before sending. Non-compliance
+  // fields (registrationNumber etc.) are never blanked through this form,
+  // so they don't need the same treatment.
+  const complianceKeys = [
+    "bluebookNumber",
+    "bluebookExpiresAt",
+    "insurer",
+    "insurancePolicyNumber",
+    "insuranceType",
+    "insuranceExpiresAt",
+    "routePermitNumber",
+    "routePermitExpiresAt",
+  ] as const;
+  const wireBody: Record<string, unknown> = { ...parsed.data };
+  for (const key of complianceKeys) {
+    if (wireBody[key] === "") {
+      wireBody[key] = null;
+    }
+  }
+
   try {
     await apiFetch<unknown>(`/api/v1/vehicles/${id}`, {
       method: "PATCH",
-      // Pass only the diff. parsed.data contains the validated subset of
-      // the user's changes; the API rejects unknown keys via .strict().
-      json: parsed.data,
+      // Pass only the diff. wireBody contains the validated subset of
+      // the user's changes (with cleared compliance fields normalized to
+      // null); the API rejects unknown keys via .strict().
+      json: wireBody,
     });
   } catch (error) {
     if (error instanceof ApiError) {

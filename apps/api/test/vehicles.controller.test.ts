@@ -12,6 +12,7 @@ import { TripsService } from "../src/modules/trips/trips.service";
 import { VehiclesController } from "../src/modules/vehicles/vehicles.controller";
 import { VehiclesService } from "../src/modules/vehicles/vehicles.service";
 import {
+  CreateVehicleSchema,
   ListVehiclesQuerySchema,
   type CreateVehicleInput,
 } from "../src/modules/vehicles/vehicles.schemas";
@@ -441,5 +442,55 @@ describe("VehiclesController.getStats (iter-12 cross-slice read)", () => {
     expect(stats.completedTripCount).toBe(2);
     expect(stats.totalKmLogged).toBe(350);
     expect(stats.mostRecentDriver?.id).toBe(driver.id);
+  });
+});
+
+describe("CreateVehicleSchema — iter-14 compliance fields (pipe layer)", () => {
+  // Pure pipe-level tests of the widened CreateVehicleSchema. The
+  // compliance fields are optional, so a body without them still
+  // parses; an invalid insuranceType enum is rejected with 400 the
+  // same way an invalid kind/status is. Cheap pure-code tests — no
+  // TestingModule needed.
+  const pipe = new ZodValidationPipe(CreateVehicleSchema);
+
+  const baseBody = {
+    registrationNumber: "BA 1 KA 9999",
+    kind: "TRUCK",
+    make: "Tata",
+    model: "LPK 2518",
+    year: 2022,
+    acquiredAt: "2024-01-15",
+  };
+
+  test("invalid insuranceType enum value → BadRequestException (HTTP 400)", () => {
+    expect(() => pipe.transform({ ...baseBody, insuranceType: "FULLY_LOADED" })).toThrow(
+      BadRequestException,
+    );
+  });
+
+  test("body with all compliance fields parses through with coerced dates", () => {
+    const parsed = pipe.transform({
+      ...baseBody,
+      bluebookNumber: "लु ०१-००८-०१२३४५",
+      bluebookExpiresAt: "2027-06-15",
+      insurer: "Shikhar Insurance",
+      insurancePolicyNumber: "POL-2026-99887",
+      insuranceType: "COMPREHENSIVE",
+      insuranceExpiresAt: "2026-12-31",
+      routePermitNumber: "RP-BAGMATI-4421",
+      routePermitExpiresAt: "2026-09-30",
+    });
+    expect(parsed.insuranceType).toBe("COMPREHENSIVE");
+    expect(parsed.bluebookNumber).toBe("लु ०१-००८-०१२३४५");
+    // z.coerce.date() turns the ISO strings into Date instances.
+    expect(parsed.bluebookExpiresAt).toBeInstanceOf(Date);
+    expect(parsed.routePermitExpiresAt).toBeInstanceOf(Date);
+  });
+
+  test("body with no compliance fields still parses (all optional)", () => {
+    const parsed = pipe.transform(baseBody);
+    expect(parsed.registrationNumber).toBe("BA 1 KA 9999");
+    expect(parsed.bluebookNumber).toBeUndefined();
+    expect(parsed.insuranceType).toBeUndefined();
   });
 });

@@ -26,6 +26,10 @@ const VEHICLE_KINDS = ["TRUCK", "TIPPER", "EXCAVATOR", "LOADER", "GRADER", "OTHE
 // Vehicle status enum — must mirror VehicleStatus in prisma/schema.prisma.
 const VEHICLE_STATUSES = ["ACTIVE", "IN_MAINTENANCE", "RETIRED", "SOLD"] as const;
 
+// Insurance type enum — must mirror InsuranceType in prisma/schema.prisma.
+// Added iter 14 alongside the compliance-metadata columns.
+const INSURANCE_TYPES = ["THIRD_PARTY", "COMPREHENSIVE"] as const;
+
 // Year window. Lower bound: 1980 (older fleet pieces are rare in Nepal;
 // a typo entering 1929 should be rejected). Upper bound: current year +1
 // to allow registering a new vehicle whose paperwork lists next year's
@@ -80,6 +84,18 @@ const VehicleStatusEnum = z.enum(VEHICLE_STATUSES, {
   error: () => `Status must be one of: ${VEHICLE_STATUSES.join(", ")}.`,
 });
 
+const InsuranceTypeEnum = z.enum(INSURANCE_TYPES, {
+  error: () => `Insurance type must be one of: ${INSURANCE_TYPES.join(", ")}.`,
+});
+
+// Compliance-metadata field fragments (iter 14). The three document
+// numbers are short identifier strings capped at 64 chars like make /
+// model / registrationNumber; the three expiry dates reuse DateInput.
+// All are optional on Create and nullable-optional on Update — see the
+// schema-level comments. A `.trim().min(1)` guards against a stored
+// all-whitespace value while still allowing the field to be omitted.
+const ComplianceString = z.string().trim().min(1).max(64);
+
 // POST /api/v1/vehicles request body. Mirrors the iter-2 kickoff field
 // list. createdById is NOT accepted from the client — the controller
 // pulls it from request.session.user.id. odometerCurrentKm defaults to
@@ -96,6 +112,18 @@ export const CreateVehicleSchema = z
     odometerStartKm: OdometerKm.optional(),
     odometerCurrentKm: OdometerKm.optional(),
     acquiredAt: DateInput,
+    // Compliance metadata (iter 14) — all optional; a vehicle may be
+    // registered before its documents are scanned in. Dates are
+    // nullable so a client can explicitly send null (consistent with
+    // the Update schema's clear-the-field semantics).
+    bluebookNumber: ComplianceString.optional(),
+    bluebookExpiresAt: DateInput.nullable().optional(),
+    insurer: ComplianceString.optional(),
+    insurancePolicyNumber: ComplianceString.optional(),
+    insuranceType: InsuranceTypeEnum.optional(),
+    insuranceExpiresAt: DateInput.nullable().optional(),
+    routePermitNumber: ComplianceString.optional(),
+    routePermitExpiresAt: DateInput.nullable().optional(),
   })
   // Strip any extra keys silently; we do not want a stray field
   // (e.g. createdById from a misbehaving client) to ever reach Prisma.
@@ -121,6 +149,17 @@ export const UpdateVehicleSchema = z
     odometerCurrentKm: OdometerKm.optional(),
     acquiredAt: DateInput.optional(),
     retiredAt: DateInput.nullable().optional(),
+    // Compliance metadata (iter 14) — nullable-optional on PATCH so the
+    // operator can both set a field and explicitly clear it by sending
+    // null, matching the retiredAt pattern above.
+    bluebookNumber: ComplianceString.nullable().optional(),
+    bluebookExpiresAt: DateInput.nullable().optional(),
+    insurer: ComplianceString.nullable().optional(),
+    insurancePolicyNumber: ComplianceString.nullable().optional(),
+    insuranceType: InsuranceTypeEnum.nullable().optional(),
+    insuranceExpiresAt: DateInput.nullable().optional(),
+    routePermitNumber: ComplianceString.nullable().optional(),
+    routePermitExpiresAt: DateInput.nullable().optional(),
   })
   .strict()
   // Reject empty-body PATCH. PATCH with no fields is a useless request

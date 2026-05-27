@@ -120,6 +120,19 @@ enum VehicleStatus {
   @@map("vehicle_status")
 }
 
+// Nepal vehicle-insurance categories. THIRD_PARTY satisfies the
+// statutory minimum; COMPREHENSIVE covers own-damage in addition.
+// The two-value enum reflects what Nepali insurers actually sell for
+// heavy commercial vehicles in Phase 1 scope; extending with named
+// add-ons (e.g., personal accident covers) is a non-breaking enum
+// widen later if the operator needs to distinguish them.
+enum InsuranceType {
+  THIRD_PARTY
+  COMPREHENSIVE
+
+  @@map("insurance_type")
+}
+
 model Vehicle {
   id                 String        @id @default(cuid())
   /// Tier 3 per ADR-0013 — Nepali commercial plate (loose validation in
@@ -146,6 +159,33 @@ model Vehicle {
   /// Tier 3 per ADR-0013 — date the vehicle left the fleet (retired or
   /// sold). Nullable; populated when status transitions to RETIRED or SOLD.
   retiredAt          DateTime?
+
+  // Compliance metadata — Nepal-specific registration and document
+  // tracking added in Phase 1 iter 14. All nullable: the Vehicle
+  // aggregate shipped since iter 1 without these columns; existing
+  // rows must remain readable, and operators are allowed to register
+  // a vehicle before all its compliance docs are scanned in.
+  // Phase 3 reminders will key off the three `*ExpiresAt` columns to
+  // surface expiring-soon nudges.
+  /// Tier 3 per ADR-0013 — Bluebook (नीलो किताब) registration number.
+  bluebookNumber       String?
+  /// Tier 3 per ADR-0013 — Bluebook expiry date.
+  bluebookExpiresAt    DateTime?
+  /// Tier 3 per ADR-0013 — name of the insurance carrier.
+  insurer              String?
+  /// Tier 3 per ADR-0013 — insurance policy number.
+  insurancePolicyNumber String?
+  /// Tier 3 per ADR-0013 — coverage type (THIRD_PARTY or COMPREHENSIVE).
+  /// Single-row model: one active policy per vehicle.
+  insuranceType        InsuranceType?
+  /// Tier 3 per ADR-0013 — insurance expiry date.
+  insuranceExpiresAt   DateTime?
+  /// Tier 3 per ADR-0013 — route-permit number for the routes this
+  /// vehicle is authorized to operate on.
+  routePermitNumber    String?
+  /// Tier 3 per ADR-0013 — route-permit expiry date.
+  routePermitExpiresAt DateTime?
+
   createdAt          DateTime      @default(now())
   updatedAt          DateTime      @updatedAt
   /// References the User who created the record (ADR-0021 admin user).

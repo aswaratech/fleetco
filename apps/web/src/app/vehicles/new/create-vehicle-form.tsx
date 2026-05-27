@@ -18,6 +18,7 @@ import { Input } from "@/components/ui/input";
 import {
   CreateVehicleFormSchema,
   type CreateVehicleFormValues,
+  INSURANCE_TYPE_OPTIONS,
   VEHICLE_KIND_OPTIONS,
   VEHICLE_STATUS_OPTIONS,
 } from "@/lib/vehicles-schema";
@@ -66,6 +67,15 @@ export function CreateVehicleForm(): React.ReactElement {
       status: "ACTIVE",
       odometerStartKm: 0,
       acquiredAt: todayLocalISO(),
+      // Compliance metadata (iter 14) — all blank by default; optional.
+      bluebookNumber: "",
+      bluebookExpiresAt: "",
+      insurer: "",
+      insurancePolicyNumber: "",
+      insuranceType: "",
+      insuranceExpiresAt: "",
+      routePermitNumber: "",
+      routePermitExpiresAt: "",
     },
   });
 
@@ -239,6 +249,144 @@ export function CreateVehicleForm(): React.ReactElement {
             </FormItem>
           )}
         />
+
+        {/* Compliance metadata (iter 14) — Nepal registration documents.
+            All optional: a vehicle can be registered before its papers
+            are scanned in. Native <select> for insurance type per the
+            small-list convention noted above. */}
+        <fieldset className="space-y-4 border-t border-border-subtle pt-4">
+          <legend className="text-text-secondary text-sm font-medium">Compliance metadata</legend>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <FormField
+              control={form.control}
+              name="bluebookNumber"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Bluebook number</FormLabel>
+                  <FormControl>
+                    <Input autoComplete="off" className="font-mono" {...field} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="bluebookExpiresAt"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Bluebook expires at</FormLabel>
+                  <FormControl>
+                    <Input type="date" {...field} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <FormField
+              control={form.control}
+              name="insurer"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Insurer</FormLabel>
+                  <FormControl>
+                    <Input autoComplete="off" {...field} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="insurancePolicyNumber"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Insurance policy number</FormLabel>
+                  <FormControl>
+                    <Input autoComplete="off" className="font-mono" {...field} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <FormField
+              control={form.control}
+              name="insuranceType"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Insurance type</FormLabel>
+                  <FormControl>
+                    <select
+                      className="border-input focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 h-9 w-full rounded-md border bg-transparent px-3 py-1 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:ring-[3px]"
+                      {...field}
+                    >
+                      <option value="">—</option>
+                      {INSURANCE_TYPE_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="insuranceExpiresAt"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Insurance expires at</FormLabel>
+                  <FormControl>
+                    <Input type="date" {...field} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <FormField
+              control={form.control}
+              name="routePermitNumber"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Route permit number</FormLabel>
+                  <FormControl>
+                    <Input autoComplete="off" className="font-mono" {...field} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="routePermitExpiresAt"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Route permit expires at</FormLabel>
+                  <FormControl>
+                    <Input type="date" {...field} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </div>
+        </fieldset>
 
         {submitError ? (
           <p role="alert" className="text-status-error text-sm">

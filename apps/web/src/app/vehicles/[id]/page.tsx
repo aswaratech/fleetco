@@ -12,7 +12,11 @@ import {
 } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
 import { getServerSession } from "@/lib/session";
-import { VEHICLE_KIND_LABELS, VEHICLE_STATUS_LABELS } from "@/lib/vehicles-schema";
+import {
+  INSURANCE_TYPE_LABELS,
+  VEHICLE_KIND_LABELS,
+  VEHICLE_STATUS_LABELS,
+} from "@/lib/vehicles-schema";
 
 import { TRIP_STATUS_LABELS, type TripListItem, type TripStatus } from "../../trips/types";
 import type { Vehicle } from "../types";
@@ -99,6 +103,12 @@ function formatTimestamp(iso: string | null): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "—";
   return date.toISOString().replace("T", " ").slice(0, 19) + " UTC";
+}
+
+// Render a nullable string value, falling back to an em-dash for null /
+// empty. Used by the iter-14 Compliance section's identifier fields.
+function valueOrDash(value: string | null): string {
+  return value && value.length > 0 ? value : "—";
 }
 
 // Render an ISO date+time as YYYY-MM-DD HH:MM (no seconds, no zone
@@ -221,6 +231,43 @@ export default async function VehicleDetailPage({
             <DetailRow label="Retired at" value={formatDate(vehicle.retiredAt)} />
             <DetailRow label="Created at" value={formatTimestamp(vehicle.createdAt)} />
             <DetailRow label="Updated at" value={formatTimestamp(vehicle.updatedAt)} />
+          </dl>
+        </section>
+
+        {/* Iter 14: compliance metadata. Nepal registration documents
+            (Bluebook, insurance, route permit). Null fields render "—".
+            Document numbers use mono per the identifier convention. */}
+        <section className="border-border-subtle bg-surface-raised rounded border p-6 shadow-sm">
+          <h2 className="text-text-muted mb-4 text-xs font-medium uppercase tracking-wide">
+            Compliance
+          </h2>
+          <dl className="grid grid-cols-1 gap-x-8 gap-y-4 sm:grid-cols-2">
+            <DetailRow label="Bluebook number" value={valueOrDash(vehicle.bluebookNumber)} mono />
+            <DetailRow label="Bluebook expires" value={formatDate(vehicle.bluebookExpiresAt)} />
+            <DetailRow label="Insurer" value={valueOrDash(vehicle.insurer)} />
+            <DetailRow
+              label="Insurance policy number"
+              value={valueOrDash(vehicle.insurancePolicyNumber)}
+              mono
+            />
+            <DetailRow
+              label="Insurance type"
+              value={
+                vehicle.insuranceType
+                  ? (INSURANCE_TYPE_LABELS[vehicle.insuranceType] ?? vehicle.insuranceType)
+                  : "—"
+              }
+            />
+            <DetailRow label="Insurance expires" value={formatDate(vehicle.insuranceExpiresAt)} />
+            <DetailRow
+              label="Route permit number"
+              value={valueOrDash(vehicle.routePermitNumber)}
+              mono
+            />
+            <DetailRow
+              label="Route permit expires"
+              value={formatDate(vehicle.routePermitExpiresAt)}
+            />
           </dl>
         </section>
 

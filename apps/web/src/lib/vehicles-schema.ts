@@ -19,6 +19,7 @@ import { z } from "zod";
 
 const VEHICLE_KINDS = ["TRUCK", "TIPPER", "EXCAVATOR", "LOADER", "GRADER", "OTHER"] as const;
 const VEHICLE_STATUSES = ["ACTIVE", "IN_MAINTENANCE", "RETIRED", "SOLD"] as const;
+const INSURANCE_TYPES = ["THIRD_PARTY", "COMPREHENSIVE"] as const;
 
 const YEAR_MIN = 1980;
 const YEAR_MAX = new Date().getUTCFullYear() + 1;
@@ -31,6 +32,18 @@ const DateString = z
   .string()
   .min(1, "Date is required.")
   .regex(/^\d{4}-\d{2}-\d{2}$/, "Use the YYYY-MM-DD date format.");
+
+// Optional compliance-metadata field shapes (iter 14). Unlike the
+// required fields above, these allow empty (the operator may register a
+// vehicle before its documents are scanned in). The action layer omits
+// empty values from the wire body so the API never receives "".
+//   - OptionalComplianceString: ≤64 chars or empty.
+//   - OptionalDateString: YYYY-MM-DD or empty.
+const OptionalComplianceString = z.string().trim().max(64, "Too long.").optional();
+const OptionalDateString = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$|^$/, "Use the YYYY-MM-DD date format.")
+  .optional();
 
 // Shared field shape used by both Create and Update forms. The Create
 // form requires every field (except odometerCurrentKm, which the API
@@ -72,6 +85,17 @@ export const VehicleFormSchema = z.object({
     .min(0, "Odometer cannot be negative.")
     .max(ODOMETER_MAX_KM, `Odometer cannot exceed ${ODOMETER_MAX_KM.toLocaleString("en")} km.`),
   acquiredAt: DateString,
+  // Compliance metadata (iter 14) — all optional. Empty values are
+  // dropped from the wire body by the action layer; the API stores
+  // null. `insuranceType` allows "" for the "not chosen" select option.
+  bluebookNumber: OptionalComplianceString,
+  bluebookExpiresAt: OptionalDateString,
+  insurer: OptionalComplianceString,
+  insurancePolicyNumber: OptionalComplianceString,
+  insuranceType: z.enum(INSURANCE_TYPES).or(z.literal("")).optional(),
+  insuranceExpiresAt: OptionalDateString,
+  routePermitNumber: OptionalComplianceString,
+  routePermitExpiresAt: OptionalDateString,
 });
 
 export type VehicleFormValues = z.infer<typeof VehicleFormSchema>;
@@ -141,4 +165,19 @@ export const VEHICLE_KIND_LABELS: Record<string, string> = Object.fromEntries(
 
 export const VEHICLE_STATUS_LABELS: Record<string, string> = Object.fromEntries(
   VEHICLE_STATUS_OPTIONS.map(({ value, label }) => [value, label]),
+);
+
+// Insurance-type options + labels (iter 14). The create / edit form
+// selects render an empty "—" option for "not set"; the detail page
+// uses the label map for friendly display.
+export const INSURANCE_TYPE_OPTIONS: readonly {
+  value: (typeof INSURANCE_TYPES)[number];
+  label: string;
+}[] = [
+  { value: "THIRD_PARTY", label: "Third party" },
+  { value: "COMPREHENSIVE", label: "Comprehensive" },
+];
+
+export const INSURANCE_TYPE_LABELS: Record<string, string> = Object.fromEntries(
+  INSURANCE_TYPE_OPTIONS.map(({ value, label }) => [value, label]),
 );

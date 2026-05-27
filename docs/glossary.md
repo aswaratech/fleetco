@@ -6,7 +6,7 @@ This is the project's semantic memory: the place where words have agreed meaning
 
 **Bishesh Anumati (विशेष अनुमति)** is the Nepali term for a special permit, often required to operate certain heavy vehicles or to operate on certain routes. It is one of the compliance documents tracked by the system, and its expiry triggers a reminder.
 
-**Bluebook (नीलो किताब)** is the vehicle registration certificate issued by Nepal's Department of Transport Management. It is called the Bluebook because of the color of its cover. Every vehicle in FleetCo has a Bluebook number and metadata, and Bluebook expiry triggers compliance reminders.
+**Bluebook (नीलो किताब)** is the vehicle registration certificate issued by Nepal's Department of Transport Management. It is called the Bluebook because of the color of its cover. Every vehicle in FleetCo has a Bluebook number and metadata, and Bluebook expiry triggers compliance reminders. As of Phase 1 iter 14, persisted on Vehicle as `bluebookNumber` (string, nullable) and `bluebookExpiresAt` (DateTime, nullable).
 
 **Customer** is a party who hires FleetCo's vehicles for jobs. A customer is distinct from a lease-taker. A customer engages FleetCo to do work; a lease-taker rents vehicles to do their own work.
 
@@ -34,7 +34,7 @@ This is the project's semantic memory: the place where words have agreed meaning
 
 **trip.status** is the enum tracking the lifecycle stage of a single Trip. Values are `PLANNED` (the trip is recorded but not yet started — common when dispatching ahead of time; `startedAt` and the odometer fields remain null), `IN_PROGRESS` (the trip has started and is currently underway; `startedAt` and `startOdometerKm` are set, `endedAt` and `endOdometerKm` are null), `COMPLETED` (the trip finished normally; all four start/end fields are set and `endOdometerKm >= startOdometerKm`), and `CANCELLED` (the trip was abandoned at any stage; the start fields may or may not be set depending on whether the cancellation happened before the trip started). The iter-9 write path will validate legal transitions (no jumping from `PLANNED` directly to `COMPLETED` without going through `IN_PROGRESS`) in service-layer logic mirroring the **Retirement transition** and **Termination transition** rules.
 
-**Vehicle** is a registered asset in the fleet: a truck, a tipper, an excavator, a loader, a grader, or other heavy-construction equipment. Vehicles have a Nepali commercial registration number (unique across the fleet), a kind (the enum `vehicle.kind`), a make and model, a year of manufacture, a status (the enum `vehicle.status`), odometer readings (see `odometer`), an acquisition date, and an optional retirement date. Bluebook, insurance, and route-permit metadata are added in later slices; iter 1 covers the core record. Vehicle records are classified Tier 3 (operational business data) per ADR-0013. Vehicle is the foundation aggregate for Trips per ADR-0003 — every Trip references one Vehicle by id.
+**Vehicle** is a registered asset in the fleet: a truck, a tipper, an excavator, a loader, a grader, or other heavy-construction equipment. Vehicles have a Nepali commercial registration number (unique across the fleet), a kind (the enum `vehicle.kind`), a make and model, a year of manufacture, a status (the enum `vehicle.status`), odometer readings (see `odometer`), an acquisition date, and an optional retirement date. Bluebook, insurance, and route-permit metadata are persisted on Vehicle as of Phase 1 iter 14 (all nullable columns); Bishesh Anumati remains deferred to a later slice. Vehicle records are classified Tier 3 (operational business data) per ADR-0013. Vehicle is the foundation aggregate for Trips per ADR-0003 — every Trip references one Vehicle by id.
 
 **vehicle.kind** is the enum classifying a vehicle by chassis type. Phase 1 values are `TRUCK`, `TIPPER`, `EXCAVATOR`, `LOADER`, `GRADER`, and `OTHER`. `OTHER` exists so an unusual asset can be registered without forcing a schema change; future slices may promote frequent `OTHER` values to their own enum entries.
 
@@ -50,13 +50,13 @@ This is the project's semantic memory: the place where words have agreed meaning
 
 **IRD** is Nepal's Inland Revenue Department, where tax filings happen. FleetCo's accounting outputs are designed to be compatible with IRD requirements (this is a Phase 4 concern, not a Phase 0 or Phase 1 concern).
 
-**Insurance (तेस्रो पक्ष / comprehensive)** in the Nepali context refers to either third-party insurance (mandatory) or comprehensive insurance (optional). Both have expiries. FleetCo tracks both kinds and triggers reminders before expiry.
+**Insurance (तेस्रो पक्ष / comprehensive)** in the Nepali context refers to either third-party insurance (mandatory) or comprehensive insurance (optional). Both have expiries. FleetCo tracks both kinds and triggers reminders before expiry. As of Phase 1 iter 14, persisted on Vehicle as `insurer`, `insurancePolicyNumber`, `insuranceType` (enum `THIRD_PARTY` | `COMPREHENSIVE`), and `insuranceExpiresAt` — a single-row model (one active policy per vehicle); a vehicle carrying both types simultaneously is rare in Nepali heavy-fleet practice and not in scope. Phase 3 reminders will key off `insuranceExpiresAt`.
 
 **OCR** is the Office of the Company Registrar, where company-level filings happen. Distinct from IRD.
 
 **PAN / VAT** are Permanent Account Number and Value Added Tax registration, both required for businesses in Nepal.
 
-**Route Permit** is permission for a goods or passenger vehicle to operate on specific routes. Route permits are time-bound and trigger compliance reminders when expiry approaches.
+**Route Permit** is permission for a goods or passenger vehicle to operate on specific routes. Route permits are time-bound and trigger compliance reminders when expiry approaches. As of Phase 1 iter 14, persisted on Vehicle as `routePermitNumber` and `routePermitExpiresAt` (both nullable). Phase 3 reminders will key off `routePermitExpiresAt`.
 
 ## Money vocabulary
 

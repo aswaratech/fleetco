@@ -162,6 +162,16 @@ export class VehiclesService {
       odometerStartKm: startKm,
       odometerCurrentKm: input.odometerCurrentKm ?? startKm,
       acquiredAt: input.acquiredAt,
+      // Compliance metadata (iter 14) — pure pass-through; absent fields
+      // store null. No cross-field rules, no transitions.
+      bluebookNumber: input.bluebookNumber ?? null,
+      bluebookExpiresAt: input.bluebookExpiresAt ?? null,
+      insurer: input.insurer ?? null,
+      insurancePolicyNumber: input.insurancePolicyNumber ?? null,
+      insuranceType: input.insuranceType ?? null,
+      insuranceExpiresAt: input.insuranceExpiresAt ?? null,
+      routePermitNumber: input.routePermitNumber ?? null,
+      routePermitExpiresAt: input.routePermitExpiresAt ?? null,
       createdById,
     };
 
@@ -239,6 +249,25 @@ export class VehiclesService {
       ...(clientProvidedRetiredAt
         ? { retiredAt: input.retiredAt ?? null }
         : derivedRetiredAt !== undefined && { retiredAt: derivedRetiredAt }),
+      // Compliance metadata (iter 14) — pure conditional pass-through.
+      // The `!== undefined` guard means an explicit null clears the
+      // column (Prisma accepts null on a nullable field) while an
+      // absent key leaves the stored value untouched. No transition
+      // rules apply to these fields.
+      ...(input.bluebookNumber !== undefined && { bluebookNumber: input.bluebookNumber }),
+      ...(input.bluebookExpiresAt !== undefined && { bluebookExpiresAt: input.bluebookExpiresAt }),
+      ...(input.insurer !== undefined && { insurer: input.insurer }),
+      ...(input.insurancePolicyNumber !== undefined && {
+        insurancePolicyNumber: input.insurancePolicyNumber,
+      }),
+      ...(input.insuranceType !== undefined && { insuranceType: input.insuranceType }),
+      ...(input.insuranceExpiresAt !== undefined && {
+        insuranceExpiresAt: input.insuranceExpiresAt,
+      }),
+      ...(input.routePermitNumber !== undefined && { routePermitNumber: input.routePermitNumber }),
+      ...(input.routePermitExpiresAt !== undefined && {
+        routePermitExpiresAt: input.routePermitExpiresAt,
+      }),
     };
 
     try {

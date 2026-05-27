@@ -42,6 +42,16 @@ function makeCreateInput(overrides: Partial<CreateVehicleInput> = {}): CreateVeh
     odometerStartKm: overrides.odometerStartKm,
     odometerCurrentKm: overrides.odometerCurrentKm,
     acquiredAt: overrides.acquiredAt ?? new Date("2024-01-15"),
+    // Compliance metadata (iter 14) — pass-through from overrides;
+    // undefined when not set (the service maps that to null on create).
+    bluebookNumber: overrides.bluebookNumber,
+    bluebookExpiresAt: overrides.bluebookExpiresAt,
+    insurer: overrides.insurer,
+    insurancePolicyNumber: overrides.insurancePolicyNumber,
+    insuranceType: overrides.insuranceType,
+    insuranceExpiresAt: overrides.insuranceExpiresAt,
+    routePermitNumber: overrides.routePermitNumber,
+    routePermitExpiresAt: overrides.routePermitExpiresAt,
   };
 }
 
@@ -471,6 +481,73 @@ describe("VehiclesService (integration, real Postgres)", () => {
       // directly without 201+ rows of seed data, which is expensive.)
       expect(result.items.length).toBeLessThanOrEqual(5);
       expect(result.total).toBe(5);
+    });
+  });
+
+  describe("compliance metadata (iter 14)", () => {
+    // The eight compliance columns are pure pass-through (no transitions,
+    // no cross-field rules). These tests pin the create-persists,
+    // create-defaults-null, patch-one-field, and patch-null-clears paths.
+
+    const allComplianceFields = {
+      bluebookNumber: "लु ०१-००८-०१२३४५",
+      bluebookExpiresAt: new Date("2027-06-15"),
+      insurer: "Shikhar Insurance",
+      insurancePolicyNumber: "POL-2026-99887",
+      insuranceType: "COMPREHENSIVE" as const,
+      insuranceExpiresAt: new Date("2026-12-31"),
+      routePermitNumber: "RP-BAGMATI-4421",
+      routePermitExpiresAt: new Date("2026-09-30"),
+    };
+
+    test("create() persists all compliance fields when provided", async () => {
+      const created = await service.create(makeCreateInput(allComplianceFields), adminId);
+      expect(created.bluebookNumber).toBe("लु ०१-००८-०१२३४५");
+      expect(created.bluebookExpiresAt?.toISOString()).toBe(new Date("2027-06-15").toISOString());
+      expect(created.insurer).toBe("Shikhar Insurance");
+      expect(created.insurancePolicyNumber).toBe("POL-2026-99887");
+      expect(created.insuranceType).toBe("COMPREHENSIVE");
+      expect(created.insuranceExpiresAt?.toISOString()).toBe(new Date("2026-12-31").toISOString());
+      expect(created.routePermitNumber).toBe("RP-BAGMATI-4421");
+      expect(created.routePermitExpiresAt?.toISOString()).toBe(
+        new Date("2026-09-30").toISOString(),
+      );
+    });
+
+    test("create() defaults all compliance fields to null when omitted", async () => {
+      const created = await service.create(makeCreateInput(), adminId);
+      expect(created.bluebookNumber).toBeNull();
+      expect(created.bluebookExpiresAt).toBeNull();
+      expect(created.insurer).toBeNull();
+      expect(created.insurancePolicyNumber).toBeNull();
+      expect(created.insuranceType).toBeNull();
+      expect(created.insuranceExpiresAt).toBeNull();
+      expect(created.routePermitNumber).toBeNull();
+      expect(created.routePermitExpiresAt).toBeNull();
+    });
+
+    test("update() patches a single compliance field without touching the others", async () => {
+      const created = await service.create(
+        makeCreateInput({ bluebookNumber: "OLD-BB", insurer: "Old Insurer" }),
+        adminId,
+      );
+      const updated = await service.update(created.id, { routePermitNumber: "RP-NEW-001" });
+      expect(updated?.routePermitNumber).toBe("RP-NEW-001");
+      // The two fields set at create time are untouched by a PATCH that
+      // only mentions routePermitNumber.
+      expect(updated?.bluebookNumber).toBe("OLD-BB");
+      expect(updated?.insurer).toBe("Old Insurer");
+    });
+
+    test("update() clears a compliance field when the client passes null", async () => {
+      const created = await service.create(
+        makeCreateInput({ bluebookExpiresAt: new Date("2027-06-15") }),
+        adminId,
+      );
+      expect(created.bluebookExpiresAt).not.toBeNull();
+
+      const updated = await service.update(created.id, { bluebookExpiresAt: null });
+      expect(updated?.bluebookExpiresAt).toBeNull();
     });
   });
 });
