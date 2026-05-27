@@ -27,6 +27,7 @@ import { PrismaClient } from "@prisma/client";
 // user). The actual TRUNCATE uses CASCADE so order has no effect on
 // correctness.
 const TABLES = [
+  "job",
   "trip",
   "driver",
   "vehicle",

@@ -34,6 +34,7 @@ model User {
   driversCreated   Driver[]   @relation("DriverCreatedBy")
   tripsCreated     Trip[]     @relation("TripCreatedBy")
   customersCreated Customer[] @relation("CustomerCreatedBy")
+  jobsCreated      Job[]      @relation("JobCreatedBy")
 
   @@map("user")
 }
@@ -471,7 +472,122 @@ model Customer {
   createdById   String
   createdBy     User           @relation("CustomerCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
 
+  // Iter 17: the Jobs aggregate references Customer by id. Job.customerId
+  // uses onDelete: Restrict per ADR-0003, which is what flips the iter-16
+  // forward-compatible P2003 → 409 branch on CustomersService.delete from
+  // dead code to live code. The "Cannot delete customer: it is referenced
+  // by other records." message the runbook commits to is now reachable
+  // end-to-end via the apps/api/test/customers-delete-blocker.test.ts
+  // integration test.
+  jobs          Job[]
+
   @@index([status])
   @@index([createdById])
   @@map("customer")
+}
+
+// Jobs module. Owned by apps/api/src/modules/jobs/ per ADR-0001.
+// Fourth Phase 1 vertical slice per the roadmap. A Job is a unit of
+// work FleetCo books for a Customer; one Customer can have many Jobs,
+// and (in a later iter) one Job will have many Trips. Job sits between
+// Customer (parent) and Trip (child) in the aggregate graph; this is
+// the iter the Customer↔work relationship becomes navigable in the
+// system, rather than implicit in operator memory.
+//
+// Iter 17 ships the read path only (schema + migration, list/detail
+// API, list/detail UI, the iter-16 Customer-delete-blocker integration
+// test going live). Iter 18 layers the write path on top
+// (POST/PATCH/DELETE + the JOB-YYYY-NNNNN generator at the service
+// layer + create/edit/delete UI). Same staging pattern Vehicles
+// iter-1/iter-2, Drivers iter-6/iter-7, Trips iter-8/iter-9, and
+// Customers iter-15/iter-16 followed.
+//
+// Tier annotations per ADR-0013: job records are Tier 3 (operational
+// business data). `description` and `notes` are free-form operator
+// commentary and are also Tier 3 — operators are expected not to
+// enter PII there, but the fields are not redacted from logs because
+// over-redacting Tier 3 operational data hides the operational signal
+// pino is meant to surface. No new pino redact entries are added by
+// iter 17 (the existing redact paths cover everything PII-shaped).
+//
+// FK delete policy: customerId uses onDelete: Restrict per ADR-0003 —
+// we do not orphan jobs by deleting a customer. This is the contract
+// that flips the iter-16 forward-compatible P2003 → 409 path on
+// CustomersService.delete from dead code to live code; pinned by the
+// new apps/api/test/customers-delete-blocker.test.ts integration test.
+// createdById follows the same Restrict pattern as every other audit
+// FK in the schema.
+
+enum JobStatus {
+  PLANNED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+
+  @@map("job_status")
+}
+
+model Job {
+  id          String    @id @default(cuid())
+  /// Human-readable job number in the form `JOB-YYYY-NNNNN` (e.g.
+  /// `JOB-2026-00001`). Unique across the system so two jobs cannot
+  /// share a number. The generator lives at the service layer in
+  /// iter 18; for iter 17's read-path seed data and tests we
+  /// hand-write a few canonical values. A duplicate jobNumber surfaces
+  /// as Prisma P2002 → ConflictException → HTTP 409 with the
+  /// `field: "jobNumber"` body shape per docs/runbook/api-error-mapping.md
+  /// (mirror of Customers' PAN-conflict shape from iter 16); the
+  /// translation will land in JobsService.create on the iter-18 write
+  /// path.
+  jobNumber   String    @unique
+  /// FK to Customer. Indexed individually so list filters by customerId
+  /// (the "jobs for this customer" UI query) hit an index. onDelete:
+  /// Restrict per ADR-0003 — orphaning a job from its customer would
+  /// silently corrupt per-customer billing later. This FK is the
+  /// reason CustomersService.delete's P2003 → 409 branch becomes live
+  /// in iter 17.
+  customerId  String
+  customer    Customer  @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  /// Tier 3 per ADR-0013 — free-form description of the work to be
+  /// performed (e.g. "Haul aggregate from Kalimati to Pokhara site").
+  /// Operators type the scope-of-work in plain text; structured
+  /// breakdowns are a Phase 2+ concern. ≤2048 chars enforced at the
+  /// schema/zod layer.
+  description String
+  status      JobStatus @default(PLANNED)
+  /// Planned start date (when the customer expects work to begin).
+  /// Nullable because a job can be booked before a firm date is set.
+  /// ISO/UTC per CLAUDE.md; BS-calendar rendering lands with the
+  /// future <NepaliDate> component per DESIGN.md.
+  scheduledStartDate DateTime?
+  /// Planned end date. Same nullability rationale as
+  /// scheduledStartDate; the cross-field rule "end >= start" arrives
+  /// with the iter-18 write path's CreateJobSchema/UpdateJobSchema
+  /// superRefine, not at the database layer.
+  scheduledEndDate   DateTime?
+  /// Actual start date (when work actually began). Nullable until
+  /// status transitions into IN_PROGRESS via the iter-18 write path;
+  /// today (read-only) it is whatever the seed data put there.
+  actualStartDate    DateTime?
+  /// Actual end date (when work actually completed). Nullable until
+  /// status transitions into COMPLETED via the iter-18 write path.
+  actualEndDate      DateTime?
+  /// Free-form operator notes. Tier 3 operational data; not PII. The
+  /// future write-path UI's helper text will direct operators not to
+  /// enter PII here. Nullable; the empty case is null rather than "".
+  /// ≤4096 chars enforced at the schema/zod layer.
+  notes              String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  /// References the User who created the job record (ADR-0021 admin
+  /// user). Audit field; Restrict because the job's audit chain
+  /// should remain intact for the job's lifetime.
+  createdById        String
+  createdBy          User      @relation("JobCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@index([customerId])
+  @@index([status])
+  @@index([createdAt(sort: Desc)])
+  @@index([createdById])
+  @@map("job")
 }

@@ -530,5 +530,46 @@ describe("CustomersService (integration, real Postgres)", () => {
       const missing = await service.delete(created.id);
       expect(missing).toBe(false);
     });
+
+    // Iter 17: the Jobs FK lands, so the P2003 branch is now reachable
+    // end-to-end — this is the live version of the contract the
+    // placeholder above predicted. A Customer with at least one Job
+    // referencing it cannot be deleted: the onDelete: Restrict FK
+    // raises Prisma P2003, which the service maps to ConflictException
+    // (HTTP 409) with the documented message. Regression-pins the
+    // cross-aggregate delete-blocker so a future FK-policy change
+    // (cascade, soft-delete) fails loudly here.
+    test("blocked when a Job references the customer → ConflictException (P2003 → 409)", async () => {
+      const customer = await service.create(
+        { name: "Referenced Co", phone: "+977-9800000000" },
+        adminId,
+      );
+      // Seed a Job referencing the customer via raw Prisma (the Jobs
+      // write-path service lands in iter 18; iter 17 hand-writes the
+      // jobNumber, as the kickoff notes).
+      await prisma.job.create({
+        data: {
+          jobNumber: `JOB-2026-${randomUUID().slice(0, 5)}`,
+          customerId: customer.id,
+          description: "Haul aggregate from quarry to site",
+          createdById: adminId,
+        },
+      });
+
+      let thrown: unknown;
+      try {
+        await service.delete(customer.id);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(ConflictException);
+      expect((thrown as ConflictException).message).toBe(
+        "Cannot delete customer: it is referenced by other records.",
+      );
+
+      // The customer row survives the blocked delete.
+      const refetched = await prisma.customer.findUnique({ where: { id: customer.id } });
+      expect(refetched).not.toBeNull();
+    });
   });
 });
