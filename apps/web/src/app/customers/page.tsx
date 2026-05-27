@@ -39,9 +39,10 @@ import type { Customer } from "./types";
 // headers and pagination controls are <Link>s so navigation flows
 // through Next.js's router rather than onClick handlers.
 //
-// No write path in iter 15. The header lacks the "New customer" CTA
-// that the Vehicles / Drivers pages have — that lands in iter 16
-// alongside the create form.
+// Iter 16 wires the "New customer" CTA and the empty-state "Register
+// the first customer." link up to the write path; the create form
+// lives at /customers/new (../new/page.tsx) and posts via the
+// createCustomerAction server action.
 
 // Sortable columns exposed in the UI. A subset of the API's whitelist
 // (SORTABLE_COLUMNS in apps/api/src/modules/customers/customers.schemas.ts).
@@ -354,10 +355,14 @@ export default async function CustomersPage({
                 : `${data.total} registered.`}
             </p>
           </div>
-          {/* Iter 15 ships the read path only; the "New customer" CTA
-              lands in iter 16 alongside the create form. The empty
-              header right-cluster is intentional — matches Drivers
-              iter 6 prior to the iter-7 write path. */}
+          {/* Primary action right-aligned per DESIGN.md §"Page header".
+              `asChild` lets the Button render as a Next.js <Link>, which
+              gets us client-side navigation without a wrapping <a>.
+              Iter 16 wired the "New customer" CTA up to the write path
+              (mirror of the Drivers iter-7 CTA). */}
+          <Button asChild>
+            <Link href="/customers/new">New customer</Link>
+          </Button>
         </header>
 
         <CustomersFilters status={status} />
@@ -365,15 +370,26 @@ export default async function CustomersPage({
         <section className="border-border-subtle bg-surface-raised rounded border shadow-sm">
           {data.items.length === 0 ? (
             // Two empty-state copy variants per DESIGN.md voice. The
-            // "no customers at all" path stays text-only this iter
-            // (no inline CTA because there is no create surface yet);
-            // iter 16 will swap in a "Register the first customer."
-            // link the same way Drivers iter 7 did.
+            // "no customers at all" path repeats the CTA inline so the
+            // user doesn't have to look up at the header to take the
+            // expected next step. Mirrors the Drivers / Vehicles list
+            // empty states (iter 16 lift, same as the Drivers iter-7
+            // swap-in).
             <div className="text-text-secondary space-y-3 p-8 text-sm">
               {hasActiveFilter ? (
                 <p>No customers match the current filters.</p>
               ) : (
-                <p>No customers registered.</p>
+                <>
+                  <p>No customers registered.</p>
+                  <p>
+                    <Link
+                      href="/customers/new"
+                      className="text-text-primary underline underline-offset-4"
+                    >
+                      Register the first customer.
+                    </Link>
+                  </p>
+                </>
               )}
             </div>
           ) : (
