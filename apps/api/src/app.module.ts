@@ -38,6 +38,7 @@ import { VehiclesModule } from "./modules/vehicles/vehicles.module";
             "*.driverName",
             "*.licenseNumber",
             "*.phoneNumber",
+            "*.contactPerson",
           ],
           censor: "[Redacted]",
         },
