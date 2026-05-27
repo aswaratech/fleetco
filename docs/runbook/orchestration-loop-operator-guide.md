@@ -155,6 +155,7 @@ When you're ready, `pnpm start` again for the next program.
 | Action | Command / Path |
 |--------|----------------|
 | Start the loop | `cd scripts/orchestration && pnpm start` |
+| Watch the loop (TUI) | `cd scripts/orchestration && pnpm tui` — read-only live dashboard; `q` quits, `r` refreshes. Safe to run against a live loop. |
 | Stop cleanly | `/stop` in Slack, OR `touch scripts/orchestration/.stop` |
 | Resume after stop | `/resume` (or `rm scripts/orchestration/.stop`), then `pnpm start` |
 | Inspect state | `cat scripts/orchestration/state.json` |
