@@ -34,6 +34,26 @@ interface TripsListResponse {
   sortDir: string;
 }
 
+// Cross-slice read — iter 13. "Lifetime stats" surfaces three scalar
+// aggregations from `GET /api/v1/drivers/:id/stats`: count + km from
+// COMPLETED trips, plus the vehicle paired with the most-recently-
+// started trip (any non-null `startedAt`). Symmetric mirror of the
+// iter-12 VehicleStatsResponse on the vehicle detail page. Inlining
+// rather than shared-typing follows the same convention as
+// TripsListResponse above — promotion waits until a second surface
+// consumes it.
+interface DriverStatsResponse {
+  driverId: string;
+  completedTripCount: number;
+  totalKmLogged: number;
+  mostRecentVehicle: {
+    id: string;
+    registrationNumber: string;
+    tripId: string;
+    startedAt: string;
+  } | null;
+}
+
 const RECENT_TRIPS_LIMIT = 10;
 
 // Driver detail — iter 6 of the Drivers slice. Server-rendered shell
@@ -55,6 +75,18 @@ const RECENT_TRIPS_LIMIT = 10;
 
 interface DetailPageProps {
   params: Promise<{ id: string }>;
+}
+
+function formatKilometers(km: number): string {
+  // Match the iter-12 vehicle detail page formatter (it in turn
+  // matches the vehicles list page). Promoting to a shared module is
+  // still deferred until a third surface needs it — the iter-12 PR
+  // comment explicitly left that on the table.
+  const formatter = new Intl.NumberFormat("en-IN", {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  });
+  return `${formatter.format(km)} km`;
 }
 
 function formatDate(iso: string | null): string {
@@ -117,15 +149,22 @@ export default async function DriverDetailPage({
     throw error;
   }
 
-  // Cross-slice read: fetch the 10 most recent trips for this driver.
-  // 401 → login (consistent with the primary fetch above). Other
-  // failures propagate to the framework error boundary; see the
-  // mirroring comment in apps/web/src/app/vehicles/[id]/page.tsx.
+  // Cross-slice reads: fetch the 10 most recent trips for this driver
+  // and the lifetime stats. The two fetches are independent and run in
+  // parallel via Promise.all; 401 on either → login (consistent with
+  // the primary fetch above). Any other failure propagates to the
+  // framework error boundary; see the mirroring comment in
+  // apps/web/src/app/vehicles/[id]/page.tsx. Stats was added in iter
+  // 13 to match the iter-12 surface added to the vehicle detail page.
   let trips: TripsListResponse;
+  let stats: DriverStatsResponse;
   try {
-    trips = await apiFetch<TripsListResponse>(
-      `/api/v1/trips?driverId=${encodeURIComponent(driver.id)}&sortBy=createdAt&sortDir=desc&take=${RECENT_TRIPS_LIMIT}`,
-    );
+    [trips, stats] = await Promise.all([
+      apiFetch<TripsListResponse>(
+        `/api/v1/trips?driverId=${encodeURIComponent(driver.id)}&sortBy=createdAt&sortDir=desc&take=${RECENT_TRIPS_LIMIT}`,
+      ),
+      apiFetch<DriverStatsResponse>(`/api/v1/drivers/${encodeURIComponent(driver.id)}/stats`),
+    ]);
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) {
       redirect("/login");
@@ -182,6 +221,42 @@ export default async function DriverDetailPage({
             <DetailRow label="Terminated at" value={formatDate(driver.terminatedAt)} />
             <DetailRow label="Created at" value={formatTimestamp(driver.createdAt)} />
             <DetailRow label="Updated at" value={formatTimestamp(driver.updatedAt)} />
+          </dl>
+        </section>
+
+        {/* Iter 13: lifetime stats card. Three scalars from the new
+            GET /api/v1/drivers/:id/stats endpoint — the symmetric
+            mirror of the iter-12 surface on the vehicle detail page.
+            Most-recent-vehicle is a link to the vehicle detail page
+            when present, using registrationNumber as the label per
+            the glossary (the canonical short identifier in this
+            domain). */}
+        <section className="border-border-subtle bg-surface-raised rounded border p-6 shadow-sm">
+          <h2 className="text-text-muted mb-4 text-xs font-medium uppercase tracking-wide">
+            Lifetime stats
+          </h2>
+          <dl className="grid grid-cols-1 gap-x-8 gap-y-4 sm:grid-cols-3">
+            <DetailRow label="Completed trips" value={String(stats.completedTripCount)} numeric />
+            <DetailRow
+              label="Total km logged"
+              value={formatKilometers(stats.totalKmLogged)}
+              numeric
+            />
+            <DetailRow
+              label="Most recent vehicle"
+              value={
+                stats.mostRecentVehicle ? (
+                  <Link
+                    href={`/vehicles/${stats.mostRecentVehicle.id}`}
+                    className="text-text-primary hover:text-text-secondary font-mono underline-offset-2 hover:underline"
+                  >
+                    {stats.mostRecentVehicle.registrationNumber}
+                  </Link>
+                ) : (
+                  "—"
+                )
+              }
+            />
           </dl>
         </section>
 
@@ -246,7 +321,11 @@ export default async function DriverDetailPage({
 
 interface DetailRowProps {
   label: string;
-  value: string;
+  // Accept ReactNode so callers can pass a <Link> (e.g., the iter-13
+  // "Most recent vehicle" cell). For the common case the value is
+  // still a plain string. Mirror of the widened iter-12 DetailRow on
+  // the vehicle detail page.
+  value: React.ReactNode;
   mono?: boolean;
   numeric?: boolean;
 }
