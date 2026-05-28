@@ -1,13 +1,31 @@
-import { Controller, Get, Param, Query, UseGuards } from "@nestjs/common";
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Patch,
+  Post,
+  Query,
+  Req,
+  UseGuards,
+} from "@nestjs/common";
 
 import { ZodValidationPipe } from "../../common/zod-validation.pipe";
 import { AuthGuard } from "../auth/auth.guard";
+import type { AuthenticatedRequest } from "../auth/auth.types";
 
 import {
+  CreateFuelLogSchema,
   ListFuelLogsQuerySchema,
+  UpdateFuelLogSchema,
+  type CreateFuelLogInput,
   type FuelLogSortColumn,
   type FuelLogSortDir,
   type ListFuelLogsQuery,
+  type UpdateFuelLogInput,
 } from "./fuel-logs.schemas";
 
 // FuelLogsService is injected by NestJS via emitDecoratorMetadata; the
@@ -49,7 +67,7 @@ export interface FuelLogsListResponse {
 // explicit decorator, which is the right direction for an admin-only
 // surface in Phase 1.
 //
-// Iter 19 ships the read path (GET list + GET :id); iter 20 layers
+// Iter 19 shipped the read path (GET list + GET :id); iter 20 layers
 // the write path (POST create / PATCH update / DELETE remove) on top
 // the same way Jobs iter 17 → iter 18 staged.
 @Controller("api/v1/fuel-logs")
@@ -107,5 +125,69 @@ export class FuelLogsController {
   @Get(":id")
   async getById(@Param("id") id: string): Promise<FuelLogDetail> {
     return this.fuelLogs.getById(id);
+  }
+
+  /**
+   * Create a FuelLog. The body is validated by ZodValidationPipe
+   * against CreateFuelLogSchema (fuel-logs.schemas.ts); malformed
+   * payloads return HTTP 400 with a clear per-field message.
+   * `createdById` comes from the authenticated session (AuthGuard
+   * populates request.session per ADR-0021 §6); it is never read
+   * from the body — the schema's `.strict()` rejects it.
+   * `totalCostPaisa` is derived server-side by FuelLogsService.create
+   * (see the docblock there) and is also rejected by `.strict()`.
+   *
+   * The service's trip-vehicle consistency check (BadRequestException
+   * naming both registrations) and FK violations (P2003 →
+   * BadRequestException naming the offending id) propagate as HTTP
+   * 400 unchanged — Nest's default exception filter renders them as
+   * `{ statusCode: 400, message: "<…>" }`, which is the shape the
+   * web action layer parses to surface inline errors on the vehicle
+   * / trip pickers.
+   */
+  @Post()
+  @HttpCode(HttpStatus.CREATED)
+  async create(
+    @Body(new ZodValidationPipe(CreateFuelLogSchema)) body: CreateFuelLogInput,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<FuelLogDetail> {
+    return this.fuelLogs.create(body, request.session.user.id);
+  }
+
+  /**
+   * Partial update. UpdateFuelLogSchema enforces "at least one field"
+   * and rejects unknown keys (so a client cannot smuggle `id`,
+   * `createdById`, `totalCostPaisa`, or `vehicleId` through this
+   * endpoint). 404 on missing record. The trip-vehicle consistency
+   * rule is re-checked at the service layer against the merged
+   * shape; a PATCH that touches `tripId` re-validates against the
+   * stored `vehicleId`. `totalCostPaisa` is recomputed against the
+   * merged `litersMl` × `pricePerLiterPaisa` whenever either factor
+   * is part of the patch — same derivation as create.
+   */
+  @Patch(":id")
+  async update(
+    @Param("id") id: string,
+    @Body(new ZodValidationPipe(UpdateFuelLogSchema)) body: UpdateFuelLogInput,
+  ): Promise<FuelLogDetail> {
+    return this.fuelLogs.update(id, body);
+  }
+
+  /**
+   * Hard delete. Returns HTTP 204 (no body) on success; 404 when the
+   * fuel log does not exist (service throws NotFoundException on
+   * P2025).
+   *
+   * No aggregate FK-references FuelLog under Restrict in Phase 1, so
+   * the delete path has no 409 delete-blocker branch today. A future
+   * Reports v1 slice that materializes per-fill summaries may add an
+   * inbound FK; if it does under Restrict, this surface will gain a
+   * 409 delete-blocker mirroring the Customer delete-blocker (iter
+   * 17) — see the docblock on FuelLogsService.delete.
+   */
+  @Delete(":id")
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async remove(@Param("id") id: string): Promise<void> {
+    await this.fuelLogs.delete(id);
   }
 }

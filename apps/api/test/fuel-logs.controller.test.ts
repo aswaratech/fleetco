@@ -6,8 +6,13 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest"
 import { ZodValidationPipe } from "../src/common/zod-validation.pipe";
 import { AuthGuard } from "../src/modules/auth/auth.guard";
 import { AUTH } from "../src/modules/auth/auth.tokens";
+import type { AuthenticatedRequest } from "../src/modules/auth/auth.types";
 import { FuelLogsController } from "../src/modules/fuel-logs/fuel-logs.controller";
-import { ListFuelLogsQuerySchema } from "../src/modules/fuel-logs/fuel-logs.schemas";
+import {
+  CreateFuelLogSchema,
+  ListFuelLogsQuerySchema,
+  UpdateFuelLogSchema,
+} from "../src/modules/fuel-logs/fuel-logs.schemas";
 import { FuelLogsService } from "../src/modules/fuel-logs/fuel-logs.service";
 import { PrismaService } from "../src/modules/prisma/prisma.service";
 import { resetDb } from "./db";
@@ -448,6 +453,357 @@ describe("FuelLogsController.getById (integration, real Prisma)", () => {
     } catch (error) {
       expect(error).toBeInstanceOf(NotFoundException);
       expect((error as NotFoundException).message).toContain("nonexistent-id");
+    }
+  });
+});
+
+// ----------------------------------------------------------------
+// iter-20: write-path schema (pipe) tests
+// ----------------------------------------------------------------
+// Pure pipe-level tests of CreateFuelLogSchema / UpdateFuelLogSchema.
+// Cheap — no TestingModule. Mirror of the Jobs / Customers / Drivers
+// write-schema pipe blocks.
+
+describe("Fuel-logs write-path schemas (iter-20 contract, pipe layer)", () => {
+  const createPipe = new ZodValidationPipe(CreateFuelLogSchema);
+  const updatePipe = new ZodValidationPipe(UpdateFuelLogSchema);
+
+  const validCreateBody = {
+    vehicleId: "ckabc1234567890",
+    date: "2026-02-15",
+    litersMl: 12_345,
+    pricePerLiterPaisa: 11_055,
+  };
+
+  test("CreateFuelLogSchema: valid minimal body parses (date coerced to Date)", () => {
+    const parsed = createPipe.transform({ ...validCreateBody });
+    expect(parsed.vehicleId).toBe("ckabc1234567890");
+    expect(parsed.litersMl).toBe(12_345);
+    expect(parsed.pricePerLiterPaisa).toBe(11_055);
+    expect(parsed.date).toBeInstanceOf(Date);
+    // The optional fields are absent in the parsed shape so the
+    // service's `??` defaults apply (null at the column level).
+    expect(parsed.tripId).toBeUndefined();
+    expect(parsed.station).toBeUndefined();
+  });
+
+  test("CreateFuelLogSchema: server-controlled totalCostPaisa is rejected (.strict())", () => {
+    // The iter-20 closure for CLAUDE.md §"Money & units": the wire
+    // never carries totalCostPaisa. The .strict() rejects it as
+    // an unknown key.
+    expect(() => createPipe.transform({ ...validCreateBody, totalCostPaisa: 100_000 })).toThrow(
+      BadRequestException,
+    );
+  });
+
+  test("CreateFuelLogSchema: server-controlled createdById is rejected (.strict())", () => {
+    // Same rule the every other write surface enforces. The
+    // controller pulls createdById from request.session per ADR-0021.
+    expect(() => createPipe.transform({ ...validCreateBody, createdById: "user_x" })).toThrow(
+      BadRequestException,
+    );
+  });
+
+  test("CreateFuelLogSchema: missing required vehicleId → 400", () => {
+    expect(() =>
+      createPipe.transform({
+        date: "2026-02-15",
+        litersMl: 12_345,
+        pricePerLiterPaisa: 11_055,
+      }),
+    ).toThrow(BadRequestException);
+  });
+
+  test("CreateFuelLogSchema: litersMl below the floor → 400", () => {
+    // 0 mL is a corrupted record per the schema docblock.
+    expect(() => createPipe.transform({ ...validCreateBody, litersMl: 0 })).toThrow(
+      BadRequestException,
+    );
+  });
+
+  test("CreateFuelLogSchema: pricePerLiterPaisa above the ceiling → 400", () => {
+    // PRICE_PAISA_MAX is 10_000_000 (NPR 100,000 / L). Anything
+    // above is rejected — a typo'd extra digit fails the schema.
+    expect(() =>
+      createPipe.transform({ ...validCreateBody, pricePerLiterPaisa: 99_999_999 }),
+    ).toThrow(BadRequestException);
+  });
+
+  test("CreateFuelLogSchema: invalid vehicleId shape (non-cuid) → 400", () => {
+    expect(() => createPipe.transform({ ...validCreateBody, vehicleId: "not-a-cuid" })).toThrow(
+      BadRequestException,
+    );
+  });
+
+  test("UpdateFuelLogSchema: empty body → 400 (at-least-one-field refine)", () => {
+    expect(() => updatePipe.transform({})).toThrow(BadRequestException);
+  });
+
+  test("UpdateFuelLogSchema: vehicleId is rejected (immutable on PATCH)", () => {
+    // The PATCH schema deliberately omits vehicleId from its shape;
+    // .strict() turns that into a 400 rather than silently dropping
+    // the field. Iter-20 kickoff §"Immutability of vehicleId on
+    // PATCH" pins this contract.
+    expect(() => updatePipe.transform({ vehicleId: "ckabc1234567890" })).toThrow(
+      BadRequestException,
+    );
+  });
+
+  test("UpdateFuelLogSchema: totalCostPaisa is rejected (server-derived)", () => {
+    expect(() => updatePipe.transform({ totalCostPaisa: 100_000 })).toThrow(BadRequestException);
+  });
+
+  test("UpdateFuelLogSchema: single-field tripId patch parses (mutable on PATCH)", () => {
+    const parsed = updatePipe.transform({ tripId: "ckabcdef12345678" });
+    expect(parsed.tripId).toBe("ckabcdef12345678");
+  });
+
+  test("UpdateFuelLogSchema: tripId = null parses (unpair semantics)", () => {
+    const parsed = updatePipe.transform({ tripId: null });
+    expect(parsed.tripId).toBeNull();
+  });
+
+  test("UpdateFuelLogSchema: bogus key is rejected (.strict())", () => {
+    expect(() => updatePipe.transform({ totalCost: 100_000 })).toThrow(BadRequestException);
+  });
+});
+
+// ----------------------------------------------------------------
+// iter-20: controller create / update / remove (integration)
+// ----------------------------------------------------------------
+// Full controller-level integration for the write path: real
+// FuelLogsController + FuelLogsService + PrismaService, AuthGuard
+// overridden, AUTH stubbed. The controller's create() reads
+// createdById from request.session.user.id; we hand it a minimal
+// fake request cast — same approach the Jobs / Customers controller
+// tests take.
+
+describe("FuelLogsController.create / update / remove (integration, real Prisma)", () => {
+  let module: TestingModule;
+  let app: INestApplication;
+  let prisma: PrismaService;
+  let controller: FuelLogsController;
+  let adminId: string;
+  let vehicleAId: string;
+  let vehicleBId: string;
+  let tripId: string;
+  let fakeRequest: AuthenticatedRequest;
+
+  beforeAll(async () => {
+    module = await Test.createTestingModule({
+      controllers: [FuelLogsController],
+      providers: [
+        FuelLogsService,
+        PrismaService,
+        { provide: AUTH, useValue: { api: { getSession: () => null } } },
+      ],
+    })
+      .overrideGuard(AuthGuard)
+      .useValue({ canActivate: () => true })
+      .compile();
+
+    app = module.createNestApplication();
+    await app.init();
+
+    prisma = module.get(PrismaService);
+    controller = module.get(FuelLogsController);
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  beforeEach(async () => {
+    await resetDb(prisma);
+
+    adminId = `user_${randomUUID()}`;
+    await prisma.user.create({
+      data: { id: adminId, email: `admin-${adminId}@fleetco.test`, name: "Test Admin" },
+    });
+    const vehicleA = await prisma.vehicle.create({
+      data: {
+        registrationNumber: `BA 1 KA ${String(Math.floor(Math.random() * 10000)).padStart(4, "0")}`,
+        kind: "TIPPER",
+        make: "Tata",
+        model: "LPK 2518",
+        year: 2022,
+        acquiredAt: new Date("2022-01-01T00:00:00Z"),
+        createdById: adminId,
+      },
+    });
+    vehicleAId = vehicleA.id;
+    const vehicleB = await prisma.vehicle.create({
+      data: {
+        registrationNumber: `BA 2 KA ${String(Math.floor(Math.random() * 10000)).padStart(4, "0")}`,
+        kind: "TRUCK",
+        make: "Ashok Leyland",
+        model: "1616",
+        year: 2023,
+        acquiredAt: new Date("2023-01-01T00:00:00Z"),
+        createdById: adminId,
+      },
+    });
+    vehicleBId = vehicleB.id;
+    const driver = await prisma.driver.create({
+      data: {
+        fullName: "Ram Bahadur",
+        licenseNumber: `12-345-${String(Math.floor(Math.random() * 100000)).padStart(5, "0")}`,
+        licenseClass: "HTV",
+        phone: "+977-9800000000",
+        hiredAt: new Date("2022-01-15T00:00:00Z"),
+        licenseExpiresAt: new Date("2030-01-01T00:00:00Z"),
+        createdById: adminId,
+      },
+    });
+    const trip = await prisma.trip.create({
+      data: {
+        vehicleId: vehicleAId,
+        driverId: driver.id,
+        status: "COMPLETED",
+        startedAt: new Date("2026-02-10T06:00:00Z"),
+        endedAt: new Date("2026-02-10T14:00:00Z"),
+        startOdometerKm: 10000,
+        endOdometerKm: 10250,
+        createdById: adminId,
+      },
+    });
+    tripId = trip.id;
+
+    fakeRequest = { session: { user: { id: adminId } } } as unknown as AuthenticatedRequest;
+  });
+
+  test("create() persists with derived totalCostPaisa and createdById from session", async () => {
+    const created = await controller.create(
+      {
+        vehicleId: vehicleAId,
+        date: new Date("2026-02-15T08:00:00Z"),
+        litersMl: 12_345,
+        pricePerLiterPaisa: 11_055,
+        station: "NOC Naxal",
+      },
+      fakeRequest,
+    );
+    // round((12345 * 11055) / 1000) = round(136473.975) = 136474
+    expect(created.totalCostPaisa).toBe(136_474);
+    expect(created.createdById).toBe(adminId);
+    expect(created.vehicle.id).toBe(vehicleAId);
+  });
+
+  test("create() with tripId paired to its vehicle returns the nested trip", async () => {
+    const created = await controller.create(
+      {
+        vehicleId: vehicleAId,
+        tripId,
+        date: new Date("2026-02-15T08:00:00Z"),
+        litersMl: 10_000,
+        pricePerLiterPaisa: 10_000,
+      },
+      fakeRequest,
+    );
+    expect(created.trip?.id).toBe(tripId);
+    expect(created.totalCostPaisa).toBe(100_000);
+  });
+
+  test("create() with a trip-vehicle mismatch → BadRequestException (HTTP 400)", async () => {
+    try {
+      await controller.create(
+        {
+          vehicleId: vehicleBId,
+          tripId,
+          date: new Date("2026-02-15T08:00:00Z"),
+          litersMl: 10_000,
+          pricePerLiterPaisa: 10_000,
+        },
+        fakeRequest,
+      );
+      throw new Error("expected BadRequestException");
+    } catch (error) {
+      expect(error).toBeInstanceOf(BadRequestException);
+      expect((error as BadRequestException).message).toContain(tripId);
+    }
+  });
+
+  test("create() with a non-existent vehicleId → BadRequestException (P2003 → 400)", async () => {
+    try {
+      await controller.create(
+        {
+          vehicleId: "ckmissingvehicleid123456",
+          date: new Date("2026-02-15T08:00:00Z"),
+          litersMl: 10_000,
+          pricePerLiterPaisa: 10_000,
+        },
+        fakeRequest,
+      );
+      throw new Error("expected BadRequestException");
+    } catch (error) {
+      expect(error).toBeInstanceOf(BadRequestException);
+      expect((error as BadRequestException).message).toContain("ckmissingvehicleid123456");
+      expect((error as BadRequestException).message).toContain("does not exist");
+    }
+  });
+
+  test("update() applies a diff-PATCH (station only) and leaves totalCostPaisa untouched", async () => {
+    const created = await controller.create(
+      {
+        vehicleId: vehicleAId,
+        date: new Date("2026-02-15T08:00:00Z"),
+        litersMl: 12_345,
+        pricePerLiterPaisa: 11_055,
+        station: "NOC Naxal",
+      },
+      fakeRequest,
+    );
+    const updated = await controller.update(created.id, { station: "NOC Thapathali" });
+    expect(updated.station).toBe("NOC Thapathali");
+    expect(updated.litersMl).toBe(created.litersMl);
+    expect(updated.totalCostPaisa).toBe(created.totalCostPaisa);
+  });
+
+  test("update() recomputes totalCostPaisa when only pricePerLiterPaisa is patched", async () => {
+    const created = await controller.create(
+      {
+        vehicleId: vehicleAId,
+        date: new Date("2026-02-15T08:00:00Z"),
+        litersMl: 12_345,
+        pricePerLiterPaisa: 11_055,
+      },
+      fakeRequest,
+    );
+    const updated = await controller.update(created.id, { pricePerLiterPaisa: 15_025 });
+    // round((12345 * 15025) / 1000) = round(185_483.625) = 185_484
+    expect(updated.totalCostPaisa).toBe(185_484);
+  });
+
+  test("update() unknown id → NotFoundException (HTTP 404)", async () => {
+    try {
+      await controller.update("ckmissingfuellog12345678", { station: "anything" });
+      throw new Error("expected NotFoundException");
+    } catch (error) {
+      expect(error).toBeInstanceOf(NotFoundException);
+      expect((error as NotFoundException).message).toContain("ckmissingfuellog12345678");
+    }
+  });
+
+  test("remove() hard-deletes and resolves without a body; 404 on unknown id", async () => {
+    const created = await controller.create(
+      {
+        vehicleId: vehicleAId,
+        date: new Date("2026-02-15T08:00:00Z"),
+        litersMl: 10_000,
+        pricePerLiterPaisa: 10_000,
+      },
+      fakeRequest,
+    );
+    const result = await controller.remove(created.id);
+    expect(result).toBeUndefined();
+    const refetched = await prisma.fuelLog.findUnique({ where: { id: created.id } });
+    expect(refetched).toBeNull();
+
+    try {
+      await controller.remove("ckmissingfuellog12345678");
+      throw new Error("expected NotFoundException");
+    } catch (error) {
+      expect(error).toBeInstanceOf(NotFoundException);
     }
   });
 });
