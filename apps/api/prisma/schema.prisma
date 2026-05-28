@@ -35,6 +35,7 @@ model User {
   tripsCreated     Trip[]     @relation("TripCreatedBy")
   customersCreated Customer[] @relation("CustomerCreatedBy")
   jobsCreated      Job[]      @relation("JobCreatedBy")
+  fuelLogsCreated  FuelLog[]  @relation("FuelLogCreatedBy")
 
   @@map("user")
 }
@@ -195,7 +196,8 @@ model Vehicle {
   createdById String
   createdBy   User     @relation("VehicleCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
 
-  trips Trip[] @relation("TripVehicle")
+  trips    Trip[]    @relation("TripVehicle")
+  fuelLogs FuelLog[]
 
   @@index([status])
   @@index([kind])
@@ -383,6 +385,8 @@ model Trip {
   /// should remain intact for the trip's lifetime.
   createdById     String
   createdBy       User       @relation("TripCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  fuelLogs FuelLog[]
 
   @@index([status])
   @@index([vehicleId])
@@ -590,4 +594,115 @@ model Job {
   @@index([createdAt(sort: Desc)])
   @@index([createdById])
   @@map("job")
+}
+
+// Fuel logs module. Owned by apps/api/src/modules/fuel-logs/ per
+// ADR-0001. Sixth Phase 1 vertical slice per the roadmap. A FuelLog is
+// a record of fuel dispensed for a vehicle on a specific date —
+// either at a depot top-up between jobs (no tripId) or as part of a
+// specific trip (tripId set). The aggregate sits downstream of
+// Vehicles and Trips and is the first money-bearing row in the
+// system, so it is also the first to exercise CLAUDE.md's
+// money-as-integer-minor-units rule end-to-end (paisa columns + the
+// derived totalCostPaisa).
+//
+// Iter 19 ships the read path only (schema + migration, list/detail
+// API, list/detail UI). Iter 20 layers the write path on top
+// (POST/PATCH/DELETE + the write-time totalCostPaisa derivation +
+// create/edit/delete UI). Same staging pattern Vehicles iter-1/iter-2,
+// Drivers iter-6/iter-7, Trips iter-8/iter-9, Customers iter-15/iter-16,
+// and Jobs iter-17/iter-18 followed.
+//
+// Tier annotations per ADR-0013: fuel-log records are Tier 1
+// (operational data). `station` (vendor / fuel-station name) and
+// `notes` (free-form operator commentary) are also Tier 1 — they are
+// expected to carry operational data (vendor identity, paper-receipt
+// references, fill remarks like "rain delayed dispatch") rather than
+// PII. If the operator starts using `notes` for contact information,
+// the redact list under ADR-0013 may need a follow-up entry; the
+// glossary entry for "Fuel log" surfaces that contingency. No new pino
+// redact entries are added by iter 19.
+//
+// FK delete policy:
+//   - vehicleId — onDelete: Restrict per ADR-0003: deleting a vehicle
+//     that has any fuel log is blocked at the DB (Postgres 23503 /
+//     Prisma P2003), mapped to HTTP 409 in the iter-20 write path the
+//     same way Customers' P2003 → 409 path was wired forward in iter 16.
+//   - tripId — nullable, onDelete: Restrict: a fuel log MAY exist
+//     without a trip (a depot top-up between jobs is the canonical
+//     case) but if it points at one, that linkage cannot be silently
+//     orphaned. Restricting a trip delete keeps per-trip fuel costs
+//     intact for future profit-and-loss reporting.
+//   - createdById — onDelete: Restrict, same audit-chain rationale as
+//     every other createdBy FK in the schema.
+
+model FuelLog {
+  id                 String   @id @default(cuid())
+  /// FK to Vehicle. Indexed individually so list filters by vehicleId
+  /// (the "fuel for this vehicle" UI query, exposed in the iter-19
+  /// list toolbar) hit an index. onDelete: Restrict per ADR-0003 —
+  /// orphaning a fuel log from its vehicle would silently corrupt
+  /// per-vehicle fuel-efficiency reporting later.
+  vehicleId          String
+  vehicle            Vehicle  @relation(fields: [vehicleId], references: [id], onDelete: Restrict)
+  /// Nullable FK to Trip. A fuel log may or may not be tied to a
+  /// specific trip — a top-up at the depot between jobs is the
+  /// canonical "no trip" case. When set, onDelete: Restrict protects
+  /// the linkage exactly as it protects vehicleId, so a trip delete
+  /// cannot silently break per-trip cost reporting.
+  tripId             String?
+  trip               Trip?    @relation(fields: [tripId], references: [id], onDelete: Restrict)
+  /// When the fuel was dispensed (UTC). Indexed `(date desc)` for the
+  /// default list sort ("most recent fills first"). ISO/UTC per
+  /// CLAUDE.md; BS-calendar rendering arrives with the future
+  /// <NepaliDate> component.
+  date               DateTime
+  /// Liters stored as INTEGER MILLILITERS to mirror the project-wide
+  /// money-as-integer-minor-units rule from CLAUDE.md. Never use Float
+  /// or Decimal for fuel quantity — the same precision-loss argument
+  /// CLAUDE.md makes for money applies to fuel quantity. Display
+  /// divides by 1000 (e.g., 12345 → "12.345 L"). The unit-convention
+  /// rationale is documented in the glossary entry for "Fuel log".
+  litersMl           Int
+  /// Price per liter in paisa (1 NPR = 100 paisa). Always integer
+  /// minor units per CLAUDE.md. The display formatter renders e.g.
+  /// 11050 paisa as "Rs. 110.50".
+  pricePerLiterPaisa Int
+  /// Total cost in paisa. DERIVED at write time as:
+  ///     (litersMl * pricePerLiterPaisa) / 1000
+  /// and stored so read endpoints do not recompute on every fetch.
+  /// The iter-20 write path is responsible for the derivation; the
+  /// iter-19 read path treats this column as authoritative for the
+  /// amount the operator entered. The PATCH schema in iter 20 will
+  /// reject this field via `.strict()` so it cannot drift from its
+  /// derived value.
+  totalCostPaisa     Int
+  /// Optional odometer reading at fill time (kilometers — same unit
+  /// as Vehicle.odometerCurrentKm). Nullable because not every fill
+  /// captures a reading; when present, it's an additional anchor for
+  /// the per-vehicle km/L reports a future iter ships.
+  odometerReadingKm  Int?
+  /// Vendor / fuel-station name (e.g., "NOC Naxal"). Nullable. Tier 1
+  /// operational data — not PII per the glossary's caveat.
+  station            String?
+  /// Optional paper-receipt identifier. Nullable; not every fill has
+  /// a receipt scan and the operator may key only the totals.
+  receiptNumber      String?
+  /// Free-text notes. Tier 1 operational data today (see the model
+  /// comment above for the contingency note). Nullable; the empty
+  /// case is null rather than "".
+  notes              String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  /// References the User who created the fuel-log record (ADR-0021
+  /// admin user). Audit field; Restrict because the fuel-log's audit
+  /// chain should remain intact for the row's lifetime.
+  createdById        String
+  createdBy          User     @relation("FuelLogCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@index([vehicleId])
+  @@index([tripId])
+  @@index([date(sort: Desc)])
+  @@index([createdById])
+  @@map("fuel_log")
 }
