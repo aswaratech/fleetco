@@ -18,16 +18,19 @@ import { Button } from "@/components/ui/button";
 
 import { deleteCustomerAction } from "../actions";
 
-// The iter-16 API surfaces a delete-block conflict as
+// The API surfaces a delete-block conflict as
 //   "Cannot delete customer: it is referenced by other records."
-// Customer has no inbound FKs in iter 16, so this message is dead
-// code today — the iter-17 Jobs slice will be the first reference
-// that exercises it (Jobs.customerId FK with onDelete: Restrict per
-// ADR-0003). When that lands, the API message will likely be
-// extended with a job count and this helper will pick it up the same
-// way the Drivers / Vehicles versions parse trip counts. For now we
-// surface the message verbatim with a placeholder "View jobs" link
-// disabled (the /jobs surface does not exist yet).
+// Iter 17 added Jobs.customerId (FK with onDelete: Restrict per
+// ADR-0003), so this message now fires when an operator tries to
+// delete a customer that has at least one job on file. Iter 18 wires
+// the affordance to a live /jobs?customerId=<id> deep-link so the
+// operator can pivot to the blocking jobs and decide what to do
+// (cancel them, reassign — once a future iter introduces a
+// reassignment surface — or delete them outright). A future iter
+// will likely extend the API message with the job count, the same
+// way the Drivers / Vehicles equivalents parse trip counts; the
+// generic-phrase match below survives the extension because the
+// "referenced by other records" tail does not change.
 //
 // Mirror of apps/web/src/app/drivers/[id]/delete-driver-dialog.tsx
 // and apps/web/src/app/vehicles/[id]/delete-vehicle-dialog.tsx.
@@ -70,12 +73,14 @@ export function DeleteCustomerDialog({ id, name }: DeleteCustomerDialogProps): R
     });
   }
 
-  // Detect the iter-16 delete-block phrasing so the dialog renders a
-  // "View related records" affordance alongside the message. The
-  // current phrasing is generic ("it is referenced by other records")
-  // because the API ships forward-compatible 409 mapping ahead of the
-  // first inbound FK (Jobs, iter 17). When that lands the link will
-  // become a /jobs deep-link with a customer filter.
+  // Detect the delete-block phrasing so the dialog renders a "View
+  // jobs for this customer" affordance alongside the message. The
+  // phrasing is "Cannot delete customer: it is referenced by other
+  // records." today; the tail substring survives any future per-FK
+  // extension of the message (e.g. "referenced by N jobs and other
+  // records"). Iter 17 added Jobs.customerId (the first inbound FK);
+  // iter 18 wires this link to /jobs?customerId=<id> so the operator
+  // can pivot to the blocking jobs.
   const isReferencedConflict =
     error !== null && error.toLowerCase().includes("referenced by other records");
 
@@ -92,22 +97,21 @@ export function DeleteCustomerDialog({ id, name }: DeleteCustomerDialogProps): R
         {error ? (
           <div role="alert" className="text-status-error space-y-1 text-sm">
             <p>{error}</p>
-            {/* Jobs slice (iter 17) will replace this placeholder with
-                a real /jobs?customerId=... deep-link the same way the
-                Drivers / Vehicles dialogs link to /trips. For now we
-                surface a /customers anchor — the message itself names
-                what's blocking, and a future iteration will tighten
-                the affordance once the relationship surface exists.
-                Keeping the markup here (rather than under a feature
-                flag) means iter 17 only needs to update one href and
-                the label string. */}
+            {/* Iter 18 wires the affordance to a live /jobs deep-link
+                with the customerId filter — the same pattern the
+                Drivers / Vehicles dialogs use for /trips. The /jobs
+                page consumes `customerId` from the URL and renders
+                only that customer's jobs. A future iter may extend
+                the API message to include a job count; the tail-
+                substring match above keeps the link working through
+                any such change. */}
             {isReferencedConflict ? (
               <p>
                 <Link
-                  href={`/customers/${encodeURIComponent(id)}`}
+                  href={`/jobs?customerId=${encodeURIComponent(id)}`}
                   className="underline underline-offset-4"
                 >
-                  View related records
+                  View jobs for this customer
                 </Link>
               </p>
             ) : null}
