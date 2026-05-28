@@ -337,8 +337,13 @@ export default async function FuelLogsPage({
                 : `${data.total} on file.`}
             </p>
           </div>
-          {/* "Log fill" CTA wired in iter 20 (write path) — mirror of
-              the Jobs iter-17 → iter-18 header change. */}
+          {/* "Log fill" CTA (iter 20). Mirror of the Jobs / Customers
+              / Drivers / Vehicles header CTA cluster. The new-fuel-log
+              shell at /fuel-logs/new gates auth and pre-fetches the
+              vehicle + trip pickers. */}
+          <Button asChild>
+            <Link href="/fuel-logs/new">Log fill</Link>
+          </Button>
         </header>
 
         <FuelLogsFilters startDate={startDate} endDate={endDate} />
@@ -349,8 +354,15 @@ export default async function FuelLogsPage({
               {hasActiveFilter ? (
                 <p>No fuel logs match the current filters.</p>
               ) : (
-                // iter 20 wires "Log the first fill." to /fuel-logs/new.
-                <p>No fuel logs on file. Log the first fill.</p>
+                <p>
+                  No fuel logs on file.{" "}
+                  <Link
+                    href="/fuel-logs/new"
+                    className="text-text-primary hover:text-text-secondary underline underline-offset-4"
+                  >
+                    Log the first fill.
+                  </Link>
+                </p>
               )}
             </div>
           ) : (

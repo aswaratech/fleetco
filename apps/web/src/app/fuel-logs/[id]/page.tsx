@@ -1,12 +1,14 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
+import { Button } from "@/components/ui/button";
 import { apiFetch, ApiError } from "@/lib/api";
 import { formatNpr } from "@/lib/money";
 import { getServerSession } from "@/lib/session";
 import { formatKm, formatLiters } from "@/lib/units";
 
 import type { FuelLogDetail } from "../types";
+import { DeleteFuelLogDialog } from "./delete-fuel-log-dialog";
 
 // Fuel log detail — iter 19 of the Fuel-logs slice (read path). Server-
 // rendered shell (auth gate via getServerSession; redirect to /login
@@ -93,9 +95,16 @@ export default async function FuelLogDetailPage({
               {formatLiters(fuelLog.litersMl)} · {formatNpr(fuelLog.totalCostPaisa)}
             </p>
           </div>
-          {/* Edit + Delete CTAs land with the iter-20 write path —
-              mirror of the Jobs / Customers / Drivers / Vehicles
-              header cluster. */}
+          {/* Edit + Delete CTAs (iter 20). Mirror of the Jobs /
+              Customers / Drivers / Vehicles header cluster. The
+              Delete button opens a confirmation dialog (client
+              island); Edit links to /fuel-logs/<id>/edit. */}
+          <div className="flex items-center gap-2">
+            <Button asChild variant="outline">
+              <Link href={`/fuel-logs/${fuelLog.id}/edit`}>Edit</Link>
+            </Button>
+            <DeleteFuelLogDialog id={fuelLog.id} dateLabel={formatDate(fuelLog.date)} />
+          </div>
         </header>
 
         <section className="border-border-subtle bg-surface-raised rounded border p-6 shadow-sm">
