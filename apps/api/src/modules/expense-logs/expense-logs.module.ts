@@ -1,6 +1,7 @@
 import { Module } from "@nestjs/common";
 
 import { AuthModule } from "../auth/auth.module";
+import { ExpenseLogsController } from "./expense-logs.controller";
 import { ExpenseLogsService } from "./expense-logs.service";
 
 // ExpenseLogsModule — seventh Phase 1 vertical slice per the roadmap.
@@ -24,6 +25,7 @@ import { ExpenseLogsService } from "./expense-logs.service";
 // endpoints + create/edit/delete UI).
 @Module({
   imports: [AuthModule],
+  controllers: [ExpenseLogsController],
   providers: [ExpenseLogsService],
   exports: [ExpenseLogsService],
 })
