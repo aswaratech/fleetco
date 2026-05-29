@@ -6,8 +6,13 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest"
 import { ZodValidationPipe } from "../src/common/zod-validation.pipe";
 import { AuthGuard } from "../src/modules/auth/auth.guard";
 import { AUTH } from "../src/modules/auth/auth.tokens";
+import type { AuthenticatedRequest } from "../src/modules/auth/auth.types";
 import { ExpenseLogsController } from "../src/modules/expense-logs/expense-logs.controller";
-import { ListExpenseLogsQuerySchema } from "../src/modules/expense-logs/expense-logs.schemas";
+import {
+  CreateExpenseLogSchema,
+  ListExpenseLogsQuerySchema,
+  UpdateExpenseLogSchema,
+} from "../src/modules/expense-logs/expense-logs.schemas";
 import { ExpenseLogsService } from "../src/modules/expense-logs/expense-logs.service";
 import { PrismaService } from "../src/modules/prisma/prisma.service";
 import { resetDb } from "./db";
@@ -366,5 +371,463 @@ describe("ExpenseLogsController.list + getById (integration, real Prisma)", () =
     // the runbook's api-error-mapping table commits to (P2025 / null
     // → 404) survives a service-layer refactor.
     await expect(controller.getById("ckmissing0000000")).rejects.toThrow(NotFoundException);
+  });
+});
+
+// ----------------------------------------------------------------
+// iter-22: write-path schema (pipe) tests
+// ----------------------------------------------------------------
+// Pure pipe-level tests of CreateExpenseLogSchema / UpdateExpenseLogSchema.
+// Cheap — no TestingModule. Mirror of the iter-20 Fuel logs write-schema
+// pipe block, with the three expense-log-specific rules pinned:
+//   1. amountPaisa is authoritative (no derivation, no rejection of a
+//      client-sent value beyond bounds).
+//   2. vehicleId is OPTIONAL+NULLABLE on Create (vehicle-agnostic expenses
+//      such as a quarterly insurance premium are first-class).
+//   3. vehicleId is IMMUTABLE on Update — the PATCH schema omits the
+//      field; .strict() turns a client-sent vehicleId into HTTP 400.
+
+describe("Expense-logs write-path schemas (iter-22 contract, pipe layer)", () => {
+  const createPipe = new ZodValidationPipe(CreateExpenseLogSchema);
+  const updatePipe = new ZodValidationPipe(UpdateExpenseLogSchema);
+
+  const validCreateBody = {
+    vehicleId: "ckabc1234567890",
+    date: "2026-02-15",
+    category: "MAINTENANCE",
+    amountPaisa: 250_000,
+  };
+
+  test("CreateExpenseLogSchema: valid minimal body parses (date coerced to Date)", () => {
+    const parsed = createPipe.transform({ ...validCreateBody });
+    expect(parsed.vehicleId).toBe("ckabc1234567890");
+    expect(parsed.category).toBe("MAINTENANCE");
+    expect(parsed.amountPaisa).toBe(250_000);
+    expect(parsed.date).toBeInstanceOf(Date);
+    // Optional fields absent → service applies null at the column.
+    expect(parsed.tripId).toBeUndefined();
+    expect(parsed.vendor).toBeUndefined();
+    expect(parsed.receiptNumber).toBeUndefined();
+    expect(parsed.notes).toBeUndefined();
+  });
+
+  test("CreateExpenseLogSchema: vehicle-agnostic expense (vehicleId omitted) parses", () => {
+    // Iter-22 rule #2: vehicleId is optional on Create. A quarterly
+    // insurance premium for the whole company is a real first-class
+    // expense without a vehicle. Pinned here so a refactor that
+    // tightened the schema (made vehicleId required) surfaces in the
+    // pipe-level test as well as the service-level test.
+    const parsed = createPipe.transform({
+      date: "2026-02-15",
+      category: "INSURANCE",
+      amountPaisa: 5_000_000,
+    });
+    expect(parsed.vehicleId).toBeUndefined();
+  });
+
+  test("CreateExpenseLogSchema: vehicle-agnostic expense (vehicleId=null) parses", () => {
+    // The same intent expressed as an explicit null. The web form sends
+    // null when the operator clears the picker, vs. simply omitting
+    // the field on a new form. Both must parse.
+    const parsed = createPipe.transform({
+      vehicleId: null,
+      date: "2026-02-15",
+      category: "INSURANCE",
+      amountPaisa: 5_000_000,
+    });
+    expect(parsed.vehicleId).toBeNull();
+  });
+
+  test("CreateExpenseLogSchema: server-controlled createdById is rejected (.strict())", () => {
+    // Same rule every other write surface enforces. The controller
+    // pulls createdById from request.session per ADR-0021.
+    expect(() => createPipe.transform({ ...validCreateBody, createdById: "user_x" })).toThrow(
+      BadRequestException,
+    );
+  });
+
+  test("CreateExpenseLogSchema: missing required date → 400", () => {
+    expect(() =>
+      createPipe.transform({
+        vehicleId: "ckabc1234567890",
+        category: "MAINTENANCE",
+        amountPaisa: 250_000,
+      }),
+    ).toThrow(BadRequestException);
+  });
+
+  test("CreateExpenseLogSchema: missing required category → 400", () => {
+    expect(() =>
+      createPipe.transform({
+        vehicleId: "ckabc1234567890",
+        date: "2026-02-15",
+        amountPaisa: 250_000,
+      }),
+    ).toThrow(BadRequestException);
+  });
+
+  test("CreateExpenseLogSchema: missing required amountPaisa → 400", () => {
+    expect(() =>
+      createPipe.transform({
+        vehicleId: "ckabc1234567890",
+        date: "2026-02-15",
+        category: "MAINTENANCE",
+      }),
+    ).toThrow(BadRequestException);
+  });
+
+  test("CreateExpenseLogSchema: amountPaisa below the floor (0) → 400", () => {
+    // AMOUNT_PAISA_MIN is 1: a zero-amount expense is a corrupted
+    // record — the operator either meant to skip the entry or made
+    // a typo. The floor catches both.
+    expect(() => createPipe.transform({ ...validCreateBody, amountPaisa: 0 })).toThrow(
+      BadRequestException,
+    );
+  });
+
+  test("CreateExpenseLogSchema: amountPaisa above the ceiling → 400", () => {
+    // AMOUNT_PAISA_MAX is 10_000_000_000 (NPR 100,000,000.00). The
+    // ceiling defends against an extra-zero typo on a high-value
+    // entry (e.g. an INSURANCE premium).
+    expect(() => createPipe.transform({ ...validCreateBody, amountPaisa: 99_999_999_999 })).toThrow(
+      BadRequestException,
+    );
+  });
+
+  test("CreateExpenseLogSchema: invalid category (e.g. BANANA) → 400", () => {
+    // The category enum is closed over the eight Prisma values. A
+    // typo at the URL or form layer surfaces as a 400, not a silent
+    // dropped field.
+    expect(() => createPipe.transform({ ...validCreateBody, category: "BANANA" })).toThrow(
+      BadRequestException,
+    );
+  });
+
+  test("CreateExpenseLogSchema: invalid vehicleId shape (non-cuid) → 400", () => {
+    expect(() => createPipe.transform({ ...validCreateBody, vehicleId: "not-a-cuid" })).toThrow(
+      BadRequestException,
+    );
+  });
+
+  test("UpdateExpenseLogSchema: empty body → 400 (at-least-one-field refine)", () => {
+    expect(() => updatePipe.transform({})).toThrow(BadRequestException);
+  });
+
+  test("UpdateExpenseLogSchema: vehicleId is rejected (immutable on PATCH)", () => {
+    // Iter-22 rule #3: the PATCH schema deliberately omits vehicleId
+    // from its shape; .strict() turns that into a 400 rather than
+    // silently dropping the field. This is the core immutability
+    // contract — pinning vehicle-binding-after-create is a strict
+    // boundary so a misconfigured form action surfaces as an
+    // inline error.
+    expect(() => updatePipe.transform({ vehicleId: "ckabc1234567890" })).toThrow(
+      BadRequestException,
+    );
+  });
+
+  test("UpdateExpenseLogSchema: createdById is rejected (.strict())", () => {
+    // Server-controlled, identical defense to Create. A client trying
+    // to re-attribute an existing expense to a different user is a
+    // bug, not a feature.
+    expect(() => updatePipe.transform({ createdById: "user_x" })).toThrow(BadRequestException);
+  });
+
+  test("UpdateExpenseLogSchema: single-field amountPaisa patch parses", () => {
+    // amountPaisa is mutable on PATCH (an operator might fix a
+    // mis-keyed entry after seeing the receipt). The single-field
+    // patch must parse so the diff-PATCH service code can apply it.
+    const parsed = updatePipe.transform({ amountPaisa: 300_000 });
+    expect(parsed.amountPaisa).toBe(300_000);
+  });
+
+  test("UpdateExpenseLogSchema: single-field tripId patch parses (mutable on PATCH)", () => {
+    const parsed = updatePipe.transform({ tripId: "ckabcdef12345678" });
+    expect(parsed.tripId).toBe("ckabcdef12345678");
+  });
+
+  test("UpdateExpenseLogSchema: tripId = null parses (unpair semantics)", () => {
+    // The web form sends null when the operator clears the picker.
+    // The service interprets null as "set the column to null" via
+    // the diff-PATCH `has()` helper.
+    const parsed = updatePipe.transform({ tripId: null });
+    expect(parsed.tripId).toBeNull();
+  });
+
+  test("UpdateExpenseLogSchema: bogus key is rejected (.strict())", () => {
+    expect(() => updatePipe.transform({ amount: 100_000 })).toThrow(BadRequestException);
+  });
+
+  test("UpdateExpenseLogSchema: amountPaisa above the ceiling on PATCH → 400", () => {
+    // The bounds apply on PATCH too — an extra-zero typo when
+    // correcting a value should still be caught.
+    expect(() => updatePipe.transform({ amountPaisa: 99_999_999_999 })).toThrow(
+      BadRequestException,
+    );
+  });
+});
+
+// ----------------------------------------------------------------
+// iter-22: controller create / update / remove (integration)
+// ----------------------------------------------------------------
+// Full controller-level integration for the write path: real
+// ExpenseLogsController + ExpenseLogsService + PrismaService, AuthGuard
+// overridden, AUTH stubbed. The controller's create() reads
+// createdById from request.session.user.id; we hand it a minimal
+// fake request cast — same approach the iter-20 Fuel logs / Jobs /
+// Customers controller tests take.
+
+describe("ExpenseLogsController.create / update / remove (integration, real Prisma)", () => {
+  let module: TestingModule;
+  let app: INestApplication;
+  let prisma: PrismaService;
+  let controller: ExpenseLogsController;
+  let adminId: string;
+  let vehicleAId: string;
+  let vehicleBId: string;
+  let tripId: string;
+  let fakeRequest: AuthenticatedRequest;
+
+  beforeAll(async () => {
+    module = await Test.createTestingModule({
+      controllers: [ExpenseLogsController],
+      providers: [
+        ExpenseLogsService,
+        PrismaService,
+        { provide: AUTH, useValue: { api: { getSession: () => null } } },
+      ],
+    })
+      .overrideGuard(AuthGuard)
+      .useValue({ canActivate: () => true })
+      .compile();
+
+    app = module.createNestApplication();
+    await app.init();
+
+    prisma = module.get(PrismaService);
+    controller = module.get(ExpenseLogsController);
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  beforeEach(async () => {
+    await resetDb(prisma);
+
+    adminId = `user_${randomUUID()}`;
+    await prisma.user.create({
+      data: { id: adminId, email: `admin-${adminId}@fleetco.test`, name: "Test Admin" },
+    });
+    const vehicleA = await prisma.vehicle.create({
+      data: {
+        registrationNumber: `BA 1 KA ${String(Math.floor(Math.random() * 10000)).padStart(4, "0")}`,
+        kind: "TIPPER",
+        make: "Tata",
+        model: "LPK 2518",
+        year: 2022,
+        acquiredAt: new Date("2022-01-01T00:00:00Z"),
+        createdById: adminId,
+      },
+    });
+    vehicleAId = vehicleA.id;
+    const vehicleB = await prisma.vehicle.create({
+      data: {
+        registrationNumber: `BA 2 KA ${String(Math.floor(Math.random() * 10000)).padStart(4, "0")}`,
+        kind: "TRUCK",
+        make: "Ashok Leyland",
+        model: "1616",
+        year: 2023,
+        acquiredAt: new Date("2023-01-01T00:00:00Z"),
+        createdById: adminId,
+      },
+    });
+    vehicleBId = vehicleB.id;
+    const driver = await prisma.driver.create({
+      data: {
+        fullName: "Ram Bahadur",
+        licenseNumber: `12-345-${String(Math.floor(Math.random() * 100000)).padStart(5, "0")}`,
+        licenseClass: "HTV",
+        phone: "+977-9800000000",
+        hiredAt: new Date("2022-01-15T00:00:00Z"),
+        licenseExpiresAt: new Date("2030-01-01T00:00:00Z"),
+        createdById: adminId,
+      },
+    });
+    const trip = await prisma.trip.create({
+      data: {
+        vehicleId: vehicleAId,
+        driverId: driver.id,
+        status: "COMPLETED",
+        startedAt: new Date("2026-02-10T06:00:00Z"),
+        endedAt: new Date("2026-02-10T14:00:00Z"),
+        startOdometerKm: 10000,
+        endOdometerKm: 10250,
+        createdById: adminId,
+      },
+    });
+    tripId = trip.id;
+
+    fakeRequest = { session: { user: { id: adminId } } } as unknown as AuthenticatedRequest;
+  });
+
+  test("create() persists with amountPaisa stored as-given and createdById from session", async () => {
+    // Iter-22 rule #1: amountPaisa is authoritative — no derivation.
+    // Pinned by asserting the value round-trips verbatim from the
+    // body to the stored row.
+    const created = await controller.create(
+      {
+        vehicleId: vehicleAId,
+        date: new Date("2026-02-15T08:00:00Z"),
+        category: "MAINTENANCE",
+        amountPaisa: 250_000,
+        vendor: "Sundar Workshop",
+      },
+      fakeRequest,
+    );
+    expect(created.amountPaisa).toBe(250_000);
+    expect(created.createdById).toBe(adminId);
+    expect(created.vehicle?.id).toBe(vehicleAId);
+    expect(created.vendor).toBe("Sundar Workshop");
+  });
+
+  test("create() vehicle-agnostic (vehicleId omitted) persists with vehicle=null in the detail", async () => {
+    // Iter-22 rule #2: a quarterly insurance premium for the whole
+    // company is a first-class expense with no vehicle. The detail
+    // response must expose vehicle as null (DETAIL_INCLUDE is the
+    // full nullable Vehicle relation).
+    const created = await controller.create(
+      {
+        date: new Date("2026-02-15T08:00:00Z"),
+        category: "INSURANCE",
+        amountPaisa: 5_000_000,
+        vendor: "Sagarmatha Insurance",
+      },
+      fakeRequest,
+    );
+    expect(created.vehicleId).toBeNull();
+    expect(created.vehicle).toBeNull();
+    expect(created.category).toBe("INSURANCE");
+    expect(created.amountPaisa).toBe(5_000_000);
+  });
+
+  test("create() with tripId paired to its vehicle returns the nested trip", async () => {
+    const created = await controller.create(
+      {
+        vehicleId: vehicleAId,
+        tripId,
+        date: new Date("2026-02-15T08:00:00Z"),
+        category: "TOLL",
+        amountPaisa: 12_500,
+      },
+      fakeRequest,
+    );
+    expect(created.trip?.id).toBe(tripId);
+    expect(created.amountPaisa).toBe(12_500);
+  });
+
+  test("create() with a trip-vehicle mismatch → BadRequestException (HTTP 400)", async () => {
+    // The trip is bound to vehicleAId; passing vehicleBId triggers
+    // the consistency check the same way Fuel logs iter-20 enforces.
+    try {
+      await controller.create(
+        {
+          vehicleId: vehicleBId,
+          tripId,
+          date: new Date("2026-02-15T08:00:00Z"),
+          category: "TOLL",
+          amountPaisa: 12_500,
+        },
+        fakeRequest,
+      );
+      throw new Error("expected BadRequestException");
+    } catch (error) {
+      expect(error).toBeInstanceOf(BadRequestException);
+      expect((error as BadRequestException).message).toContain(tripId);
+    }
+  });
+
+  test("create() with a non-existent vehicleId → BadRequestException (P2003 → 400)", async () => {
+    try {
+      await controller.create(
+        {
+          vehicleId: "ckmissingvehicleid123456",
+          date: new Date("2026-02-15T08:00:00Z"),
+          category: "MAINTENANCE",
+          amountPaisa: 250_000,
+        },
+        fakeRequest,
+      );
+      throw new Error("expected BadRequestException");
+    } catch (error) {
+      expect(error).toBeInstanceOf(BadRequestException);
+      expect((error as BadRequestException).message).toContain("ckmissingvehicleid123456");
+      expect((error as BadRequestException).message).toContain("does not exist");
+    }
+  });
+
+  test("update() applies a diff-PATCH (vendor only) and leaves amountPaisa untouched", async () => {
+    const created = await controller.create(
+      {
+        vehicleId: vehicleAId,
+        date: new Date("2026-02-15T08:00:00Z"),
+        category: "MAINTENANCE",
+        amountPaisa: 250_000,
+        vendor: "Sundar Workshop",
+      },
+      fakeRequest,
+    );
+    const updated = await controller.update(created.id, { vendor: "Himal Workshop" });
+    expect(updated.vendor).toBe("Himal Workshop");
+    expect(updated.amountPaisa).toBe(created.amountPaisa);
+    expect(updated.category).toBe(created.category);
+  });
+
+  test("update() applies a diff-PATCH on amountPaisa as the authoritative value", async () => {
+    // Iter-22 rule #1: amountPaisa is mutable on PATCH and the
+    // service writes it through verbatim. No derivation, no preview.
+    const created = await controller.create(
+      {
+        vehicleId: vehicleAId,
+        date: new Date("2026-02-15T08:00:00Z"),
+        category: "MAINTENANCE",
+        amountPaisa: 250_000,
+      },
+      fakeRequest,
+    );
+    const updated = await controller.update(created.id, { amountPaisa: 300_000 });
+    expect(updated.amountPaisa).toBe(300_000);
+  });
+
+  test("update() unknown id → NotFoundException (HTTP 404)", async () => {
+    try {
+      await controller.update("ckmissingexpense12345678", { vendor: "anything" });
+      throw new Error("expected NotFoundException");
+    } catch (error) {
+      expect(error).toBeInstanceOf(NotFoundException);
+      expect((error as NotFoundException).message).toContain("ckmissingexpense12345678");
+    }
+  });
+
+  test("remove() hard-deletes and resolves without a body; 404 on unknown id", async () => {
+    const created = await controller.create(
+      {
+        vehicleId: vehicleAId,
+        date: new Date("2026-02-15T08:00:00Z"),
+        category: "TOLL",
+        amountPaisa: 12_500,
+      },
+      fakeRequest,
+    );
+    const result = await controller.remove(created.id);
+    expect(result).toBeUndefined();
+    const refetched = await prisma.expenseLog.findUnique({ where: { id: created.id } });
+    expect(refetched).toBeNull();
+
+    try {
+      await controller.remove("ckmissingexpense12345678");
+      throw new Error("expected NotFoundException");
+    } catch (error) {
+      expect(error).toBeInstanceOf(NotFoundException);
+    }
   });
 });

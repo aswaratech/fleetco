@@ -1,13 +1,31 @@
-import { Controller, Get, Param, Query, UseGuards } from "@nestjs/common";
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Patch,
+  Post,
+  Query,
+  Req,
+  UseGuards,
+} from "@nestjs/common";
 
 import { ZodValidationPipe } from "../../common/zod-validation.pipe";
 import { AuthGuard } from "../auth/auth.guard";
+import type { AuthenticatedRequest } from "../auth/auth.types";
 
 import {
+  CreateExpenseLogSchema,
   ListExpenseLogsQuerySchema,
+  UpdateExpenseLogSchema,
+  type CreateExpenseLogInput,
   type ExpenseLogSortColumn,
   type ExpenseLogSortDir,
   type ListExpenseLogsQuery,
+  type UpdateExpenseLogInput,
 } from "./expense-logs.schemas";
 
 // ExpenseLogsService is injected by NestJS via emitDecoratorMetadata;
@@ -48,7 +66,7 @@ export interface ExpenseLogsListResponse {
 // explicit decorator, which is the right direction for an admin-only
 // surface in Phase 1.
 //
-// Iter 21 ships the read path (GET list + GET :id); iter 22 layers
+// Iter 21 shipped the read path (GET list + GET :id); iter 22 layers
 // the write path (POST create / PATCH update / DELETE remove) on top
 // the same way Fuel logs iter 19 → iter 20 and Jobs iter 17 → iter 18
 // staged.
@@ -111,5 +129,89 @@ export class ExpenseLogsController {
   @Get(":id")
   async getById(@Param("id") id: string): Promise<ExpenseLogDetail> {
     return this.expenseLogs.getById(id);
+  }
+
+  /**
+   * Create an ExpenseLog. The body is validated by ZodValidationPipe
+   * against CreateExpenseLogSchema (expense-logs.schemas.ts); malformed
+   * payloads return HTTP 400 with a clear per-field message.
+   * `createdById` comes from the authenticated session (AuthGuard
+   * populates request.session per ADR-0021 §6); it is never read
+   * from the body — the schema's `.strict()` rejects it.
+   *
+   * Unlike FuelLogsController.create, there is no derived field —
+   * `amountPaisa` is the authoritative entered value, accepted
+   * verbatim on the wire. The schema accepts `vehicleId` as
+   * optional+nullable so a vehicle-agnostic expense (insurance
+   * premium, office stationery) is a legitimate create. The service's
+   * trip-vehicle consistency check fires only when BOTH `tripId` and
+   * `vehicleId` are present on the request; otherwise it's skipped
+   * (a vehicle-agnostic expense paired with a trip, or a
+   * vehicle-attributed expense with no trip, both bypass the check).
+   *
+   * The service's trip-vehicle consistency check (BadRequestException
+   * naming both registrations) and FK violations (P2003 →
+   * BadRequestException naming the offending id) propagate as HTTP
+   * 400 unchanged — Nest's default exception filter renders them as
+   * `{ statusCode: 400, message: "<…>" }`, which is the shape the
+   * web action layer parses to surface inline errors on the vehicle
+   * / trip pickers.
+   */
+  @Post()
+  @HttpCode(HttpStatus.CREATED)
+  async create(
+    @Body(new ZodValidationPipe(CreateExpenseLogSchema)) body: CreateExpenseLogInput,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<ExpenseLogDetail> {
+    return this.expenseLogs.create(body, request.session.user.id);
+  }
+
+  /**
+   * Partial update. UpdateExpenseLogSchema enforces "at least one
+   * field" and rejects unknown keys (so a client cannot smuggle
+   * `id`, `createdById`, or `vehicleId` through this endpoint).
+   *
+   * `vehicleId` is IMMUTABLE post-create: an attempt to PATCH it
+   * surfaces as HTTP 400 from the Zod `.strict()` check (the schema
+   * omits the key entirely; unknown-key rejection produces a
+   * "Unrecognized key(s): \"vehicleId\"" message). Same precedent as
+   * Jobs iter-18 customerId immutability and Fuel-logs iter-20
+   * vehicleId immutability. See the schema's docblock for the
+   * "rewriting history" rationale.
+   *
+   * `tripId` is MUTABLE: pairing / unpairing an expense with a trip
+   * is a routine post-create correction (the operator may reconcile
+   * receipts against trips later). 404 on missing record. The
+   * trip-vehicle consistency rule is re-checked at the service
+   * layer against the merged shape; a PATCH that touches `tripId`
+   * to a non-null value while the stored row's vehicleId is
+   * non-null re-validates against the stored vehicleId. When either
+   * side of the merged shape is null, the check is skipped.
+   */
+  @Patch(":id")
+  async update(
+    @Param("id") id: string,
+    @Body(new ZodValidationPipe(UpdateExpenseLogSchema)) body: UpdateExpenseLogInput,
+  ): Promise<ExpenseLogDetail> {
+    return this.expenseLogs.update(id, body);
+  }
+
+  /**
+   * Hard delete. Returns HTTP 204 (no body) on success; 404 when the
+   * expense log does not exist (service throws NotFoundException on
+   * P2025).
+   *
+   * No aggregate FK-references ExpenseLog under Restrict in Phase 1,
+   * so the delete path has no 409 delete-blocker branch today. A
+   * future Reports v1 slice that materializes per-expense summaries
+   * may add an inbound FK; if it does under Restrict, this surface
+   * will gain a 409 delete-blocker mirroring the Customer
+   * delete-blocker (iter 17) — see the docblock on
+   * ExpenseLogsService.delete.
+   */
+  @Delete(":id")
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async remove(@Param("id") id: string): Promise<void> {
+    await this.expenseLogs.delete(id);
   }
 }
