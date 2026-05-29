@@ -13,6 +13,7 @@ import { HealthModule } from "./modules/health/health.module";
 import { JobsModule } from "./modules/jobs/jobs.module";
 import { PrismaModule } from "./modules/prisma/prisma.module";
 import { RedisModule } from "./modules/redis/redis.module";
+import { ReportsModule } from "./modules/reports/reports.module";
 import { TripsModule } from "./modules/trips/trips.module";
 import { VehiclesModule } from "./modules/vehicles/vehicles.module";
 
@@ -66,6 +67,7 @@ import { VehiclesModule } from "./modules/vehicles/vehicles.module";
     JobsModule,
     FuelLogsModule,
     ExpenseLogsModule,
+    ReportsModule,
   ],
 })
 export class AppModule {}
