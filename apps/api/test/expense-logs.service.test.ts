@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { NotFoundException } from "@nestjs/common";
+import { BadRequestException, NotFoundException } from "@nestjs/common";
 import { Test, type TestingModule } from "@nestjs/testing";
 import { type Driver, ExpenseCategory, type Trip, type Vehicle } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
@@ -442,6 +442,376 @@ describe("ExpenseLogsService (integration, real Postgres)", () => {
       // is doubly safe.
       const allIds = new Set([...page1.items.map((i) => i.id), ...page2.items.map((i) => i.id)]);
       expect(allIds.size).toBe(4);
+    });
+  });
+
+  // ----------------------------------------------------------------
+  // iter-22: write path
+  // ----------------------------------------------------------------
+  // The kickoff names the coverage areas: happy paths for create /
+  // update / delete; the three Expense-log-specific shape rules
+  // (vehicleId optional+nullable on create, vehicleId immutable on
+  // PATCH — asserted at the controller layer where Zod runs, not
+  // here — and trip-vehicle consistency that fires only when BOTH
+  // ids are present); P2003 on vehicleId / tripId / createdById →
+  // 400; P2025 on update / remove → 404.
+
+  describe("create()", () => {
+    test("happy path: persists row with all fields and both FKs set", async () => {
+      const created = await service.create(
+        {
+          vehicleId: vehicleA.id,
+          tripId: trip.id,
+          date: new Date("2026-02-15T08:00:00Z"),
+          category: ExpenseCategory.TOLL,
+          amountPaisa: 50_000,
+          vendor: "Naubise Toll Booth",
+          receiptNumber: "T-7788",
+          notes: "iter-22 happy path",
+        },
+        adminId,
+      );
+      expect(created.id).toBeTruthy();
+      expect(created.vehicleId).toBe(vehicleA.id);
+      expect(created.tripId).toBe(trip.id);
+      expect(created.date.toISOString()).toBe("2026-02-15T08:00:00.000Z");
+      expect(created.category).toBe(ExpenseCategory.TOLL);
+      // amountPaisa is the authoritative entered value — no
+      // derivation, no rounding. Pinned end-to-end to catch a
+      // regression that accidentally introduces a derivation.
+      expect(created.amountPaisa).toBe(50_000);
+      expect(created.vendor).toBe("Naubise Toll Booth");
+      expect(created.receiptNumber).toBe("T-7788");
+      expect(created.notes).toBe("iter-22 happy path");
+      expect(created.createdById).toBe(adminId);
+      // Detail-include shape on the returned row.
+      expect(created.vehicle?.id).toBe(vehicleA.id);
+      expect(created.trip?.id).toBe(trip.id);
+    });
+
+    test("happy path vehicle-agnostic (vehicleId omitted): both relations null on the response", async () => {
+      // The canonical "office stationery" / "quarterly insurance
+      // premium" case. The kickoff calls this out as the
+      // expense-log-specific shape difference vs. Fuel logs: a
+      // vehicle-agnostic expense is a legitimate row.
+      const created = await service.create(
+        {
+          date: new Date("2026-02-18T08:00:00Z"),
+          category: ExpenseCategory.INSURANCE,
+          amountPaisa: 25_000_000,
+          vendor: "Shikhar Insurance",
+        },
+        adminId,
+      );
+      expect(created.vehicleId).toBeNull();
+      expect(created.tripId).toBeNull();
+      expect(created.vehicle).toBeNull();
+      expect(created.trip).toBeNull();
+      expect(created.amountPaisa).toBe(25_000_000);
+    });
+
+    test("happy path vehicle-agnostic + tripId omitted: the cross-field check is skipped", async () => {
+      // Both FKs omitted; the cross-field check should not even
+      // attempt to look up a trip. Same row shape as the test above
+      // but exercises the "tripId omitted" branch of the input
+      // shape.
+      const created = await service.create(
+        {
+          vehicleId: null,
+          tripId: null,
+          date: new Date("2026-02-18T08:00:00Z"),
+          category: ExpenseCategory.OTHER,
+          amountPaisa: 5_000,
+        },
+        adminId,
+      );
+      expect(created.vehicleId).toBeNull();
+      expect(created.tripId).toBeNull();
+    });
+
+    test("happy path vehicle-attributed but no trip: cross-field check is skipped", async () => {
+      const created = await service.create(
+        {
+          vehicleId: vehicleA.id,
+          date: new Date("2026-02-15T08:00:00Z"),
+          category: ExpenseCategory.MAINTENANCE,
+          amountPaisa: 250_000,
+        },
+        adminId,
+      );
+      expect(created.vehicleId).toBe(vehicleA.id);
+      expect(created.tripId).toBeNull();
+      expect(created.vehicle?.id).toBe(vehicleA.id);
+      expect(created.trip).toBeNull();
+    });
+
+    test("happy path vehicle-agnostic + tripId present: cross-field check is skipped (vehicleId null)", async () => {
+      // Pin the "either side null → skip" rule. tripId points at
+      // the seed trip (which is for vehicleA), but the expense's
+      // vehicleId is null — no mismatch to check.
+      const created = await service.create(
+        {
+          tripId: trip.id,
+          date: new Date("2026-02-15T08:00:00Z"),
+          category: ExpenseCategory.OTHER,
+          amountPaisa: 1_000,
+        },
+        adminId,
+      );
+      expect(created.vehicleId).toBeNull();
+      expect(created.tripId).toBe(trip.id);
+      expect(created.trip?.id).toBe(trip.id);
+    });
+
+    test("nullable text fields default to null when omitted from the input", async () => {
+      const created = await service.create(
+        {
+          vehicleId: vehicleA.id,
+          date: new Date("2026-02-15T08:00:00Z"),
+          category: ExpenseCategory.PARKING,
+          amountPaisa: 10_000,
+        },
+        adminId,
+      );
+      expect(created.vendor).toBeNull();
+      expect(created.receiptNumber).toBeNull();
+      expect(created.notes).toBeNull();
+    });
+
+    test("rejects trip-vehicle mismatch with BadRequestException naming both registrations", async () => {
+      // The seed's `trip` is for vehicleA; pairing it with
+      // vehicleB on the expense is the mismatch case. Both FKs are
+      // non-null, so the cross-field check fires.
+      try {
+        await service.create(
+          {
+            vehicleId: vehicleB.id,
+            tripId: trip.id,
+            date: new Date("2026-02-15T08:00:00Z"),
+            category: ExpenseCategory.TOLL,
+            amountPaisa: 50_000,
+          },
+          adminId,
+        );
+        throw new Error("expected BadRequestException");
+      } catch (error) {
+        expect(error).toBeInstanceOf(BadRequestException);
+        const message = (error as BadRequestException).message;
+        expect(message).toContain(trip.id);
+        // Both registration numbers are named in the message so the
+        // operator understands the mismatch direction.
+        expect(message).toContain(vehicleA.registrationNumber);
+        expect(message).toContain(vehicleB.registrationNumber);
+      }
+    });
+
+    test("rejects a missing tripId with a friendly BadRequest before Prisma sees the FK", async () => {
+      try {
+        await service.create(
+          {
+            vehicleId: vehicleA.id,
+            tripId: "ckmissingtripid12345678",
+            date: new Date("2026-02-15T08:00:00Z"),
+            category: ExpenseCategory.TOLL,
+            amountPaisa: 50_000,
+          },
+          adminId,
+        );
+        throw new Error("expected BadRequestException");
+      } catch (error) {
+        expect(error).toBeInstanceOf(BadRequestException);
+        expect((error as BadRequestException).message).toContain("ckmissingtripid12345678");
+      }
+    });
+
+    test("P2003 on vehicleId → BadRequestException with the offending id", async () => {
+      // Pass a vehicleId that's cuid-shaped but does not exist; the
+      // service has no service-layer vehicle existence check (the
+      // FK error from Prisma is the source of truth), so Prisma
+      // raises P2003 and mapExpenseLogWriteError translates it.
+      try {
+        await service.create(
+          {
+            vehicleId: "ckmissingvehicleid123456",
+            date: new Date("2026-02-15T08:00:00Z"),
+            category: ExpenseCategory.MAINTENANCE,
+            amountPaisa: 100_000,
+          },
+          adminId,
+        );
+        throw new Error("expected BadRequestException");
+      } catch (error) {
+        expect(error).toBeInstanceOf(BadRequestException);
+        expect((error as BadRequestException).message).toContain("ckmissingvehicleid123456");
+        expect((error as BadRequestException).message).toContain("does not exist");
+      }
+    });
+  });
+
+  describe("update()", () => {
+    test("happy path: PATCH that only changes vendor updates only that column", async () => {
+      const created = await seedExpenseLog(prisma, {
+        createdById: adminId,
+        vehicleId: vehicleA.id,
+        vendor: "Old Vendor",
+      });
+      const updated = await service.update(created.id, { vendor: "New Vendor" });
+      expect(updated.id).toBe(created.id);
+      expect(updated.vendor).toBe("New Vendor");
+      // Other fields untouched.
+      expect(updated.amountPaisa).toBe(created.amountPaisa);
+      expect(updated.category).toBe(created.category);
+      expect(updated.vehicleId).toBe(created.vehicleId);
+    });
+
+    test("PATCH that touches amountPaisa accepts the new value directly (no derivation)", async () => {
+      // The defining iter-22 shape difference vs. Fuel logs:
+      // amountPaisa is authoritative on the wire, not a product of
+      // two factors. A PATCH that sets amountPaisa = N must store
+      // exactly N.
+      const created = await seedExpenseLog(prisma, {
+        createdById: adminId,
+        vehicleId: vehicleA.id,
+        amountPaisa: 250_000,
+      });
+      const updated = await service.update(created.id, { amountPaisa: 999_999 });
+      expect(updated.amountPaisa).toBe(999_999);
+    });
+
+    test("PATCH that changes category persists the new category", async () => {
+      const created = await seedExpenseLog(prisma, {
+        createdById: adminId,
+        vehicleId: vehicleA.id,
+        category: ExpenseCategory.MAINTENANCE,
+      });
+      const updated = await service.update(created.id, { category: ExpenseCategory.REPAIR });
+      expect(updated.category).toBe(ExpenseCategory.REPAIR);
+    });
+
+    test("PATCH allows tripId to flip from null → set", async () => {
+      // Seed an expense on vehicleA with no trip; PATCH it onto
+      // the seed's trip (which is also for vehicleA, so the
+      // merged-shape check passes).
+      const created = await seedExpenseLog(prisma, {
+        createdById: adminId,
+        vehicleId: vehicleA.id,
+        tripId: null,
+      });
+      const updated = await service.update(created.id, { tripId: trip.id });
+      expect(updated.tripId).toBe(trip.id);
+      expect(updated.trip?.id).toBe(trip.id);
+    });
+
+    test("PATCH allows tripId to flip from set → null (unpair)", async () => {
+      const created = await seedExpenseLog(prisma, {
+        createdById: adminId,
+        vehicleId: vehicleA.id,
+        tripId: trip.id,
+      });
+      const updated = await service.update(created.id, { tripId: null });
+      expect(updated.tripId).toBeNull();
+      expect(updated.trip).toBeNull();
+    });
+
+    test("PATCH rejects trip-vehicle mismatch against the merged (stored vehicleId) shape", async () => {
+      // Seed an expense on vehicleB with no trip; the existing
+      // vehicleId is vehicleB. Then PATCH tripId to a trip for
+      // vehicleA → the merged-shape check must reject (vehicleB +
+      // trip-for-A is a mismatch).
+      const created = await seedExpenseLog(prisma, {
+        createdById: adminId,
+        vehicleId: vehicleB.id,
+        tripId: null,
+      });
+      try {
+        await service.update(created.id, { tripId: trip.id });
+        throw new Error("expected BadRequestException");
+      } catch (error) {
+        expect(error).toBeInstanceOf(BadRequestException);
+        const message = (error as BadRequestException).message;
+        expect(message).toContain(trip.id);
+        expect(message).toContain(vehicleA.registrationNumber);
+        expect(message).toContain(vehicleB.registrationNumber);
+      }
+    });
+
+    test("PATCH on a vehicle-agnostic expense allows tripId to be set (cross-field check skipped: stored vehicleId is null)", async () => {
+      // Pin the "either side null → skip" rule for PATCH.
+      // Existing row has vehicleId = null; PATCH sets tripId to a
+      // trip for vehicleA — no mismatch to check because the
+      // expense's vehicleId is null.
+      const created = await seedExpenseLog(prisma, {
+        createdById: adminId,
+        vehicleId: null,
+        tripId: null,
+      });
+      const updated = await service.update(created.id, { tripId: trip.id });
+      expect(updated.vehicleId).toBeNull();
+      expect(updated.tripId).toBe(trip.id);
+    });
+
+    test("PATCH with all nullable fields cleared sets each to null", async () => {
+      const created = await seedExpenseLog(prisma, {
+        createdById: adminId,
+        vehicleId: vehicleA.id,
+        tripId: trip.id,
+        vendor: "before",
+        receiptNumber: "R-before",
+        notes: "before",
+      });
+      const updated = await service.update(created.id, {
+        tripId: null,
+        vendor: null,
+        receiptNumber: null,
+        notes: null,
+      });
+      expect(updated.tripId).toBeNull();
+      expect(updated.vendor).toBeNull();
+      expect(updated.receiptNumber).toBeNull();
+      expect(updated.notes).toBeNull();
+    });
+
+    test("PATCH on a missing expense log throws NotFoundException with the id in the message", async () => {
+      try {
+        await service.update("ckmissingexpenselog12345", { vendor: "anything" });
+        throw new Error("expected NotFoundException");
+      } catch (error) {
+        expect(error).toBeInstanceOf(NotFoundException);
+        expect((error as NotFoundException).message).toContain("ckmissingexpenselog12345");
+      }
+    });
+  });
+
+  describe("delete()", () => {
+    test("happy path: removes the row", async () => {
+      const created = await seedExpenseLog(prisma, {
+        createdById: adminId,
+        vehicleId: vehicleA.id,
+      });
+      await service.delete(created.id);
+      const fetched = await service.findById(created.id);
+      expect(fetched).toBeNull();
+    });
+
+    test("happy path on a vehicle-agnostic row removes it too (no FK to inspect)", async () => {
+      const created = await seedExpenseLog(prisma, {
+        createdById: adminId,
+        vehicleId: null,
+        tripId: null,
+      });
+      await service.delete(created.id);
+      const fetched = await service.findById(created.id);
+      expect(fetched).toBeNull();
+    });
+
+    test("on a missing expense log throws NotFoundException with the id in the message", async () => {
+      try {
+        await service.delete("ckmissingexpenselog12345");
+        throw new Error("expected NotFoundException");
+      } catch (error) {
+        expect(error).toBeInstanceOf(NotFoundException);
+        expect((error as NotFoundException).message).toContain("ckmissingexpenselog12345");
+      }
     });
   });
 });

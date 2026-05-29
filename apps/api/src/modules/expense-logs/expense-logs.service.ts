@@ -1,7 +1,19 @@
-import { Injectable, NotFoundException } from "@nestjs/common";
-import type { ExpenseCategory, Prisma } from "@prisma/client";
+import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import { Prisma } from "@prisma/client";
+import type { ExpenseCategory } from "@prisma/client";
 
-import type { ExpenseLogSortColumn, ExpenseLogSortDir } from "./expense-logs.schemas";
+import type {
+  CreateExpenseLogInput,
+  ExpenseLogSortColumn,
+  ExpenseLogSortDir,
+  UpdateExpenseLogInput,
+} from "./expense-logs.schemas";
+
+// Re-export the schema-inferred input types so call sites (notably
+// the controller and tests) can pull them from this module — the
+// same convention FuelLogsService / TripsService / JobsService
+// follow.
+export type { CreateExpenseLogInput, UpdateExpenseLogInput };
 
 // PrismaService is injected by NestJS via TypeScript's
 // emitDecoratorMetadata (see apps/api/tsconfig.json); the class
@@ -222,4 +234,282 @@ export class ExpenseLogsService {
     }
     return row;
   }
+
+  /**
+   * Create an ExpenseLog. `createdById` is supplied by the controller
+   * from the authenticated session, not by the client — same
+   * convention every other write-path service uses.
+   * `CreateExpenseLogSchema.strict()` keeps `createdById` (and any
+   * unknown key) off the wire; the service trusts that and uses only
+   * fields from `CreateExpenseLogInput`.
+   *
+   * Unlike FuelLogsService.create, there is no derived field. The
+   * caller-supplied `amountPaisa` is the authoritative entered
+   * value, not a product of two factors — see the schema docblock
+   * for the rationale.
+   *
+   * Optional FKs:
+   *
+   *   - `vehicleId` is optional and nullable. A vehicle-agnostic
+   *     expense (the quarterly insurance premium, office stationery)
+   *     is a legitimate row; the create form exposes an explicit
+   *     "(none — not vehicle-attributable)" picker option.
+   *
+   *   - `tripId` is optional and nullable. An expense may or may
+   *     not be paired with a trip (the same pairing flexibility
+   *     Fuel logs offers).
+   *
+   * Cross-field rule (trip-vehicle consistency): fires only when
+   * BOTH `tripId` AND `vehicleId` are present. The referenced
+   * Trip's `vehicleId` MUST match this expense log's `vehicleId`
+   * (a trip for vehicle B cannot have generated an expense
+   * attributed to vehicle A). When either is null, the check is
+   * skipped — pairing a vehicle-agnostic expense with a trip is
+   * allowed, as is logging a vehicle expense without trip
+   * attribution. The check is service-layer (not a DB constraint);
+   * same precedent as FuelLogsService.assertTripBelongsToVehicle.
+   *
+   * FK validation (P2003): on a Prisma foreign-key violation we
+   * translate to BadRequestException with a per-field message
+   * (`vehicleId` / `tripId` / `createdById`). HTTP 400 (not 409) per
+   * the runbook — FK-on-create is a client-input error (the picker
+   * referenced a deleted or invalid row), not a server-side
+   * conflict. The error object's `meta.field_name` tells us which
+   * FK; we route by lowercased substring match.
+   */
+  async create(input: CreateExpenseLogInput, createdById: string): Promise<ExpenseLogDetail> {
+    // Service-layer cross-field check before we even attempt the
+    // insert. Fires only when BOTH tripId AND vehicleId are
+    // non-null on the request — see the docblock above.
+    if (input.tripId && input.vehicleId) {
+      await this.assertTripBelongsToVehicle(input.tripId, input.vehicleId);
+    }
+
+    const data: Prisma.ExpenseLogUncheckedCreateInput = {
+      vehicleId: input.vehicleId ?? null,
+      tripId: input.tripId ?? null,
+      date: input.date,
+      category: input.category,
+      amountPaisa: input.amountPaisa,
+      vendor: input.vendor ?? null,
+      receiptNumber: input.receiptNumber ?? null,
+      notes: input.notes ?? null,
+      createdById,
+    };
+
+    try {
+      return await this.prisma.expenseLog.create({ data, include: DETAIL_INCLUDE });
+    } catch (error) {
+      throw mapExpenseLogWriteError(error, {
+        vehicleId: input.vehicleId ?? null,
+        tripId: input.tripId ?? null,
+        createdById,
+      });
+    }
+  }
+
+  /**
+   * Diff-PATCH an ExpenseLog. Mirrors FuelLogsService.update /
+   * JobsService.update in shape:
+   *
+   *   1. Fetch the existing row (404 if missing, surfaced as
+   *      NotFoundException). We need the existing row for the
+   *      trip-vehicle consistency check's merged-shape comparison.
+   *
+   *   2. If `tripId` is present in the PATCH and resolves to a
+   *      non-null value AND the EXISTING row's vehicleId is
+   *      non-null (vehicleId is immutable on PATCH), re-run the
+   *      trip-vehicle consistency check against the MERGED shape
+   *      (patch's tripId paired with existing row's vehicleId).
+   *      When either side of the merged shape is null, the check
+   *      is skipped — same skip-when-either-is-null rule as create.
+   *
+   *   3. Let Prisma do the write. P2003 → BadRequestException
+   *      (only tripId can flip from null to non-null on PATCH;
+   *      vehicleId is rejected at the schema layer). P2025 →
+   *      NotFoundException (rare; only if a concurrent DELETE
+   *      landed between step 1 and the update).
+   *
+   * Returns the expense log's DETAIL_INCLUDE shape so the controller
+   * can respond with the same shape that GET /api/v1/expense-logs/:id
+   * returns.
+   *
+   * `vehicleId` is not accepted by UpdateExpenseLogSchema (the
+   * `.strict()` + absence-from-shape rejects it). See the schema's
+   * docblock for the immutability rationale.
+   */
+  async update(id: string, input: UpdateExpenseLogInput): Promise<ExpenseLogDetail> {
+    const existing = await this.prisma.expenseLog.findUnique({ where: { id } });
+    if (!existing) {
+      throw new NotFoundException(`Expense log ${id} not found`);
+    }
+
+    const has = (key: keyof UpdateExpenseLogInput): boolean =>
+      Object.prototype.hasOwnProperty.call(input, key);
+
+    // Trip-vehicle consistency on the merged shape. vehicleId is
+    // immutable on PATCH so the comparison value is the existing
+    // row's vehicleId. The check fires only when BOTH sides of the
+    // merged shape are non-null: the patch's tripId is set to a
+    // non-null value AND the existing row already has a vehicleId.
+    // Same skip-when-either-is-null rule as create.
+    if (has("tripId") && input.tripId && existing.vehicleId) {
+      await this.assertTripBelongsToVehicle(input.tripId, existing.vehicleId);
+    }
+
+    const data: Prisma.ExpenseLogUpdateInput = {
+      ...(has("tripId") && {
+        trip: input.tripId ? { connect: { id: input.tripId } } : { disconnect: true },
+      }),
+      ...(has("date") && input.date !== undefined && { date: input.date }),
+      ...(has("category") && input.category !== undefined && { category: input.category }),
+      ...(has("amountPaisa") &&
+        input.amountPaisa !== undefined && { amountPaisa: input.amountPaisa }),
+      ...(has("vendor") && { vendor: input.vendor ?? null }),
+      ...(has("receiptNumber") && { receiptNumber: input.receiptNumber ?? null }),
+      ...(has("notes") && { notes: input.notes ?? null }),
+    };
+
+    try {
+      return await this.prisma.expenseLog.update({
+        where: { id },
+        data,
+        include: DETAIL_INCLUDE,
+      });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2025") {
+        // Either the ExpenseLog row vanished between findUnique
+        // and the update (rare; concurrent DELETE) or the PATCH
+        // disconnected and reconnected to a now-deleted trip. The
+        // trip case is additionally guarded by
+        // assertTripBelongsToVehicle above which would have
+        // surfaced a 400 first when both sides are non-null.
+        throw new NotFoundException(`Expense log ${id} not found`);
+      }
+      throw mapExpenseLogWriteError(error, {
+        vehicleId: existing.vehicleId,
+        tripId: input.tripId ?? null,
+      });
+    }
+  }
+
+  /**
+   * Hard delete an ExpenseLog. P2025 (delete targets a non-existent
+   * row) maps to NotFoundException.
+   *
+   * ExpenseLog has no inbound FKs from other aggregates in Phase 1
+   * (no other model FK-references it under `onDelete: Restrict`),
+   * so the delete path has no 409-delete-blocker branch today. A
+   * future Reports v1 aggregate may materialize per-expense
+   * summaries; if any of those add an FK to ExpenseLog under
+   * Restrict, this method will gain the same P2003 →
+   * ConflictException treatment the Customer / Vehicle deletes
+   * have today.
+   *
+   * Returns void on success; the controller responds 204 No
+   * Content.
+   */
+  async delete(id: string): Promise<void> {
+    try {
+      await this.prisma.expenseLog.delete({ where: { id } });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2025") {
+        throw new NotFoundException(`Expense log ${id} not found`);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Look up the trip and assert its `vehicleId` matches the
+   * supplied one. Throws BadRequestException with both registration
+   * numbers named on mismatch, and a generic "trip not found"
+   * BadRequest on a missing trip (the Prisma FK would also catch a
+   * missing trip on insert as P2003, but surfacing the
+   * service-layer check up front makes the error message friendlier
+   * — the operator sees "Trip <id> does not exist" instead of a
+   * stale-FK framing).
+   *
+   * The trip lookup pulls the vehicle's registrationNumber via a
+   * nested select so the error message can name it; if the trip's
+   * vehicle is missing somehow (it shouldn't be — Trip.vehicleId is
+   * NOT NULL and Vehicle deletes are Restrict-blocked), we fall
+   * back to ids.
+   *
+   * Mirror of FuelLogsService.assertTripBelongsToVehicle. Both
+   * sides are guaranteed non-null at the call sites (create /
+   * update guard with `if (input.tripId && input.vehicleId)` and
+   * `if (has("tripId") && input.tripId && existing.vehicleId)`).
+   */
+  private async assertTripBelongsToVehicle(tripId: string, vehicleId: string): Promise<void> {
+    const trip = await this.prisma.trip.findUnique({
+      where: { id: tripId },
+      select: {
+        id: true,
+        vehicleId: true,
+        vehicle: { select: { registrationNumber: true } },
+      },
+    });
+    if (!trip) {
+      throw new BadRequestException(`Trip ${tripId} does not exist.`);
+    }
+    if (trip.vehicleId !== vehicleId) {
+      const thisVehicle = await this.prisma.vehicle.findUnique({
+        where: { id: vehicleId },
+        select: { registrationNumber: true },
+      });
+      const tripRegistration = trip.vehicle?.registrationNumber ?? trip.vehicleId;
+      const thisRegistration = thisVehicle?.registrationNumber ?? vehicleId;
+      throw new BadRequestException(
+        `Trip ${tripId} is for vehicle ${tripRegistration}, not vehicle ${thisRegistration}.`,
+      );
+    }
+  }
+}
+
+/**
+ * Translate a Prisma write error into a domain-level exception. The
+ * iter-22 kickoff §"FK validation mapping" follows the Fuel logs
+ * iter-20 precedent: P2003 on `vehicleId` / `tripId` /
+ * `createdById` surfaces as HTTP 400 with the offending id named
+ * verbatim in the message. The web action layer parses the message
+ * to route the inline error back to the right form field.
+ *
+ * Unknown FK names fall back to a generic 400 that names the
+ * vehicleId when one was supplied (the more common picker error);
+ * when vehicleId is null (a vehicle-agnostic create) we name the
+ * tripId, which is the only remaining client-supplied FK.
+ *
+ * Errors that aren't recognized propagate unchanged so NestJS's
+ * default exception filter can map them to 500.
+ */
+function mapExpenseLogWriteError(
+  error: unknown,
+  context: { vehicleId: string | null; tripId: string | null; createdById?: string },
+): unknown {
+  if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2003") {
+    const meta = error.meta as { field_name?: string; constraint?: string } | undefined;
+    const fieldName = String(meta?.field_name ?? meta?.constraint ?? "").toLowerCase();
+    if (fieldName.includes("trip")) {
+      return new BadRequestException(`Trip ${context.tripId ?? "?"} does not exist.`);
+    }
+    if (fieldName.includes("createdby") && context.createdById) {
+      return new BadRequestException(
+        `Authenticated user "${context.createdById}" no longer exists; sign in again.`,
+      );
+    }
+    if (fieldName.includes("vehicle")) {
+      return new BadRequestException(`Vehicle ${context.vehicleId ?? "?"} does not exist.`);
+    }
+    // Unknown FK name — name the supplied id that the operator's
+    // picker most likely staled. The web action layer parses the
+    // message to route the inline error to the right form field.
+    if (context.vehicleId) {
+      return new BadRequestException(`Vehicle ${context.vehicleId} does not exist.`);
+    }
+    if (context.tripId) {
+      return new BadRequestException(`Trip ${context.tripId} does not exist.`);
+    }
+  }
+  return error;
 }
