@@ -43,6 +43,9 @@ export default async function HomePage() {
           <Button asChild variant="outline" className="w-full justify-start">
             <Link href="/expense-logs">Expense logs</Link>
           </Button>
+          <Button asChild variant="outline" className="w-full justify-start">
+            <Link href="/reports/per-vehicle-cost">Per-vehicle cost report</Link>
+          </Button>
         </nav>
         <SignOutButton />
       </div>
