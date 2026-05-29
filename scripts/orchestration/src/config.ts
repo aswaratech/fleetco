@@ -13,9 +13,13 @@ const DEFAULT_REPO_ROOT = path.resolve(ORCHESTRATION_DIR, "..", "..");
 
 const Schema = z.object({
   ANTHROPIC_API_KEY: z.string().optional(),
-  ORCHESTRATION_PRIMARY_MODEL: z.string().default("claude-opus-4-7"),
+  ORCHESTRATION_PRIMARY_MODEL: z.string().default("claude-opus-4-8"),
   ORCHESTRATION_FALLBACK_MODEL: z.string().default("claude-sonnet-4-6"),
   ORCHESTRATION_HAIKU_MODEL: z.string().default("claude-haiku-4-5-20251001"),
+  // Reasoning effort for the per-ticket session. Requires claude-agent-sdk
+  // >=0.3.x (native `effort` option) and a model + account that support the
+  // chosen level. "max" = deepest reasoning, highest token / rate-limit cost.
+  ORCHESTRATION_EFFORT: z.enum(["low", "medium", "high", "max", "xhigh"]).default("max"),
   SLACK_WEBHOOK_URL: z.string().url().optional(),
   SLACK_BOT_TOKEN: z.string().optional(),
   SLACK_APP_TOKEN: z.string().optional(),
