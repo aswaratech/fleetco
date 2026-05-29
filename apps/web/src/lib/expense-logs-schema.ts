@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { paisaToRupeesInput, rupeesToPaisa } from "./fuel-logs-schema";
+import { paisaToRupeesInput, rupeesToPaisa } from "./money";
 
 // Web-side form schemas for the Expense-logs write path (iter 22).
 // Mirrors the API's CreateExpenseLogSchema / UpdateExpenseLogSchema
@@ -267,9 +267,12 @@ export type UpdateExpenseLogFormInput = z.input<typeof UpdateExpenseLogFormSchem
 // ---------------------------------------------------------------------
 // Wire converters — turn the human-decimal form value into the integer
 // paisa the API expects. Used by the action layer. We re-export
-// rupeesToPaisa and paisaToRupeesInput from fuel-logs-schema rather
-// than duplicating them; they are pure helpers on (number) ↔ (string)
-// with no fuel-specific semantics.
+// rupeesToPaisa and paisaToRupeesInput from the canonical `./money`
+// module rather than duplicating them; they are generic NPR
+// decimal-rupees↔integer-paisa helpers with no expense-specific
+// semantics. (They previously lived in `./fuel-logs-schema`; relocating
+// them to `./money` discharged a tech-debt entry — see
+// docs/tech-debt.md.)
 // ---------------------------------------------------------------------
 
 export { rupeesToPaisa, paisaToRupeesInput };

@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { paisaToRupeesInput, rupeesToPaisa } from "./money";
+
 // Web-side form schemas for the Fuel-logs write path (iter 20). Mirrors
 // the API's CreateFuelLogSchema / UpdateFuelLogSchema (apps/api/src/
 // modules/fuel-logs/fuel-logs.schemas.ts) at the field level. The API
@@ -314,19 +316,24 @@ export type UpdateFuelLogFormInput = z.input<typeof UpdateFuelLogFormSchema>;
 
 // ---------------------------------------------------------------------
 // Wire converters — turn the human-decimal form values into the
-// integer mL / paisa the API expects. Used by the action layer.
-// Math.round (half-up) matches the API's deriveTotalCostPaisa
-// rounding — keeping the same rounding rule on both sides of the wire
-// means the operator's preview matches the persisted value bit-for-bit.
+// integer mL the API expects. Used by the action layer. Math.round
+// (half-up) matches the API's deriveTotalCostPaisa rounding — keeping
+// the same rounding rule on both sides of the wire means the operator's
+// preview matches the persisted value bit-for-bit.
+//
+// The NPR money converters (`rupeesToPaisa` / `paisaToRupeesInput`) were
+// first written here but now live in the canonical `./money` module
+// next to `formatNpr` — they are generic decimal-rupees↔integer-paisa
+// logic with no fuel-specific semantics. They are re-exported below so
+// the existing call-sites that import them from this module keep working
+// unchanged.
 // ---------------------------------------------------------------------
 
 export function litersToMl(liters: number): number {
   return Math.round(liters * 1000);
 }
 
-export function rupeesToPaisa(rupees: number): number {
-  return Math.round(rupees * 100);
-}
+export { rupeesToPaisa, paisaToRupeesInput };
 
 // Preview helper: compute the total-cost preview the create / edit
 // forms render as a read-only paisa value, given the parsed decimal
@@ -346,17 +353,13 @@ export function previewTotalCostPaisa(
   return Math.round(liters * pricePerLiter * 100);
 }
 
-// Inverse helpers for the edit form's defaultValues — turn the persisted
-// integer mL / paisa back into the operator-readable decimal strings the
-// form inputs accept. We do NOT use formatLiters / formatNpr here: those
-// helpers add the unit suffix and locale grouping, neither of which an
-// `<input type="number">` accepts.
+// Inverse helper for the edit form's defaultValues — turn the persisted
+// integer mL back into the operator-readable decimal string the form
+// inputs accept. We do NOT use formatLiters here: it adds the unit
+// suffix, which an `<input type="number">` rejects. (The paisa inverse,
+// `paisaToRupeesInput`, now lives in `./money` and is re-exported above.)
 export function mlToLitersInput(ml: number): string {
   // mL → L with three decimals. toFixed(3) preserves trailing zeros
   // (e.g. 12000 → "12.000") which is fine for `<input type="number">`.
   return (ml / 1000).toFixed(3);
-}
-
-export function paisaToRupeesInput(paisa: number): string {
-  return (paisa / 100).toFixed(2);
 }
