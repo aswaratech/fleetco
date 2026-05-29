@@ -1,15 +1,15 @@
 import { ExpenseCategory } from "@prisma/client";
 import { z } from "zod";
 
-// Zod schemas for the Expense-logs slice. Iter 21 ships the read path
-// (ListExpenseLogsQuerySchema only); iter 22 will layer the write
-// schemas (CreateExpenseLogSchema, UpdateExpenseLogSchema) into the
-// same file alongside this one — the same one-file-per-slice
-// convention every other vertical-slice module uses.
+// Zod schemas for the Expense-logs slice. Iter 21 shipped the read
+// path (ListExpenseLogsQuerySchema); iter 22 layers the write schemas
+// (CreateExpenseLogSchema, UpdateExpenseLogSchema) into the same file
+// alongside this one — the same one-file-per-slice convention every
+// other vertical-slice module uses.
 //
 // Mirrors apps/api/src/modules/fuel-logs/fuel-logs.schemas.ts (iter
-// 19 → iter 20) in shape and convention. The iter-21 kickoff names
-// the Fuel logs read path as the canonical reference shape — same
+// 19 → iter 20) in shape and convention. The iter-22 kickoff names
+// the Fuel logs write path as the canonical reference shape — same
 // `.strict()` discipline (a typo'd key surfaces as HTTP 400), the
 // same intParam helper for coerced bounds, and the same per-aggregate
 // MAX_TAKE that mirrors the service-side LIST_TAKE_MAX.
@@ -138,30 +138,197 @@ export const ListExpenseLogsQuerySchema = z
 export type ListExpenseLogsQuery = z.infer<typeof ListExpenseLogsQuerySchema>;
 
 // ---------------------------------------------------------------------
-// Iter 22 placeholder — write-path schemas land here.
+// Write-path schemas (iter 22) — POST and PATCH bodies.
 // ---------------------------------------------------------------------
-// The iter-22 write path will add `CreateExpenseLogSchema` and
-// `UpdateExpenseLogSchema` below, mirroring the Fuel logs iter-20
-// write schemas. Notable differences vs. Fuel logs:
 //
-//   - `vehicleId` is OPTIONAL + NULLABLE on the create body. The
-//     CEO can log a vehicle-agnostic expense (the quarterly
-//     insurance premium, office stationery) and the create form's
-//     vehicle picker will include an explicit "(none — not
-//     vehicle-attributable)" option.
+// Both schemas are `.strict()` so an unexpected key (e.g. a client
+// trying to set `createdById` directly, or a typo'd field name)
+// surfaces as HTTP 400 with a clear message rather than being
+// silently dropped. Two server-controlled fields rely on this
+// strictness:
 //
-//   - `vehicleId` becomes IMMUTABLE post-create on PATCH (the same
-//     `.strict()` rejection FuelLog uses, for the same "rewriting
-//     history" rationale — once an expense is attributed to a
+//   - `createdById` is derived from the authenticated session and
+//     must never be accepted from the wire (same rule every other
+//     aggregate enforces — Vehicles, Drivers, Customers, Jobs,
+//     Trips, Fuel logs).
+//
+//   - `id` / `createdAt` / `updatedAt` are out of scope on the wire
+//     by Prisma convention. The `.strict()` enforces it.
+//
+// Notable shape differences vs. the Fuel logs iter-20 write schemas
+// the iter-22 kickoff points at as the reference shape:
+//
+//   - `vehicleId` is OPTIONAL + NULLABLE on POST. The CEO can log a
+//     vehicle-agnostic expense (the quarterly insurance premium,
+//     office stationery) and the create form's vehicle picker
+//     includes an explicit "(none — not vehicle-attributable)"
+//     option. Fuel logs requires vehicleId because a fill is always
+//     attributed to a tank.
+//
+//   - `vehicleId` is IMMUTABLE on PATCH (NOT in the update shape;
+//     `.strict()` rejects it). Same "rewriting history" rationale
+//     Fuel logs documents — once an expense is attributed to a
 //     vehicle, changing the FK silently rewrites the per-vehicle
-//     cost report's basis; re-create the expense against the
+//     cost report's basis. Re-create the expense against the
 //     correct vehicle when the operator realises the original was
-//     mis-attributed).
+//     mis-attributed.
 //
-//   - `tripId` stays MUTABLE on PATCH (same reasoning as Fuel logs:
-//     pairing / unpairing an expense with a trip is a routine
-//     post-create correction).
+//   - `tripId` is OPTIONAL + NULLABLE on POST and MUTABLE on PATCH
+//     (same reasoning as Fuel logs: pairing / unpairing an expense
+//     with a trip is a routine post-create correction).
 //
-//   - No derived-field rule (the Fuel logs `totalCostPaisa`
-//     equivalent does not exist here; `amountPaisa` is the
-//     authoritative entered value, not a product of two factors).
+//   - No derived field. Fuel logs' `totalCostPaisa` is computed
+//     server-side from `litersMl * pricePerLiterPaisa / 1000`; the
+//     `.strict()` blocks the wire from setting it. An expense log
+//     has no equivalent: `amountPaisa` is the authoritative entered
+//     value, not a product of two factors. The schema accepts
+//     `amountPaisa` directly on both POST and PATCH.
+//
+//   - Cross-field rule (trip-vehicle consistency) fires only when
+//     BOTH `tripId` AND `vehicleId` are present on the merged shape.
+//     If either is null (or omitted on a PATCH that does not touch
+//     them and the stored row is null), the check is skipped —
+//     pairing a vehicle-agnostic expense with a trip is allowed, as
+//     is logging a vehicle expense without trip attribution.
+
+// Amount bounds (paisa, 1/100 NPR). Ceiling: NPR 100,000,000 =
+// 10_000_000_000 paisa — well within JS safe-integer range and well
+// above any realistic single expense; a typo'd extra digit (or a
+// rupees-vs-paisa unit mistake) fails the schema rather than ending
+// up in a per-vehicle cost report. Lower bound 1 paisa: a zero-amount
+// expense is a corrupted record, not a legitimate one.
+const AMOUNT_PAISA_MIN = 1;
+const AMOUNT_PAISA_MAX = 10_000_000_000;
+
+// Free-form text bounds. Vendor / receiptNumber / notes columns are
+// `String?` (unbounded in Postgres); the ceilings here keep the
+// surface predictable. Vendor is roomier than the Fuel logs
+// `station` cap (256) because an expense vendor name often includes
+// a full legal entity ("XYZ Auto Workshop and Service Center Pvt.
+// Ltd."). ReceiptNumber stays tight (real-world receipts are 10–30
+// chars); notes is roomy because the operator may attach context.
+const VENDOR_MAX = 256;
+const RECEIPT_NUMBER_MAX = 64;
+const NOTES_MAX = 4096;
+
+const AmountPaisa = z
+  .number({ error: () => "amountPaisa must be an integer." })
+  .int("amountPaisa must be an integer.")
+  .min(AMOUNT_PAISA_MIN, `amountPaisa must be ${AMOUNT_PAISA_MIN} or greater.`)
+  .max(AMOUNT_PAISA_MAX, `amountPaisa must be ${AMOUNT_PAISA_MAX} or less.`);
+
+const Vendor = z
+  .string()
+  .trim()
+  .max(VENDOR_MAX, `Vendor must be at most ${VENDOR_MAX} characters.`);
+
+const ReceiptNumber = z
+  .string()
+  .trim()
+  .max(RECEIPT_NUMBER_MAX, `Receipt number must be at most ${RECEIPT_NUMBER_MAX} characters.`);
+
+const Notes = z.string().max(NOTES_MAX, `Notes must be at most ${NOTES_MAX} characters.`);
+
+// `date` accepts YYYY-MM-DD or ISO 8601 strings (and any value that
+// `new Date(...)` can parse). The coerced Date is what reaches the
+// service. Mirror of the date helpers in fuel-logs.schemas.ts /
+// jobs.schemas.ts.
+const ExpenseLogDate = z.coerce.date({
+  error: () => "Must be a valid date (YYYY-MM-DD or ISO 8601).",
+});
+
+// Category accepts any of the eight ExpenseCategory enum values.
+// Same source-of-truth as the list filter — adding a ninth value
+// via a future Prisma migration automatically widens both contracts.
+const Category = z.enum(ExpenseCategory);
+
+// cuid shape for write-path FK ids. Tighter than the Jobs
+// `customerId` filter (which accepts any non-empty string) — the
+// iter-22 write path scopes FK ids to cuid the same way the
+// read-path filters do. The service translates an invalid (but
+// cuid-shaped) id into a Prisma P2003 → 400 with a field-level
+// error if it slips through.
+const Cuid = z
+  .string()
+  .trim()
+  .min(1, "Required.")
+  .regex(/^c[a-z0-9]{8,}$/i, "Must be a valid id.");
+
+/**
+ * POST /api/v1/expense-logs body schema. Required: date, category,
+ * amountPaisa. Optional + nullable: vehicleId (a vehicle-agnostic
+ * expense like the quarterly insurance premium is a valid row),
+ * tripId (an expense may or may not be paired with a trip), vendor,
+ * receiptNumber, notes.
+ *
+ * `createdById` is excluded; the controller pulls it from the
+ * authenticated session per ADR-0021.
+ *
+ * Cross-field rule: when BOTH `tripId` AND `vehicleId` are present,
+ * the referenced Trip's `vehicleId` must match this expense log's
+ * `vehicleId`. The check cannot run at the schema layer (it needs a
+ * database lookup) and so is enforced at the service layer; see
+ * ExpenseLogsService.create. When either is null/omitted, the check
+ * is skipped — pairing a vehicle-agnostic expense with a trip is
+ * allowed, and so is logging a vehicle expense without trip
+ * attribution.
+ */
+export const CreateExpenseLogSchema = z
+  .object({
+    vehicleId: Cuid.nullable().optional(),
+    tripId: Cuid.nullable().optional(),
+    date: ExpenseLogDate,
+    category: Category,
+    amountPaisa: AmountPaisa,
+    vendor: Vendor.nullable().optional(),
+    receiptNumber: ReceiptNumber.nullable().optional(),
+    notes: Notes.nullable().optional(),
+  })
+  .strict();
+
+export type CreateExpenseLogInput = z.infer<typeof CreateExpenseLogSchema>;
+
+/**
+ * PATCH /api/v1/expense-logs/:id body schema. Every mutable field is
+ * optional (diff-PATCH semantics, mirror of FuelLogsService.update /
+ * JobsService.update / CustomersService.update).
+ *
+ * One immutable field is NOT in the shape and so `.strict()` rejects
+ * any attempt to set it:
+ *
+ *   - `vehicleId` — an expense log records a fact about which
+ *     vehicle the cost is attributed to. Changing the FK silently
+ *     rewrites the per-vehicle cost report's basis (a maintenance
+ *     bill that landed against vehicle A becomes a bill against
+ *     vehicle B, and any report computed against the original FK
+ *     becomes a lie). Re-creating the expense against the right
+ *     vehicle is the right move when the operator realises the
+ *     original was mis-attributed. Same precedent as the Jobs
+ *     iter-18 immutability of `customerId` and the Fuel-logs
+ *     iter-20 immutability of `vehicleId`.
+ *
+ * `tripId` IS in the shape: pairing / unpairing an expense with a
+ * trip is a routine post-create correction (the operator may not
+ * know which trip an expense belongs to until the trip is created
+ * and they reconcile receipts). Setting tripId to null explicitly
+ * clears the pairing. The service re-runs the trip-vehicle-
+ * consistency check against the merged shape (stored row + patch)
+ * when tripId is touched and both tripId and vehicleId end up
+ * non-null on the merged shape.
+ */
+export const UpdateExpenseLogSchema = z
+  .object({
+    tripId: Cuid.nullable().optional(),
+    date: ExpenseLogDate.optional(),
+    category: Category.optional(),
+    amountPaisa: AmountPaisa.optional(),
+    vendor: Vendor.nullable().optional(),
+    receiptNumber: ReceiptNumber.nullable().optional(),
+    notes: Notes.nullable().optional(),
+  })
+  .strict()
+  .refine((data) => Object.keys(data).length > 0, {
+    message: "At least one field is required.",
+  });
+
+export type UpdateExpenseLogInput = z.infer<typeof UpdateExpenseLogSchema>;
