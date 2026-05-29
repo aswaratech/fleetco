@@ -19,6 +19,13 @@ const envSchema = z.object({
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
   PORT: z.coerce.number().int().positive().default(3001),
   SENTRY_DSN: z.preprocess(emptyStringAsUndefined, z.string().url().optional()),
+  // OpenTelemetry OTLP/HTTP traces endpoint (ADR-0024). Optional URL,
+  // empty-string -> undefined, mirroring SENTRY_DSN exactly. When unset
+  // (the Phase-1 default) no OTLP exporter is built and the API ships no
+  // OTLP telemetry; when set, spans fan out to both Sentry and this
+  // collector. Value is the full traces URL (e.g.
+  // https://collector.example.com/v1/traces), not the OTel-base endpoint.
+  OTEL_EXPORTER_OTLP_ENDPOINT: z.preprocess(emptyStringAsUndefined, z.string().url().optional()),
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("info"),
   DATABASE_URL: z.string().url(),
   REDIS_URL: z.string().url(),
