@@ -1,11 +1,13 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
+import { Button } from "@/components/ui/button";
 import { apiFetch, ApiError } from "@/lib/api";
 import { formatNpr } from "@/lib/money";
 import { getServerSession } from "@/lib/session";
 
 import { EXPENSE_CATEGORY_LABELS, type ExpenseCategory, type ExpenseLogDetail } from "../types";
+import { DeleteExpenseLogDialog } from "./delete-expense-log-dialog";
 
 // Expense log detail — iter 21 of the Expense-logs slice (read path).
 // Server-rendered shell (auth gate via getServerSession; redirect to
@@ -103,8 +105,16 @@ export default async function ExpenseLogDetailPage({
               · {categoryLabel} · {formatNpr(expense.amountPaisa)}
             </p>
           </div>
-          {/* Iter 21 ships the read path; the Edit / Delete CTAs land
-              with the iter-22 write path. */}
+          {/* Edit + Delete CTAs (iter 22). Mirror of the Fuel logs /
+              Jobs / Customers / Drivers / Vehicles header cluster.
+              The Delete button opens a confirmation dialog (client
+              island); Edit links to /expense-logs/<id>/edit. */}
+          <div className="flex items-center gap-2">
+            <Button asChild variant="outline">
+              <Link href={`/expense-logs/${expense.id}/edit`}>Edit</Link>
+            </Button>
+            <DeleteExpenseLogDialog id={expense.id} dateLabel={formatDate(expense.date)} />
+          </div>
         </header>
 
         {expense.vehicle ? (

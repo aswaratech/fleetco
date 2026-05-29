@@ -355,9 +355,15 @@ export default async function ExpenseLogsPage({
                 : `${data.total} on file.`}
             </p>
           </div>
-          {/* No "Log expense" CTA in iter 21 (read path). Iter 22's
-              write path adds it (mirror of the Fuel logs iter-19 →
-              iter-20 header change). */}
+          {/* "New expense" CTA (iter 22). Mirror of the Fuel logs /
+              Jobs / Customers / Drivers / Vehicles header CTA
+              cluster. The new-expense-log shell at /expense-logs/new
+              gates auth and pre-fetches the vehicle + trip pickers
+              (vehicle is optional — vehicle-agnostic expenses are a
+              first-class shape). */}
+          <Button asChild>
+            <Link href="/expense-logs/new">New expense</Link>
+          </Button>
         </header>
 
         <ExpenseLogsFilters startDate={startDate} endDate={endDate} category={category} />
@@ -368,10 +374,15 @@ export default async function ExpenseLogsPage({
               {hasActiveFilter ? (
                 <p>No expenses match the current filters.</p>
               ) : (
-                // iter 22 turns "Log the first one." into a
-                // /expense-logs/new link; in the read-only iter it's
-                // plain copy.
-                <p>No expenses on file. Log the first one.</p>
+                <p>
+                  No expenses on file.{" "}
+                  <Link
+                    href="/expense-logs/new"
+                    className="text-text-primary hover:text-text-secondary underline underline-offset-4"
+                  >
+                    Log the first one.
+                  </Link>
+                </p>
               )}
             </div>
           ) : (
