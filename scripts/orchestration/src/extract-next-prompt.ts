@@ -153,6 +153,29 @@ export function isNextPromptTooShort(prompt: string): boolean {
   return trimmed.length > 0 && trimmed.length < MIN_NEXT_PROMPT_LENGTH;
 }
 
+// ---------- Program-done sentinel ----------
+
+// The agent signals an exhausted program by emitting exactly
+// "STOP — program complete" (em-dash or hyphen, any case) on its own
+// line inside the next-prompt fenced block. The `m` flag matches that
+// line anywhere in the text so the sentinel is recognized whether it
+// arrives as the whole extracted prompt or as a line within a larger
+// kickoff blob.
+const PROGRAM_DONE_SENTINEL = /^\s*STOP\s*[—-]\s*program\s+complete\s*$/im;
+
+// True when the prompt is (or contains a line that is) the program-done
+// sentinel. This MUST be checked before isNextPromptTooShort: the
+// sentinel is intentionally ~23 chars, far below MIN_NEXT_PROMPT_LENGTH,
+// so a length-floor check that ran first would mislabel a legitimate
+// program completion as next_prompt_too_short → loop_error. (That is
+// exactly what happened at the end of FleetCo's Phase-1 program: iter 23
+// emitted the sentinel and the loop reported loop_error instead of
+// program_complete.) Recognizing the sentinel here lets the caller halt
+// cleanly as program_complete regardless of length.
+export function isProgramDoneSentinel(prompt: string): boolean {
+  return PROGRAM_DONE_SENTINEL.test(prompt);
+}
+
 // ---------- Public API ----------
 
 export interface ExtractOptions {

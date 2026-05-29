@@ -7,6 +7,7 @@ import {
   extractTier1,
   extractTier2,
   isNextPromptTooShort,
+  isProgramDoneSentinel,
   MIN_NEXT_PROMPT_LENGTH,
 } from "../src/extract-next-prompt.js";
 import type { HaikuExtractor, PrBodyFetcher } from "../src/extract-next-prompt.js";
@@ -253,5 +254,62 @@ describe("isNextPromptTooShort — length floor", () => {
     // if whitespace padding pushes its raw length over the floor.
     const padded = " ".repeat(MIN_NEXT_PROMPT_LENGTH) + "short body" + " ".repeat(100);
     expect(isNextPromptTooShort(padded)).toBe(true);
+  });
+});
+
+describe("isProgramDoneSentinel — program-complete signal", () => {
+  // The agent emits "STOP — program complete" inside its next-prompt
+  // fenced block when a program is exhausted. The loop must recognize it
+  // as program_complete, NOT next_prompt_too_short.
+
+  it("matches the canonical em-dash form", () => {
+    expect(isProgramDoneSentinel("STOP — program complete")).toBe(true);
+  });
+
+  it("matches the hyphen form", () => {
+    expect(isProgramDoneSentinel("STOP - program complete")).toBe(true);
+  });
+
+  it("is case-insensitive", () => {
+    expect(isProgramDoneSentinel("stop — Program Complete")).toBe(true);
+  });
+
+  it("matches with surrounding whitespace / newlines (as extracted from a fenced block)", () => {
+    expect(isProgramDoneSentinel("\n  STOP — program complete  \n")).toBe(true);
+  });
+
+  it("matches when the sentinel is one line within a larger blob (the kickoff.md case)", () => {
+    const blob = "## Next-session prompt\n\nSTOP — program complete\n";
+    expect(isProgramDoneSentinel(blob)).toBe(true);
+  });
+
+  it("does NOT match a normal full kickoff", () => {
+    const kickoff = "## Program\n\nShip the next slice.\n## Ticket\n" + "x".repeat(9000);
+    expect(isProgramDoneSentinel(kickoff)).toBe(false);
+  });
+
+  it("does NOT match prose that merely mentions stopping or completion", () => {
+    // The sentinel must be its own line, not a phrase embedded in a
+    // sentence — otherwise a kickoff discussing "when to STOP" or a
+    // "program complete" milestone would false-positive.
+    expect(isProgramDoneSentinel("Do not STOP the program before it is complete.")).toBe(false);
+    expect(isProgramDoneSentinel("The program is complete when all slices ship.")).toBe(false);
+  });
+
+  it("does NOT match an empty prompt", () => {
+    expect(isProgramDoneSentinel("")).toBe(false);
+  });
+
+  // Regression pin for the precedence bug this helper exists to fix.
+  // The canonical sentinel is ~23 chars — simultaneously BELOW the
+  // length floor (isNextPromptTooShort === true) AND a valid program-done
+  // signal. The loop MUST check isProgramDoneSentinel first; if it ran
+  // the length floor first it would mislabel a clean completion as
+  // next_prompt_too_short → loop_error (the iter-23 Phase-1 failure).
+  it("the sentinel is both too-short AND program-done (so order matters in the caller)", () => {
+    const sentinel = "STOP — program complete";
+    expect(sentinel.length).toBeLessThan(MIN_NEXT_PROMPT_LENGTH);
+    expect(isNextPromptTooShort(sentinel)).toBe(true);
+    expect(isProgramDoneSentinel(sentinel)).toBe(true);
   });
 });

@@ -21,12 +21,11 @@ import {
   extractNextPrompt,
   defaultPrBodyFetcher,
   isNextPromptTooShort,
+  isProgramDoneSentinel,
   MIN_NEXT_PROMPT_LENGTH,
 } from "./extract-next-prompt.js";
 import { stripFabricatedPreambles } from "./strip-fabricated.js";
 import type { LoopState, RateLimitWaitInfo } from "./types.js";
-
-const PROGRAM_DONE_SENTINEL = /^\s*STOP\s*[—-]\s*program\s+complete\s*$/im;
 
 async function main(): Promise<void> {
   // ---------- Startup ----------
@@ -85,8 +84,10 @@ async function main(): Promise<void> {
     }
 
     // Program-done sentinel: the agent outputs "STOP — program complete" inside the next-prompt block
-    // when the program is exhausted. The previous iter's extractor wrote that to kickoff.md.
-    if (PROGRAM_DONE_SENTINEL.test(kickoff)) {
+    // when the program is exhausted. The previous iter's extractor wrote that to kickoff.md (or the
+    // operator wrote it by hand). The post-merge extraction path below also checks the sentinel
+    // directly so a completion is recognized in the same iteration it is emitted.
+    if (isProgramDoneSentinel(kickoff)) {
       await notify(
         { milestone: "program_complete", iteration: state.iteration },
         ":checkered_flag: Program complete. The agent signaled STOP. Operator can start a new program by overwriting kickoff.md.",
@@ -236,6 +237,26 @@ async function main(): Promise<void> {
         7,
         state,
       );
+    }
+    // Program-done sentinel — checked BEFORE the length floor below.
+    // The agent signals an exhausted program with "STOP — program
+    // complete" (~23 chars) inside its next-prompt block. That is far
+    // under MIN_NEXT_PROMPT_LENGTH, so without this check the length
+    // floor fires first and mislabels a clean completion as
+    // next_prompt_too_short → loop_error (exactly what happened at the
+    // end of FleetCo's Phase-1 program: iter 23 emitted the sentinel and
+    // the loop reported loop_error). Recognize it here and halt cleanly
+    // as program_complete, the same terminal state the top-of-loop
+    // kickoff check produces.
+    if (isProgramDoneSentinel(extracted.prompt)) {
+      await notify(
+        { milestone: "program_complete", iteration: state.iteration },
+        ":checkered_flag: Program complete. The agent signaled STOP in its next-prompt block. Operator can start a new program by overwriting kickoff.md.",
+      );
+      appendDecision({ milestone: "program_complete", iteration: state.iteration });
+      state = { ...state, programDoneSentinelSeen: true };
+      saveState(state);
+      break;
     }
     // Length floor: a prompt that extracted cleanly but is too short is
     // almost always an agent-compressed kickoff that dropped the
