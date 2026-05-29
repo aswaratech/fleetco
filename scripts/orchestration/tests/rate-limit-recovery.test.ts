@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   computeWaitFromEvent,
+  computeWaitFromRateLimitEvent,
   parseWaitFromException,
   sleepUntil,
 } from "../src/rate-limit-recovery.js";
@@ -169,5 +170,55 @@ describe("sleepUntil", () => {
       onTick: (remaining) => ticks.push(remaining),
     });
     expect(ticks.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("computeWaitFromRateLimitEvent (claude-agent-sdk >=0.3.x shape)", () => {
+  // resetsAt as unix SECONDS (the SDK type leaves the unit undocumented).
+  const futureSec = 1_700_000_900;
+
+  it("waits when status is rejected, normalising seconds to ms", () => {
+    const info = computeWaitFromRateLimitEvent({
+      rate_limit_info: { status: "rejected", resetsAt: futureSec },
+    });
+    expect(info).not.toBeNull();
+    // Seconds are normalised to ms: the result is identical to feeding the
+    // equivalent ms value to computeWaitFromEvent (same default buffer). If the
+    // seconds value were mistakenly treated as ms, resumesAt would be ~1970 and
+    // fall far below futureSec*1000.
+    const viaMs = computeWaitFromEvent({ resetsAt: futureSec * 1000 });
+    expect(info!.resumesAt.getTime()).toBe(viaMs!.resumesAt.getTime());
+    expect(info!.resumesAt.getTime()).toBeGreaterThanOrEqual(futureSec * 1000);
+    expect(info!.source).toBe("first_class_event");
+  });
+
+  // The event also fires for benign utilization updates that carry a future
+  // resetsAt; these must NOT put the loop to sleep. Regression guard for the
+  // 0.1.77 -> 0.3.x shape change (resetsAt moved under rate_limit_info and
+  // gained a status field).
+  it("does NOT wait on a benign 'allowed' event", () => {
+    expect(
+      computeWaitFromRateLimitEvent({
+        rate_limit_info: { status: "allowed", resetsAt: futureSec },
+      }),
+    ).toBeNull();
+  });
+
+  it("does NOT wait on an 'allowed_warning' event", () => {
+    expect(
+      computeWaitFromRateLimitEvent({
+        rate_limit_info: { status: "allowed_warning", resetsAt: futureSec },
+      }),
+    ).toBeNull();
+  });
+
+  it("returns null when rejected but resetsAt is absent", () => {
+    expect(
+      computeWaitFromRateLimitEvent({ rate_limit_info: { status: "rejected" } }),
+    ).toBeNull();
+  });
+
+  it("returns null when rate_limit_info is absent", () => {
+    expect(computeWaitFromRateLimitEvent({})).toBeNull();
   });
 });

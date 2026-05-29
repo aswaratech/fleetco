@@ -14,7 +14,11 @@ import { startSlackBot } from "./slack-bot.js";
 import { initialState, loadState, saveState } from "./state.js";
 import { buildPermissionShim } from "./permission-shim.js";
 import { createDetectorState, detectPr, recordBash } from "./pr-detection.js";
-import { computeWaitFromEvent, parseWaitFromException, sleepUntil } from "./rate-limit-recovery.js";
+import {
+  computeWaitFromRateLimitEvent,
+  parseWaitFromException,
+  sleepUntil,
+} from "./rate-limit-recovery.js";
 import { hasCiWorkflows, pollCi } from "./ci-poll.js";
 import { autoMerge } from "./auto-merge.js";
 import {
@@ -362,18 +366,23 @@ async function invokeAgentWithRetry(
         options: {
           model: env.ORCHESTRATION_PRIMARY_MODEL,
           fallbackModel: env.ORCHESTRATION_FALLBACK_MODEL,
+          effort: env.ORCHESTRATION_EFFORT,
           cwd: paths.repoRoot,
           maxTurns: limits.agentMaxTurns,
           canUseTool: shim,
         },
-      } as Parameters<typeof query>[0]);
+      });
 
       for await (const msg of stream as AsyncIterable<SDKMessage>) {
         const m = msg as SdkMessageLoose;
         if (debugMode) writeIterLine(`[${m.type}${m.subtype ? "/" + m.subtype : ""}]`);
 
         if (m.type === "rate_limit_event") {
-          waitInfo = computeWaitFromEvent(m as unknown as { resetsAt?: string | Date | number });
+          waitInfo = computeWaitFromRateLimitEvent(
+            m as unknown as {
+              rate_limit_info?: { status?: string; resetsAt?: number };
+            },
+          );
           if (waitInfo) break;
         }
 

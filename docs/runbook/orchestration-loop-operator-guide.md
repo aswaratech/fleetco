@@ -21,8 +21,10 @@ This is the daily reference for running the orchestration loop. The full design 
    cd scripts/orchestration
    pnpm install
    cp .env.example .env
-   # Edit .env: paste the three Slack tokens. Leave model env vars at defaults.
+   # Edit .env: paste the three Slack tokens. Leave model/effort env vars at
+   # defaults (primary model claude-opus-4-8, ORCHESTRATION_EFFORT=max).
    ```
+   Override `ORCHESTRATION_EFFORT` (`low|medium|high|max|xhigh`) only to trade reasoning depth for lower token / rate-limit cost. `max` needs an Opus 4.6+/Sonnet 4.6 model and an account with that effort level.
 
 4. **Verify with a dry run.** Without any kickoff.md:
    ```sh

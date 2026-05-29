@@ -2,8 +2,12 @@
 //
 // Principle 6 from docs/runbook/orchestration-loop-design.md: plan for rate
 // limits. Two flavors observed in the field run:
-//   1. First-class event: SDK emits `rate_limit_event` with status: 'rejected'
-//      and a `resetsAt` timestamp; sleep until resetsAt + buffer and re-fire.
+//   1. First-class event: SDK emits `rate_limit_event`. In claude-agent-sdk
+//      >=0.3.x the payload nests under `rate_limit_info`, an actual block is
+//      signalled by `rate_limit_info.status === "rejected"`, and the reset
+//      time is `rate_limit_info.resetsAt`; sleep until resetsAt + buffer and
+//      re-fire. (See computeWaitFromRateLimitEvent for the adapter; the
+//      pre-0.3.x flat shape with a top-level `resetsAt` no longer exists.)
 //   2. Thrown exception: mid-session a cap throws with human-language message
 //      "You've hit your limit · resets 5:25pm"; parse the time, sleep, re-fire.
 //
@@ -29,6 +33,29 @@ export function computeWaitFromEvent(
     reason: "rate_limit_event from SDK",
     source: "first_class_event",
   };
+}
+
+/**
+ * Adapt a `rate_limit_event` SDK message (claude-agent-sdk >=0.3.x shape) into
+ * a wait. The reset time is nested under `rate_limit_info.resetsAt` and an
+ * actual block is signalled by `rate_limit_info.status === "rejected"`. The
+ * event ALSO fires for benign "allowed"/"allowed_warning" utilization updates
+ * that carry a future `resetsAt` but must NOT trigger a sleep, so we gate on
+ * the rejected status first.
+ *
+ * `resetsAt` is a unix timestamp whose unit the SDK type does not document; we
+ * disambiguate by magnitude (a value below 1e12 is seconds, since 1e12 ms is
+ * only year 2001) and normalise to ms before delegating to computeWaitFromEvent.
+ */
+export function computeWaitFromRateLimitEvent(event: {
+  rate_limit_info?: { status?: string; resetsAt?: number };
+}): RateLimitWaitInfo | null {
+  const info = event?.rate_limit_info;
+  if (!info || info.status !== "rejected") return null;
+  const raw = info.resetsAt;
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) return null;
+  const resetMs = raw < 1e12 ? raw * 1000 : raw;
+  return computeWaitFromEvent({ resetsAt: resetMs });
 }
 
 // ---------- Thrown exception ----------
