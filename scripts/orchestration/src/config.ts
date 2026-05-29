@@ -19,9 +19,7 @@ const Schema = z.object({
   // Reasoning effort for the per-ticket session. Requires claude-agent-sdk
   // >=0.3.x (native `effort` option) and a model + account that support the
   // chosen level. "max" = deepest reasoning, highest token / rate-limit cost.
-  ORCHESTRATION_EFFORT: z
-    .enum(["low", "medium", "high", "max", "xhigh"])
-    .default("max"),
+  ORCHESTRATION_EFFORT: z.enum(["low", "medium", "high", "max", "xhigh"]).default("max"),
   SLACK_WEBHOOK_URL: z.string().url().optional(),
   SLACK_BOT_TOKEN: z.string().optional(),
   SLACK_APP_TOKEN: z.string().optional(),

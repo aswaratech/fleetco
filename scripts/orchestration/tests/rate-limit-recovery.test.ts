@@ -213,9 +213,7 @@ describe("computeWaitFromRateLimitEvent (claude-agent-sdk >=0.3.x shape)", () =>
   });
 
   it("returns null when rejected but resetsAt is absent", () => {
-    expect(
-      computeWaitFromRateLimitEvent({ rate_limit_info: { status: "rejected" } }),
-    ).toBeNull();
+    expect(computeWaitFromRateLimitEvent({ rate_limit_info: { status: "rejected" } })).toBeNull();
   });
 
   it("returns null when rate_limit_info is absent", () => {
