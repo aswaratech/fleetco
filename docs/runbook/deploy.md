@@ -13,15 +13,17 @@ Placeholders below — replace with real values, never commit them: `<vps-host>`
 
 ### Bootstrap (one-time, by hand on the box)
 
-1. Provision a 2–4 GB VPS (Hetzner/DigitalOcean/Linode) with provider disk encryption on. Point `<domain>` DNS at `<vps-host>` (A/AAAA).
-2. Install Docker Engine + the Compose plugin. Create `/opt/fleetco/`.
+1. Provision a 2–4 GB VPS (Hetzner/DigitalOcean/Linode) with provider disk encryption on. Point `<domain>` DNS at `<vps-host>` (A/AAAA). **CPU-architecture caveat:** ADR-0014 §1 specifies the `postgis/postgis:16-3.5` Postgres image, which the official registry publishes for **amd64 only** (see the comment in `.github/workflows/ci.yml`). If you provision an ARM/Ampere instance (e.g. Hetzner's cheapest CAX tier), that image will not run and the baseline migration's `CREATE EXTENSION postgis` will fail — so either pick an amd64/x86 instance to match ADR-0014, or substitute the multi-arch `imresamu/postgis:16-3.5` image the local dev compose already uses (`docker-compose.yml`). Do not change the image without re-checking the PostGIS version-compat note in `ci.yml`.
+2. Install Docker Engine + the Compose plugin. Create `/opt/fleetco/`. Authenticate the box to GHCR so it can pull the private `api`/`web` images: `docker login ghcr.io -u <github-user>` with a PAT (classic, `read:packages` scope). That PAT is a Tier-1 secret (ADR-0013) — keep it in the on-box secret store, not in shell history, and list it in `business-continuity.md`'s credential inventory. (Skip this only for a first, hand-bootstrapped deploy that builds images locally on the box per ADR-0014 "Alternatives.")
 3. Put `docker-compose.prod.yml` + `Caddyfile` in `/opt/fleetco/`. Caddy terminates TLS for `<domain>`, reverse-proxies `/api/*`, `/auth/*`, and `/health*` to the `api` service, and serves `web` otherwise (ADR-0014 §2).
 4. Create `/opt/fleetco/.env` — **root-owned, `chmod 600`, never committed** — with: `NODE_ENV=production`, `DATABASE_URL`, `REDIS_URL`, `BETTER_AUTH_SECRET` (`openssl rand -hex 32`), `BETTER_AUTH_URL=https://<domain>`, `CORS_ORIGIN=https://<domain>`, `NEXT_PUBLIC_API_URL=https://<domain>`, and optionally `SENTRY_DSN` / `OTEL_EXPORTER_OTLP_ENDPOINT`. Add `ADMIN_EMAIL` / `ADMIN_PASSWORD` for the one-time seed.
 5. Start the datastores first: `docker compose -f docker-compose.prod.yml up -d postgres redis`; wait for `postgres` healthy (`docker compose ps`).
 6. Apply migrations: `docker compose -f docker-compose.prod.yml run --rm api pnpm --filter @fleetco/api exec prisma migrate deploy`.
 7. Seed the admin once: `docker compose -f docker-compose.prod.yml run --rm api pnpm --filter @fleetco/api db:seed`.
 8. Bring up everything: `docker compose -f docker-compose.prod.yml up -d` (api, web, caddy). Run §Health below.
-9. Install the nightly backup cron (the dump → `age`-encrypt → upload-to-`<r2-bucket>` script; see `restore-from-backup.md`).
+9. Install the nightly backup cron (the `pg_dump` → `age`-encrypt → upload-to-`<r2-bucket>` script; see the **Backup (the create side)** section of `restore-from-backup.md` for the concrete commands and schedule).
+
+> **The production `api` image must carry the migrate + seed tooling.** Steps 6–7 (and the routine-deploy migrate) call `prisma migrate deploy` and `pnpm --filter @fleetco/api db:seed`. Today `db:seed` is `tsx scripts/seed-admin.ts`, and both `tsx` and the `prisma` CLI are **devDependencies** while the seed imports TypeScript source (`apps/api/scripts/seed-admin.ts` → `../src/config/env`, `../src/modules/auth/auth`). A production `api` image built as `node dist/main.js` with dev-deps and source pruned will fail both commands. The production `Dockerfile` (the ADR-0014 §7 implementation follow-on) must therefore either (a) include the Prisma CLI + the `prisma/` schema + `migrations/` and `tsx` + `scripts/` + the sources the seed imports, or (b) provide compiled equivalents (`prisma migrate deploy` via a bundled Prisma CLI, and a compiled `node dist/scripts/seed-admin.js`). Verify this against the Dockerfile when it lands — it is an unverified assumption today, which is why this runbook is `DRAFT`.
 
 ### Routine deploy
 
@@ -41,9 +43,9 @@ Placeholders below — replace with real values, never commit them: `<vps-host>`
 
 ## What can go wrong
 
-- **`prisma migrate deploy` fails.** Do NOT start the new API against a half-migrated DB. Read the error; a bad migration is a SEV1/SEV2 (ADR-0011) — roll back the image (`rollback.md`) and, if data is affected, escalate to `restore-from-backup.md`. Migrations are forward-only.
+- **`prisma migrate deploy` fails.** Do NOT start the new API against a half-migrated DB. Read the error; a bad migration is a SEV1/SEV2 (ADR-0011). Migrations are **forward-only**, so an image rollback does **not** undo an applied or partially-applied migration — the failed migration is recorded in the `_prisma_migrations` table, and redeploying `<good-sha>` against the diverged schema is not a fix. Decide by failure mode: if the migration failed atomically having applied nothing, fix forward (correct the migration, redeploy); if it partially applied or otherwise left the schema diverged from the last good image, do NOT roll the image back — go straight to `restore-from-backup.md` (restore the pre-deploy dump) and treat as SEV1. (`rollback.md` step 3 covers only the case of a migration that applied *successfully* and is backward-compatible.)
 - **`/health/ready` returns 503 after deploy.** A datastore is down: `docker compose ps` / `docker compose logs postgres redis`. Usual causes: Postgres volume perms, Redis OOM, a wrong `DATABASE_URL`/`REDIS_URL` in `.env`.
-- **Image pull fails.** GHCR auth expired on the box (`docker login ghcr.io`), or `<sha>` was never pushed (check the CI run).
+- **Image pull fails.** GHCR auth expired or was never set up on the box (re-run the `docker login ghcr.io` from Bootstrap step 2), or `<sha>` was never pushed (check the CI run).
 - **Caddy cannot obtain a certificate.** DNS not yet pointing at the box, or Let's Encrypt rate limits — `docker compose logs caddy`; the box must be reachable on 80/443.
 - **Disk full** (images + volumes + backups accumulate). `docker system prune` for old images; confirm the backup cron prunes dumps older than 30 days.
 - **Site broken and not quickly fixable** → run `rollback.md` (redeploy the previous tag) first, diagnose after. SEV1 if trip creation / core logging is down.

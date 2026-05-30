@@ -12,7 +12,7 @@ Placeholders: `<vps-host>`, `<domain>`, `<good-sha>` (previous known-good image 
 
 1. Identify `<good-sha>` — the image tag from the prior good deploy (check `docs/operations/dora-metrics.md`, the GHCR tag list, or the previous merge on `main`).
 2. **Preferred:** re-run the `deploy` workflow with input `<good-sha>`. **Manual equivalent:** `ssh <vps-host>`; `cd /opt/fleetco`; `export IMAGE_TAG=<good-sha>`; `docker compose -f docker-compose.prod.yml pull`; `docker compose -f docker-compose.prod.yml up -d`.
-3. **If `<bad-sha>` introduced a migration**, the schema has already advanced and an app-only rollback does NOT revert it. Decide:
+3. **If `<bad-sha>` introduced a migration that applied successfully**, the schema has already advanced and an app-only rollback does NOT revert it. (A migration that _failed mid-apply_ is a different case — an image rollback cannot fix it; see the "`prisma migrate deploy` fails" entry in `deploy.md`, which routes it to `restore-from-backup.md`.) Decide:
    - New schema is backward-compatible with `<good-sha>` (additive columns/tables) → the app rollback is sufficient; proceed.
    - `<good-sha>` cannot run against the new schema → this is no longer a simple rollback: escalate to `restore-from-backup.md` (restore the pre-deploy DB) and treat as SEV1.
 4. Verify recovery: the liveness/readiness/admin-login smoke checks from `deploy.md`; confirm the Sentry error spike subsides.
