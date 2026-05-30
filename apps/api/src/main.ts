@@ -45,6 +45,19 @@ async function bootstrap(): Promise<void> {
   });
   app.useLogger(app.get(Logger));
 
+  // CORS must be registered BEFORE the better-auth mount below. Express runs
+  // middleware in registration order; the toNodeHandler for /auth/* intercepts
+  // and fully handles those requests (including OPTIONS preflight) before any
+  // later middleware runs. Registering CORS here ensures the browser's
+  // preflight to /auth/sign-in/email receives Access-Control-Allow-Origin.
+  // CORS middleware only reads/writes headers — it never consumes the request
+  // body — so moving it before better-auth does not affect the body-parser
+  // ordering that ADR-0021 requires.
+  app.enableCors({
+    origin: env.CORS_ORIGIN.split(",").map((s) => s.trim()),
+    credentials: true,
+  });
+
   // Mount better-auth at /auth/{*splat} (Express 5 wildcard syntax).
   // Must run BEFORE the body parsers below.
   const auth = app.get<AuthInstance>(AUTH);
@@ -55,15 +68,6 @@ async function bootstrap(): Promise<void> {
   // bodies. Order matters: this MUST come after the better-auth mount.
   app.useBodyParser("json");
   app.useBodyParser("urlencoded", { extended: true });
-
-  // CORS for the cross-port apps/web dev server. credentials:true is
-  // required for cookies to flow; wildcard origin is forbidden by the
-  // browser when credentials are sent, so we enumerate explicitly from
-  // CORS_ORIGIN (which mirrors better-auth's trustedOrigins).
-  app.enableCors({
-    origin: env.CORS_ORIGIN.split(",").map((s) => s.trim()),
-    credentials: true,
-  });
 
   await app.listen(env.PORT);
 
