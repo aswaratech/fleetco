@@ -17,10 +17,10 @@
   },
   "dependencies": {
     "@fleetco/shared": "workspace:*",
-    "@nestjs/common": "^11.0.0",
+    "@nestjs/common": "^11.1.24",
     "@nestjs/config": "^4.0.0",
-    "@nestjs/core": "^11.0.0",
-    "@nestjs/platform-express": "^11.0.0",
+    "@nestjs/core": "^11.1.24",
+    "@nestjs/platform-express": "^11.1.24",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/exporter-trace-otlp-http": "^0.57.2",
     "@opentelemetry/sdk-trace-node": "~1.30.1",
