@@ -1,8 +1,8 @@
 # ADR-0026: Phase-2 observability upgrade — externally-hosted OTLP backend, traces-first then metrics, mandatory span scrubbing, two new SLIs
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-03
-- **Decider:** Product owner (CEO) — pending acceptance
+- **Decider:** Product owner (CEO)
 
 ## Context
 

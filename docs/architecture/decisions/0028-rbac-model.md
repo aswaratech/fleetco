@@ -1,8 +1,8 @@
 # ADR-0028: Office-staff RBAC model — two live roles (ADMIN, OFFICE_STAFF) with DRIVER reserved, a library-aware role on the session, a hardcoded permission map, and a RolesGuard composing AuthGuard
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-03
-- **Decider:** Product owner (CEO) — pending acceptance
+- **Decider:** Product owner (CEO)
 
 ## Context
 

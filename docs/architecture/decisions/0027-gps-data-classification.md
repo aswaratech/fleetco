@@ -1,8 +1,8 @@
 # ADR-0027: GPS and location-data classification — amend ADR-0013 with a sensitive-location Tier 5, short raw-trace retention, precision/aggregation controls, and never-export egress
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-03
-- **Decider:** Product owner (CEO) — pending acceptance
+- **Decider:** Product owner (CEO)
 
 ## Context
 
