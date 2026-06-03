@@ -1,6 +1,6 @@
 # Roadmap
 
-FleetCo ships in phases. Each phase ends with a usable product, meaning that at the end of any phase the project could be paused indefinitely and the system would still deliver real value. We do not start a new phase until the previous one is in daily use, because half-built phases produce technical debt and operational confusion that compound. The roadmap below has been updated to incorporate the operational, reliability, security, and data-posture commitments captured in ADRs 0010 through 0013, which together establish that FleetCo is being built not just as an architectural skeleton but as a delivery operating model.
+FleetCo ships in phases. Each phase ends with a usable product, meaning that at the end of any phase the project could be paused indefinitely and the system would still deliver real value. We do not start a new phase until the previous one is in daily use, because half-built phases produce technical debt and operational confusion that compound. (The Phase-1 → Phase-2 transition took a one-time documented exception to this rule — see ADR-0025 — opening Phase 2 ahead of daily use while the Phase-1 deploy items remained owed in parallel; the rule stands for all other transitions.) The roadmap below has been updated to incorporate the operational, reliability, security, and data-posture commitments captured in ADRs 0010 through 0013, which together establish that FleetCo is being built not just as an architectural skeleton but as a delivery operating model.
 
 ## Phase 0 — Kickoff
 

@@ -1,8 +1,8 @@
 # ADR-0025: Open Phase 2 (driver app + telematics) ahead of the daily-use gate
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-03
-- **Decider:** Product owner (CEO) — pending acceptance
+- **Decider:** Product owner (CEO)
 
 ## Context
 
