@@ -38,6 +38,23 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      # Redis service for the API test suite. Until now no test touched a
+      # live Redis (every test mocks RedisService — see the header comment in
+      # apps/api/test/health.controller.test.ts), so the REDIS_URL the test
+      # step sets had nothing listening on 6379. The QueueModule smoke test
+      # (apps/api/test/queue.module.test.ts, ADR-0029 T1) needs a real Redis
+      # for its enqueue -> process -> graceful-drain proof, so we provision
+      # one here. Image and health-check mirror docker-compose.yml's redis
+      # service (redis:7-alpine, redis-cli ping) so CI and local dev agree.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
