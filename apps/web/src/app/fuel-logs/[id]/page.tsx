@@ -1,9 +1,11 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
+import { NepaliDate } from "@/components/nepali-date";
 import { Button } from "@/components/ui/button";
 import { apiFetch, ApiError } from "@/lib/api";
 import { formatNpr } from "@/lib/money";
+import { formatNepaliDate } from "@/lib/nepali-date";
 import { getServerSession } from "@/lib/session";
 import { formatKm, formatLiters } from "@/lib/units";
 
@@ -27,16 +29,6 @@ import { DeleteFuelLogDialog } from "./delete-fuel-log-dialog";
 
 interface DetailPageProps {
   params: Promise<{ id: string }>;
-}
-
-function formatDate(iso: string | null): string {
-  if (!iso) return "—";
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "—";
-  const y = date.getUTCFullYear();
-  const m = String(date.getUTCMonth() + 1).padStart(2, "0");
-  const d = String(date.getUTCDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
 }
 
 function formatTimestamp(iso: string | null): string {
@@ -85,10 +77,12 @@ export default async function FuelLogDetailPage({
                 Fuel logs
               </Link>
               <span aria-hidden="true"> › </span>
-              <span className="text-text-secondary tabular-nums">{formatDate(fuelLog.date)}</span>
+              <span className="text-text-secondary tabular-nums">
+                <NepaliDate iso={fuelLog.date} format="bs" />
+              </span>
             </nav>
             <h1 className="text-text-primary text-2xl font-semibold tabular-nums">
-              {formatDate(fuelLog.date)}
+              <NepaliDate iso={fuelLog.date} format="bs" />
             </h1>
             <p className="text-text-muted text-sm">
               <span className="font-mono">{fuelLog.vehicle.registrationNumber}</span> ·{" "}
@@ -103,7 +97,10 @@ export default async function FuelLogDetailPage({
             <Button asChild variant="outline">
               <Link href={`/fuel-logs/${fuelLog.id}/edit`}>Edit</Link>
             </Button>
-            <DeleteFuelLogDialog id={fuelLog.id} dateLabel={formatDate(fuelLog.date)} />
+            <DeleteFuelLogDialog
+              id={fuelLog.id}
+              dateLabel={formatNepaliDate(fuelLog.date, { format: "bs" })}
+            />
           </div>
         </header>
 
@@ -138,7 +135,7 @@ export default async function FuelLogDetailPage({
             Fuel log
           </h2>
           <dl className="grid grid-cols-1 gap-x-8 gap-y-4 sm:grid-cols-2">
-            <DetailRow label="Date" value={formatDate(fuelLog.date)} numeric />
+            <DetailRow label="Date" value={<NepaliDate iso={fuelLog.date} />} numeric />
             <DetailRow label="Liters" value={formatLiters(fuelLog.litersMl)} numeric />
             <DetailRow
               label="Price / liter"

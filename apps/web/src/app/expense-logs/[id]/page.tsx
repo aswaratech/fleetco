@@ -1,9 +1,11 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
+import { NepaliDate } from "@/components/nepali-date";
 import { Button } from "@/components/ui/button";
 import { apiFetch, ApiError } from "@/lib/api";
 import { formatNpr } from "@/lib/money";
+import { formatNepaliDate } from "@/lib/nepali-date";
 import { getServerSession } from "@/lib/session";
 
 import { EXPENSE_CATEGORY_LABELS, type ExpenseCategory, type ExpenseLogDetail } from "../types";
@@ -30,16 +32,6 @@ import { DeleteExpenseLogDialog } from "./delete-expense-log-dialog";
 
 interface DetailPageProps {
   params: Promise<{ id: string }>;
-}
-
-function formatDate(iso: string | null): string {
-  if (!iso) return "—";
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "—";
-  const y = date.getUTCFullYear();
-  const m = String(date.getUTCMonth() + 1).padStart(2, "0");
-  const d = String(date.getUTCDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
 }
 
 function formatTimestamp(iso: string | null): string {
@@ -91,10 +83,12 @@ export default async function ExpenseLogDetailPage({
                 Expense logs
               </Link>
               <span aria-hidden="true"> › </span>
-              <span className="text-text-secondary tabular-nums">{formatDate(expense.date)}</span>
+              <span className="text-text-secondary tabular-nums">
+                <NepaliDate iso={expense.date} format="bs" />
+              </span>
             </nav>
             <h1 className="text-text-primary text-2xl font-semibold tabular-nums">
-              {formatDate(expense.date)}
+              <NepaliDate iso={expense.date} format="bs" />
             </h1>
             <p className="text-text-muted text-sm">
               {expense.vehicle ? (
@@ -113,7 +107,10 @@ export default async function ExpenseLogDetailPage({
             <Button asChild variant="outline">
               <Link href={`/expense-logs/${expense.id}/edit`}>Edit</Link>
             </Button>
-            <DeleteExpenseLogDialog id={expense.id} dateLabel={formatDate(expense.date)} />
+            <DeleteExpenseLogDialog
+              id={expense.id}
+              dateLabel={formatNepaliDate(expense.date, { format: "bs" })}
+            />
           </div>
         </header>
 
@@ -160,7 +157,7 @@ export default async function ExpenseLogDetailPage({
             Expense
           </h2>
           <dl className="grid grid-cols-1 gap-x-8 gap-y-4 sm:grid-cols-2">
-            <DetailRow label="Date" value={formatDate(expense.date)} numeric />
+            <DetailRow label="Date" value={<NepaliDate iso={expense.date} />} numeric />
             <DetailRow label="Category" value={categoryLabel} />
             <DetailRow label="Amount" value={formatNpr(expense.amountPaisa)} numeric />
             <DetailRow label="Vendor" value={expense.vendor ?? "—"} />
