@@ -17,6 +17,7 @@ import { PrismaModule } from "./modules/prisma/prisma.module";
 import { QueueModule } from "./modules/queue/queue.module";
 import { RedisModule } from "./modules/redis/redis.module";
 import { ReportsModule } from "./modules/reports/reports.module";
+import { TelematicsModule } from "./modules/telematics/telematics.module";
 import { TripsModule } from "./modules/trips/trips.module";
 import { VehiclesModule } from "./modules/vehicles/vehicles.module";
 
@@ -123,6 +124,7 @@ import { VehiclesModule } from "./modules/vehicles/vehicles.module";
     FuelLogsModule,
     ExpenseLogsModule,
     ReportsModule,
+    TelematicsModule,
   ],
 })
 export class AppModule {}

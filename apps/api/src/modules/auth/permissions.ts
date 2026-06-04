@@ -32,6 +32,7 @@ export type Capability =
   | "fuel-logs:*"
   | "expense-logs:*"
   | "reports:read"
+  | "gps:ingest"
   | "gps:read-derived"
   | "gps:read-raw"
   | "gps:export-raw"
@@ -67,8 +68,14 @@ export const ROLE_CAPABILITY_MAP: Record<UserRole, ReadonlySet<Capability>> = {
   // load-bearing splits (ADR-0028 c6, discharging ADR-0027 c7 / ADR-0026 c7):
   // raw-GPS trace query/export and the observability surface are ADMIN-only,
   // strictly above the derived GPS views; so are user/role administration.
+  // GPS *ingestion* (`gps:ingest`, ADR-0029 c11) is also ADMIN-only TODAY —
+  // a placeholder so the telematics ingestion endpoint can be built and
+  // tested before the driver app exists; it is GRANTED TO `DRIVER` when that
+  // role is defined with the driver-app slice, which is purely a new row in
+  // this map (the point of the capability indirection), NOT a controller edit.
   [UserRole.ADMIN]: new Set<Capability>([
     ...OPERATIONAL_CAPABILITIES,
+    "gps:ingest",
     "gps:read-raw",
     "gps:export-raw",
     "observability:read",
@@ -77,9 +84,10 @@ export const ROLE_CAPABILITY_MAP: Record<UserRole, ReadonlySet<Capability>> = {
   ]),
   // OFFICE_STAFF — a trusted employee doing operational data entry: the
   // operational floor and DERIVED GPS views only. NOT raw-GPS export, NOT
-  // observability, NOT user/role admin (ADR-0028 c1/c4). The threat model is
-  // "limit the blast radius of a compromised office-staff session", not
-  // "office staff is hostile".
+  // GPS ingestion (`gps:ingest` is ADMIN-only today, DRIVER-held later —
+  // ADR-0029 c11), NOT observability, NOT user/role admin (ADR-0028 c1/c4).
+  // The threat model is "limit the blast radius of a compromised office-staff
+  // session", not "office staff is hostile".
   [UserRole.OFFICE_STAFF]: new Set<Capability>(OPERATIONAL_CAPABILITIES),
   // DRIVER — reserved but UNDEFINED (ADR-0028 c1): no capabilities. The enum
   // names it so this map (and the guard) accept a third role without rework,
