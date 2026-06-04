@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
+import { NepaliDate } from "@/components/nepali-date";
 import { Button } from "@/components/ui/button";
 import {
   Table,
@@ -84,18 +85,6 @@ function formatKilometers(km: number): string {
     maximumFractionDigits: 1,
   });
   return `${formatter.format(km)} km`;
-}
-
-function formatDate(iso: string | null): string {
-  if (!iso) return "—";
-  // Render YYYY-MM-DD in en-IN; BS-calendar rendering arrives with the
-  // <NepaliDate> component documented in DESIGN.md §"BS calendar".
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "—";
-  const y = date.getUTCFullYear();
-  const m = String(date.getUTCMonth() + 1).padStart(2, "0");
-  const d = String(date.getUTCDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
 }
 
 function formatTimestamp(iso: string | null): string {
@@ -227,8 +216,8 @@ export default async function VehicleDetailPage({
               value={formatKilometers(vehicle.odometerCurrentKm)}
               numeric
             />
-            <DetailRow label="Acquired at" value={formatDate(vehicle.acquiredAt)} />
-            <DetailRow label="Retired at" value={formatDate(vehicle.retiredAt)} />
+            <DetailRow label="Acquired at" value={<NepaliDate iso={vehicle.acquiredAt} />} />
+            <DetailRow label="Retired at" value={<NepaliDate iso={vehicle.retiredAt} />} />
             <DetailRow label="Created at" value={formatTimestamp(vehicle.createdAt)} />
             <DetailRow label="Updated at" value={formatTimestamp(vehicle.updatedAt)} />
           </dl>
@@ -243,7 +232,10 @@ export default async function VehicleDetailPage({
           </h2>
           <dl className="grid grid-cols-1 gap-x-8 gap-y-4 sm:grid-cols-2">
             <DetailRow label="Bluebook number" value={valueOrDash(vehicle.bluebookNumber)} mono />
-            <DetailRow label="Bluebook expires" value={formatDate(vehicle.bluebookExpiresAt)} />
+            <DetailRow
+              label="Bluebook expires"
+              value={<NepaliDate iso={vehicle.bluebookExpiresAt} />}
+            />
             <DetailRow label="Insurer" value={valueOrDash(vehicle.insurer)} />
             <DetailRow
               label="Insurance policy number"
@@ -258,7 +250,10 @@ export default async function VehicleDetailPage({
                   : "—"
               }
             />
-            <DetailRow label="Insurance expires" value={formatDate(vehicle.insuranceExpiresAt)} />
+            <DetailRow
+              label="Insurance expires"
+              value={<NepaliDate iso={vehicle.insuranceExpiresAt} />}
+            />
             <DetailRow
               label="Route permit number"
               value={valueOrDash(vehicle.routePermitNumber)}
@@ -266,7 +261,7 @@ export default async function VehicleDetailPage({
             />
             <DetailRow
               label="Route permit expires"
-              value={formatDate(vehicle.routePermitExpiresAt)}
+              value={<NepaliDate iso={vehicle.routePermitExpiresAt} />}
             />
           </dl>
         </section>
