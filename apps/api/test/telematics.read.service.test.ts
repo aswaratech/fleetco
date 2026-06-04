@@ -1,5 +1,7 @@
 import { getQueueToken } from "@nestjs/bullmq";
+import { NotFoundException } from "@nestjs/common";
 import { Test, type TestingModule } from "@nestjs/testing";
+import { GeofenceType } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 
 import { GeofencesService } from "../src/modules/geofences/geofences.service";
@@ -11,6 +13,7 @@ import {
   type GeofenceQuery,
 } from "../src/modules/telematics/telematics.service";
 import { resetDb } from "./db";
+import { seedGeofence } from "./fixtures/geofence";
 import { seedGpsPing } from "./fixtures/gps-ping";
 import { seedUser, seedVehicle } from "./fixtures/trip";
 
@@ -356,6 +359,122 @@ describe("TelematicsService reads + geofencing (ADR-0029 T5)", () => {
       const res = await service.geofenceStatus(vehicleId, none);
       expect(res.inside).toBeNull();
       expect(res.latestFixAt).toBeNull();
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // geofenceStatus — STORED fence (geofenceId, ADR-0030 G5). The "one-line
+  // change" T5 anticipated: classify against a STORED Geofence row instead of
+  // a caller-parameterized fence, via the SAME ST_Contains query.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  describe("geofenceStatus — stored fence (geofenceId, ADR-0030 G5)", () => {
+    // Build a query-param polygon GeofenceQuery from a `lon,lat;…` string via
+    // the REAL schema (same helper the polygon block uses), so the coherence
+    // assertion below compares the stored path against a genuinely-parsed
+    // query-param fence, not a hand-built WKT.
+    function polygonGeofence(spec: string): GeofenceQuery {
+      const parsed = GeofenceStatusQuerySchema.parse({ polygon: spec });
+      if (!parsed.polygon) throw new Error("expected a parsed polygon");
+      return { kind: "polygon", wkt: parsed.polygon.wkt, vertexCount: parsed.polygon.vertexCount };
+    }
+
+    // The vertex string whose ring is the SAME square as the seedGeofence
+    // default (KATHMANDU_SQUARE_WKT: lon 85.30–85.35, lat 27.70–27.75).
+    const SQUARE_VERTS = "85.30,27.70;85.35,27.70;85.35,27.75;85.30,27.75";
+
+    test("classifies an inside fix true and an outside fix false, echoing the fence id + type", async () => {
+      const fence = await seedGeofence(prisma, { createdById: adminId });
+
+      // vehicleId's latest fix is at KTM (inside the depot square) → inside.
+      await seedGpsPing(prisma, {
+        vehicleId,
+        createdById: adminId,
+        latitude: KTM_LAT,
+        longitude: KTM_LON,
+      });
+      const inside = await service.geofenceStatus(vehicleId, {
+        kind: "stored",
+        geofenceId: fence.id,
+      });
+      expect(inside.inside).toBe(true);
+      expect(inside.latestFixAt).not.toBeNull();
+      // The resolved stored fence is echoed — id + type only, no coordinates.
+      expect(inside.resolvedGeofence).toEqual({ id: fence.id, type: GeofenceType.DEPOT });
+
+      // otherVehicleId's latest fix is in Pokhara (~140 km away) → outside.
+      await seedGpsPing(prisma, {
+        vehicleId: otherVehicleId,
+        createdById: adminId,
+        latitude: 28.2096,
+        longitude: 83.9856,
+      });
+      const outside = await service.geofenceStatus(otherVehicleId, {
+        kind: "stored",
+        geofenceId: fence.id,
+      });
+      expect(outside.inside).toBe(false);
+      expect(outside.resolvedGeofence).toEqual({ id: fence.id, type: GeofenceType.DEPOT });
+    });
+
+    test("an unknown geofenceId → NotFoundException (404), even with a fix present", async () => {
+      await seedGpsPing(prisma, {
+        vehicleId,
+        createdById: adminId,
+        latitude: KTM_LAT,
+        longitude: KTM_LON,
+      });
+      await expect(
+        service.geofenceStatus(vehicleId, { kind: "stored", geofenceId: "cknosuchfence0000" }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    test("a vehicle with no fix → inside null (the fence still resolves + echoes)", async () => {
+      const fence = await seedGeofence(prisma, { createdById: adminId });
+      const res = await service.geofenceStatus(vehicleId, { kind: "stored", geofenceId: fence.id });
+      expect(res.inside).toBeNull();
+      expect(res.latestFixAt).toBeNull();
+      expect(res.resolvedGeofence).toEqual({ id: fence.id, type: GeofenceType.DEPOT });
+    });
+
+    // The load-bearing G5 assertion (ADR-0030 c1, the representation-coherence
+    // guarantee made OBSERVABLE): a STORED fence and an equivalent QUERY-PARAM
+    // polygon — the same ring — classify the SAME latest fix identically. They
+    // share the common/wkt builder, so they cannot drift; this proves it at the
+    // classification level for both an inside and an outside fix.
+    test("a stored fence and an equivalent query-param polygon classify IDENTICALLY", async () => {
+      const fence = await seedGeofence(prisma, { createdById: adminId });
+      const equivalent = polygonGeofence(SQUARE_VERTS);
+
+      // Inside fix: both representations must say inside.
+      await seedGpsPing(prisma, {
+        vehicleId,
+        createdById: adminId,
+        latitude: KTM_LAT,
+        longitude: KTM_LON,
+      });
+      const storedInside = await service.geofenceStatus(vehicleId, {
+        kind: "stored",
+        geofenceId: fence.id,
+      });
+      const paramInside = await service.geofenceStatus(vehicleId, equivalent);
+      expect(storedInside.inside).toBe(paramInside.inside);
+      expect(storedInside.inside).toBe(true);
+
+      // Outside fix: both representations must say outside.
+      await seedGpsPing(prisma, {
+        vehicleId: otherVehicleId,
+        createdById: adminId,
+        latitude: 28.2096,
+        longitude: 83.9856,
+      });
+      const storedOutside = await service.geofenceStatus(otherVehicleId, {
+        kind: "stored",
+        geofenceId: fence.id,
+      });
+      const paramOutside = await service.geofenceStatus(otherVehicleId, equivalent);
+      expect(storedOutside.inside).toBe(paramOutside.inside);
+      expect(storedOutside.inside).toBe(false);
     });
   });
 });

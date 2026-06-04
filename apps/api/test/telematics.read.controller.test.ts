@@ -17,6 +17,10 @@ import {
   ListPingsQuerySchema,
 } from "../src/modules/telematics/telematics.schemas";
 import { GPS_INGEST_QUEUE, TelematicsService } from "../src/modules/telematics/telematics.service";
+import { resetDb } from "./db";
+import { seedGeofence } from "./fixtures/geofence";
+import { seedGpsPing } from "./fixtures/gps-ping";
+import { seedUser, seedVehicle } from "./fixtures/trip";
 
 // ───────────────────────────────────────────────────────────────────────────
 // Part 1 — schema / pipe layer (no server). Pins the read-query contracts the
@@ -120,6 +124,51 @@ describe("GeofenceStatusQuerySchema (geofence check, pipe layer)", () => {
       }),
     ).toThrow(BadRequestException);
   });
+
+  // ── The third mode: a STORED fence by geofenceId (ADR-0030 G5) ──
+
+  test("a geofenceId alone parses (the third mode)", () => {
+    const parsed = pipe.transform({ geofenceId: "ckstoredfence0000" });
+    expect(parsed.geofenceId).toBe("ckstoredfence0000");
+    expect(parsed.polygon).toBeUndefined();
+    expect(parsed.centerLatitude).toBeUndefined();
+  });
+
+  test("a geofenceId AND a circle → 400 (exactly one mode)", () => {
+    expect(() =>
+      pipe.transform({
+        geofenceId: "ckstoredfence0000",
+        centerLatitude: "27.7172",
+        centerLongitude: "85.324",
+        radiusMeters: "100",
+      }),
+    ).toThrow(BadRequestException);
+  });
+
+  test("a geofenceId AND a polygon → 400 (exactly one mode)", () => {
+    expect(() =>
+      pipe.transform({
+        geofenceId: "ckstoredfence0000",
+        polygon: "85.30,27.70;85.35,27.70;85.35,27.74",
+      }),
+    ).toThrow(BadRequestException);
+  });
+
+  test("all three modes at once → 400", () => {
+    expect(() =>
+      pipe.transform({
+        geofenceId: "ckstoredfence0000",
+        centerLatitude: "27.7172",
+        centerLongitude: "85.324",
+        radiusMeters: "100",
+        polygon: "85.30,27.70;85.35,27.70;85.35,27.74",
+      }),
+    ).toThrow(BadRequestException);
+  });
+
+  test("a non-cuid geofenceId → 400", () => {
+    expect(() => pipe.transform({ geofenceId: "not a cuid" })).toThrow(BadRequestException);
+  });
 });
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -171,6 +220,17 @@ const VEHICLE_ID = "ckreadrbac000000";
 const PINGS = `/api/v1/telematics/vehicles/${VEHICLE_ID}/pings`;
 const LOCATION = `/api/v1/telematics/vehicles/${VEHICLE_ID}/location`;
 const GEOFENCE = `/api/v1/telematics/vehicles/${VEHICLE_ID}/geofence-status?centerLatitude=27.7172&centerLongitude=85.324&radiusMeters=100`;
+// A geofence-status URL driven by a STORED fence id that does NOT exist (the
+// RBAC block seeds no fence). The route-level gps:read-derived gate runs BEFORE
+// the handler reads the query, so the gate verdict matches the circle GEOFENCE
+// above; the only difference is what a gate-PASSING role sees next — a 404
+// (fence-not-found), which itself proves the gate was passed (404 ≠ 403).
+const GEOFENCE_BY_ID = `/api/v1/telematics/vehicles/${VEHICLE_ID}/geofence-status?geofenceId=cknostoredfence00`;
+
+// Kathmandu — the seedGeofence default DEPOT square (lon 85.30–85.35, lat
+// 27.70–27.75) contains this point, so a fix here is "inside" the stored fence.
+const KTM_LAT = 27.7172;
+const KTM_LON = 85.324;
 
 describe("Telematics read RBAC (gps:read-raw / gps:read-derived, ADR-0029 T5)", () => {
   let app: INestApplication;
@@ -259,5 +319,114 @@ describe("Telematics read RBAC (gps:read-raw / gps:read-derived, ADR-0029 T5)", 
 
   test("derived geofence-status: anonymous → 401", async () => {
     expect(await status(GEOFENCE)).toBe(401);
+  });
+
+  // ── gps:read-derived — geofence status by a STORED fence id (ADR-0030 G5) ──
+  // The route-level gate is mode-agnostic (it runs before the handler reads the
+  // query), so the geofenceId mode is gated exactly like circle/polygon. With a
+  // non-existent fence id the gate-PASSING roles reach the handler and get 404
+  // (fence-not-found) — which itself proves they passed the gate (404 ≠ 403);
+  // the denied roles never reach the handler.
+
+  test("geofence-status by geofenceId: ADMIN passes the gate → 404 (not 403/401)", async () => {
+    expect(await status(GEOFENCE_BY_ID, UserRole.ADMIN)).toBe(404);
+  });
+
+  test("geofence-status by geofenceId: OFFICE_STAFF passes the gate → 404 (the positive half of the split)", async () => {
+    expect(await status(GEOFENCE_BY_ID, UserRole.OFFICE_STAFF)).toBe(404);
+  });
+
+  test("geofence-status by geofenceId: DRIVER (reserved, inert) → 403 (gate denies before the handler)", async () => {
+    expect(await status(GEOFENCE_BY_ID, UserRole.DRIVER)).toBe(403);
+  });
+
+  test("geofence-status by geofenceId: anonymous → 401", async () => {
+    expect(await status(GEOFENCE_BY_ID)).toBe(401);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// Part 3 — geofence-status by a STORED fence, end-to-end over HTTP (ADR-0030
+// G5). Seeds a real DEPOT fence + an inside fix, GETs the endpoint as ADMIN,
+// and asserts the response ECHOES the resolved fence's id + type alongside the
+// inside boolean — the wire-level proof of the G5 echo (and that no coordinates
+// leak). A missing geofenceId returns 404 over the same wire.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe("Telematics geofence-status by stored fence (integration, ADR-0030 G5)", () => {
+  let app: INestApplication;
+  let prisma: PrismaService;
+  let baseUrl: string;
+  let fenceId: string;
+  let storedVehicleId: string;
+
+  beforeAll(async () => {
+    const moduleRef = await Test.createTestingModule({
+      controllers: [TelematicsController],
+      providers: [
+        TelematicsService,
+        GeofencesService,
+        PrismaService,
+        { provide: getQueueToken(GPS_INGEST_QUEUE), useValue: fakeQueue },
+        AuthGuard,
+        RolesGuard,
+        { provide: AUTH, useValue: AUTH_STUB },
+      ],
+    }).compile();
+
+    app = moduleRef.createNestApplication({ logger: false });
+    await app.listen(0);
+    prisma = moduleRef.get(PrismaService);
+
+    const address: AddressInfo | string | null = app.getHttpServer().address();
+    if (typeof address !== "object" || address === null) {
+      throw new Error("expected the test server to bind a TCP port");
+    }
+    baseUrl = `http://127.0.0.1:${address.port}`;
+
+    // A real DEPOT fence + a fix inside it, seeded directly (the GET handler
+    // reads them; it does not care that the AUTH stub's user is not a DB row).
+    await resetDb(prisma);
+    const adminId = await seedUser(prisma);
+    storedVehicleId = (await seedVehicle(prisma, adminId)).id;
+    fenceId = (await seedGeofence(prisma, { createdById: adminId })).id;
+    await seedGpsPing(prisma, {
+      vehicleId: storedVehicleId,
+      createdById: adminId,
+      latitude: KTM_LAT,
+      longitude: KTM_LON,
+    });
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  test("ADMIN GET …?geofenceId=<id> echoes the fence id + type and inside:true", async () => {
+    const res = await fetch(
+      `${baseUrl}/api/v1/telematics/vehicles/${storedVehicleId}/geofence-status?geofenceId=${fenceId}`,
+      { headers: { "x-test-role": UserRole.ADMIN } },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      vehicleId: string;
+      geofence: { kind: string; geofenceId?: string; type?: string };
+      inside: boolean | null;
+      latestFixAt: string | null;
+    };
+    expect(body.vehicleId).toBe(storedVehicleId);
+    expect(body.inside).toBe(true);
+    expect(body.latestFixAt).not.toBeNull();
+    // The echo is the stored fence's id + type — and ONLY that (no coordinates).
+    expect(body.geofence).toEqual({ kind: "stored", geofenceId: fenceId, type: "DEPOT" });
+    expect(body).not.toHaveProperty("boundaryWkt");
+  });
+
+  test("ADMIN GET …?geofenceId=<missing> → 404", async () => {
+    const res = await fetch(
+      `${baseUrl}/api/v1/telematics/vehicles/${storedVehicleId}/geofence-status?geofenceId=cknosuchfence00000`,
+      { headers: { "x-test-role": UserRole.ADMIN } },
+    );
+    expect(res.status).toBe(404);
   });
 });
