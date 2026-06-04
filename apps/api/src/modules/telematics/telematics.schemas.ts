@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { PolygonParam, type ParsedPolygon } from "../../common/wkt";
+
 // Zod schemas for the telematics ingestion slice (ADR-0029 T3, commitment
 // 10). The authenticated batch endpoint does MINIMAL validation and then
 // enqueues onto `gps-ingest` — it deliberately does NOT block on the database
@@ -286,81 +288,19 @@ function coordParam(min: number, max: number, fieldLabel: string) {
 const RADIUS_METERS_MIN = 1;
 const RADIUS_METERS_MAX = 500_000;
 
-// The parsed polygon: a ready-to-bind WKT string plus the vertex count (for
-// echoing back). The WKT is built from VALIDATED finite numbers and travels to
-// Postgres as a single BOUND `$queryRaw` parameter (ST_GeomFromText($1, 4326))
-// — never string-interpolated into SQL, so there is no injection surface even
-// though it is assembled here.
-export interface ParsedPolygon {
-  wkt: string;
-  vertexCount: number;
-}
-
-const POLYGON_MIN_VERTICES = 3;
-const POLYGON_MAX_VERTICES = 1000;
-
-// Parse `lon,lat;lon,lat;lon,lat` into a closed WKT POLYGON ring. Note WKT
-// coordinate order is `lon lat` (X Y) — the same ST_MakePoint(lon, lat)
-// foot-gun the point geometry guards; a swap here would put latitude where
-// longitude belongs and the service's ST_Contains test would misclassify (the
-// service tests pin this).
-const PolygonParam = z
-  .string()
-  .trim()
-  .transform((raw, ctx): ParsedPolygon => {
-    const vertexStrs = raw
-      .split(";")
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0);
-    if (vertexStrs.length < POLYGON_MIN_VERTICES) {
-      ctx.addIssue({
-        code: "custom",
-        message: `polygon needs at least ${POLYGON_MIN_VERTICES} vertices as "lon,lat;lon,lat;lon,lat".`,
-      });
-      return z.NEVER;
-    }
-    if (vertexStrs.length > POLYGON_MAX_VERTICES) {
-      ctx.addIssue({
-        code: "custom",
-        message: `polygon must have at most ${POLYGON_MAX_VERTICES} vertices.`,
-      });
-      return z.NEVER;
-    }
-    const ring: [number, number][] = [];
-    for (const vs of vertexStrs) {
-      const parts = vs.split(",");
-      if (parts.length !== 2) {
-        ctx.addIssue({ code: "custom", message: `polygon vertex "${vs}" must be "lon,lat".` });
-        return z.NEVER;
-      }
-      const lon = Number(parts[0]);
-      const lat = Number(parts[1]);
-      if (!Number.isFinite(lon) || lon < -180 || lon > 180) {
-        ctx.addIssue({
-          code: "custom",
-          message: `polygon vertex longitude "${parts[0]}" must be a number between -180 and 180.`,
-        });
-        return z.NEVER;
-      }
-      if (!Number.isFinite(lat) || lat < -90 || lat > 90) {
-        ctx.addIssue({
-          code: "custom",
-          message: `polygon vertex latitude "${parts[1]}" must be a number between -90 and 90.`,
-        });
-        return z.NEVER;
-      }
-      ring.push([lon, lat]);
-    }
-    // A WKT linear ring must be closed (first vertex repeated last). Close it
-    // here if the caller did not, so a 3-vertex triangle is a valid request.
-    const [firstLon, firstLat] = ring[0];
-    const [lastLon, lastLat] = ring[ring.length - 1];
-    if (firstLon !== lastLon || firstLat !== lastLat) {
-      ring.push([firstLon, firstLat]);
-    }
-    const coordList = ring.map(([lon, lat]) => `${lon} ${lat}`).join(", ");
-    return { wkt: `POLYGON((${coordList}))`, vertexCount: ring.length };
-  });
+// ── Geofence vertex parser (shared) ──
+//
+// The `lon,lat;…` → closed `POLYGON((…))` WKT builder and its `ParsedPolygon`
+// result now live in the shared `common/wkt` module. It was extracted there
+// (ADR-0030 G2) so the stored Geofence aggregate (ADR-0030) and this
+// caller-parameterized T5 query build WKT from the SAME code — the
+// representation-coherence guarantee (ADR-0030 commitment 1): a stored fence
+// and an ad-hoc query-param fence are byte-identical WKT and classify
+// identically. Two copies WOULD drift; one source makes the guarantee
+// structural. Re-exported here so any existing importer of this file keeps its
+// import path, and `GeofenceStatusQuerySchema` below consumes the same binding.
+export { PolygonParam };
+export type { ParsedPolygon };
 
 /**
  * GET /api/v1/telematics/vehicles/:vehicleId/geofence-status query schema.
