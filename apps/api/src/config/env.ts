@@ -50,6 +50,15 @@ const envSchema = z.object({
   // ADMIN_PASSWORD is Tier 1 per ADR-0013 (the founder's credential).
   ADMIN_EMAIL: z.preprocess(emptyStringAsUndefined, z.string().email().optional()),
   ADMIN_PASSWORD: z.preprocess(emptyStringAsUndefined, z.string().min(8).optional()),
+
+  // create-user.ts input (ADR-0028 c8 — the office-staff / admin creation path).
+  // Optional at API runtime — only the create-user script reads it, and only
+  // when run; its absence never blocks API boot. A Tier 1 credential per
+  // ADR-0013 (the password for a newly-created office-staff / ADMIN account),
+  // so it never appears in any committed file and is passed inline on the
+  // command (not stored in .env) so it does not land in argv / `ps` / shell
+  // history. Min length 8 mirrors ADMIN_PASSWORD and better-auth's own minimum.
+  CREATE_USER_PASSWORD: z.preprocess(emptyStringAsUndefined, z.string().min(8).optional()),
 });
 
 export type Env = z.infer<typeof envSchema>;
