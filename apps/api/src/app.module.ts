@@ -14,6 +14,7 @@ import { FuelLogsModule } from "./modules/fuel-logs/fuel-logs.module";
 import { HealthModule } from "./modules/health/health.module";
 import { JobsModule } from "./modules/jobs/jobs.module";
 import { PrismaModule } from "./modules/prisma/prisma.module";
+import { QueueModule } from "./modules/queue/queue.module";
 import { RedisModule } from "./modules/redis/redis.module";
 import { ReportsModule } from "./modules/reports/reports.module";
 import { TripsModule } from "./modules/trips/trips.module";
@@ -82,6 +83,7 @@ import { VehiclesModule } from "./modules/vehicles/vehicles.module";
     }),
     PrismaModule,
     RedisModule,
+    QueueModule,
     AuthModule,
     HealthModule,
     VehiclesModule,

@@ -45,6 +45,23 @@ async function bootstrap(): Promise<void> {
   });
   app.useLogger(app.get(Logger));
 
+  // Enable Nest's shutdown lifecycle so SIGTERM/SIGINT (a deploy or
+  // container stop) runs onModuleDestroy / onApplicationShutdown instead of
+  // killing the process mid-flight (ADR-0029 commitment 5). BullMQ workers
+  // drain their in-flight jobs from this lifecycle, so without it a deploy
+  // would drop jobs that were mid-process. Side effect: every other
+  // OnModuleDestroy hook now fires on signal too — notably
+  // RedisService.onModuleDestroy (which quit()s the connection), previously
+  // only invoked on an explicit app.close(). This is a global restart-path
+  // behavior delta, intended.
+  //
+  // Placed here, right after useLogger and BEFORE the CORS / better-auth /
+  // body-parser block below: enableShutdownHooks only registers process
+  // signal listeners — it does not touch Express middleware order — so it
+  // is safe here and does NOT disturb the load-bearing ADR-0021 ordering
+  // (CORS before the better-auth mount, body parsers re-attached after it).
+  app.enableShutdownHooks();
+
   // CORS must be registered BEFORE the better-auth mount below. Express runs
   // middleware in registration order; the toNodeHandler for /auth/* intercepts
   // and fully handles those requests (including OPTIONS preflight) before any
