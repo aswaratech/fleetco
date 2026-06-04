@@ -138,3 +138,277 @@ export const IngestBatchSchema = z
   .strict();
 
 export type IngestBatchInput = z.infer<typeof IngestBatchSchema>;
+
+// ──────────────────────────────────────────────────────────────────────────
+// READ-PATH SCHEMAS (ADR-0029 T5) — the RBAC-gated raw/derived read split.
+//
+// Two query schemas mirror the established Phase-1 list-endpoint conventions
+// (fuel-logs.schemas.ts): a `.strict()` object that rejects typo'd keys with
+// HTTP 400, coerced-and-bounded pagination, and a sortable-column whitelist
+// (never an arbitrary `orderBy` column). The vehicle is a PATH param on the
+// read routes (`/vehicles/:vehicleId/...`), not a query filter — so it does
+// not appear in these query schemas (the same way fuel-logs' `:id` is a path
+// param, not validated by the list query schema). An unknown vehicleId yields
+// an empty result set / null fix, the same survives-a-stale-referent UX the
+// fuel-logs list documents.
+// ──────────────────────────────────────────────────────────────────────────
+
+// Coerce a string query param to a non-negative integer with bounds. Same
+// shape as the fuel-logs `intParam` — out-of-range values 400 with a clear
+// message rather than being silently clamped (a deliberate `take=10000`
+// clamped to 200 would surprise an API consumer).
+function intParam(min: number, max: number, fieldLabel: string) {
+  return z
+    .string()
+    .optional()
+    .transform((raw, ctx): number | undefined => {
+      if (raw === undefined || raw === "") return undefined;
+      const n = Number(raw);
+      if (!Number.isFinite(n) || !Number.isInteger(n)) {
+        ctx.addIssue({ code: "custom", message: `${fieldLabel} must be an integer.` });
+        return z.NEVER;
+      }
+      if (n < min) {
+        ctx.addIssue({ code: "custom", message: `${fieldLabel} must be ${min} or greater.` });
+        return z.NEVER;
+      }
+      if (n > max) {
+        ctx.addIssue({ code: "custom", message: `${fieldLabel} must be ${max} or less.` });
+        return z.NEVER;
+      }
+      return n;
+    });
+}
+
+// `from` / `to` date-range filters on the ping `timestamp` (inclusive bounds at
+// the service layer, gte / lte). `z.coerce.date()` accepts YYYY-MM-DD and ISO
+// 8601; an invalid value fails the parse → 400.
+const TimestampFilter = z.coerce
+  .date({ error: () => "Must be a valid date (YYYY-MM-DD or ISO 8601)." })
+  .optional();
+
+// ── Raw trace list (gps:read-raw, ADMIN-only) ──
+//
+// The full-resolution raw trace of one vehicle — the most-privileged
+// operational data access in the system (ADR-0027 c7). Paginated and
+// time-bounded so the highest-row-count table in the system is never queried
+// unbounded.
+
+// Sortable columns: `timestamp` (the device fix time — default, "most recent
+// fix first", served cheaply by the `(timestamp desc)` index) and `createdAt`
+// (storage time). Whitelisted, never arbitrary — the same defense the
+// fuel-logs / trips / jobs schemas document (an arbitrary `sortBy=latitude`
+// would both invite expensive sorts and leak Tier-5 ordering signal).
+const PING_SORTABLE_COLUMNS = ["timestamp", "createdAt"] as const;
+export type PingSortColumn = (typeof PING_SORTABLE_COLUMNS)[number];
+
+const PING_SORT_DIRECTIONS = ["asc", "desc"] as const;
+export type PingSortDir = (typeof PING_SORT_DIRECTIONS)[number];
+
+// Pagination ceiling duplicated from telematics.service.ts on purpose: the
+// service is the runtime authority (defense-in-depth), the schema validates
+// only what the client sent. Both move together when one changes — the same
+// coupling fuel-logs.schemas.ts documents.
+const PINGS_QUERY_MAX_TAKE = 200;
+
+/**
+ * GET /api/v1/telematics/vehicles/:vehicleId/pings query schema. `.strict()`
+ * so a typo'd key (`?form=...`) surfaces as 400 rather than being ignored.
+ */
+export const ListPingsQuerySchema = z
+  .object({
+    from: TimestampFilter,
+    to: TimestampFilter,
+    sortBy: z.enum(PING_SORTABLE_COLUMNS).optional(),
+    sortDir: z.enum(PING_SORT_DIRECTIONS).optional(),
+    skip: intParam(0, Number.MAX_SAFE_INTEGER, "skip"),
+    take: intParam(1, PINGS_QUERY_MAX_TAKE, "take"),
+  })
+  .strict();
+
+export type ListPingsQuery = z.infer<typeof ListPingsQuerySchema>;
+
+// ── Geofence status (gps:read-derived, ADMIN + OFFICE_STAFF) ──
+//
+// A parameterized geofence check over the vehicle's LATEST fix — a single
+// boolean ("is the vehicle inside this geofence right now?"), the derived,
+// genuinely-lower-resolution product ADR-0027 c6/c7 keeps on the OFFICE_STAFF
+// side of the raw-vs-derived split (NOT the full trail relabeled, which the
+// anti-circumvention clause keeps Tier 5). Two mutually-exclusive geofence
+// shapes, exactly one per request (the superRefine enforces it):
+//
+//   • CIRCLE  — centerLatitude + centerLongitude + radiusMeters → ST_DWithin
+//     (meter-accurate via a geography cast; see the service).
+//   • POLYGON — a vertex list `lon,lat;lon,lat;lon,lat` (≥3) → ST_Contains.
+//
+// Geofence-polygon STORAGE (a `geometry(Polygon, 4326)` company-configuration
+// aggregate, Tier 3 per ADR-0027 c6) is DEFERRED to its own sibling slice — it
+// needs its own design (depot / customer-site / route-corridor types, naming,
+// a management surface) and would balloon this read slice. T5 demonstrates
+// geofencing against a geofence the caller PARAMETERIZES per request; the
+// query is identical once a stored-polygon slice supplies the geometry from a
+// row instead of a query param. (Said explicitly in the PR description.)
+
+// A coerced finite coordinate/number query param with bounds. Like `intParam`
+// but accepts decimals (coordinates are not integers). A present-but-empty
+// value (`?centerLatitude=`) is an error, not a silent skip.
+function coordParam(min: number, max: number, fieldLabel: string) {
+  return z
+    .string()
+    .trim()
+    .transform((raw, ctx): number => {
+      if (raw === "") {
+        ctx.addIssue({ code: "custom", message: `${fieldLabel} is required.` });
+        return z.NEVER;
+      }
+      const n = Number(raw);
+      if (!Number.isFinite(n)) {
+        ctx.addIssue({ code: "custom", message: `${fieldLabel} must be a number.` });
+        return z.NEVER;
+      }
+      if (n < min) {
+        ctx.addIssue({ code: "custom", message: `${fieldLabel} must be ${min} or greater.` });
+        return z.NEVER;
+      }
+      if (n > max) {
+        ctx.addIssue({ code: "custom", message: `${fieldLabel} must be ${max} or less.` });
+        return z.NEVER;
+      }
+      return n;
+    });
+}
+
+// Proximity radius bounds, meters. Floor 1 m (a 0 m geofence is a corrupt
+// request); ceiling 500 km — absurdly generous for a depot/site/corridor,
+// tight enough to catch a units mistake (a degree value pasted into a meters
+// field). ST_DWithin reads this as meters because the service casts to
+// geography (see the geometry-vs-geography note there).
+const RADIUS_METERS_MIN = 1;
+const RADIUS_METERS_MAX = 500_000;
+
+// The parsed polygon: a ready-to-bind WKT string plus the vertex count (for
+// echoing back). The WKT is built from VALIDATED finite numbers and travels to
+// Postgres as a single BOUND `$queryRaw` parameter (ST_GeomFromText($1, 4326))
+// — never string-interpolated into SQL, so there is no injection surface even
+// though it is assembled here.
+export interface ParsedPolygon {
+  wkt: string;
+  vertexCount: number;
+}
+
+const POLYGON_MIN_VERTICES = 3;
+const POLYGON_MAX_VERTICES = 1000;
+
+// Parse `lon,lat;lon,lat;lon,lat` into a closed WKT POLYGON ring. Note WKT
+// coordinate order is `lon lat` (X Y) — the same ST_MakePoint(lon, lat)
+// foot-gun the point geometry guards; a swap here would put latitude where
+// longitude belongs and the service's ST_Contains test would misclassify (the
+// service tests pin this).
+const PolygonParam = z
+  .string()
+  .trim()
+  .transform((raw, ctx): ParsedPolygon => {
+    const vertexStrs = raw
+      .split(";")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    if (vertexStrs.length < POLYGON_MIN_VERTICES) {
+      ctx.addIssue({
+        code: "custom",
+        message: `polygon needs at least ${POLYGON_MIN_VERTICES} vertices as "lon,lat;lon,lat;lon,lat".`,
+      });
+      return z.NEVER;
+    }
+    if (vertexStrs.length > POLYGON_MAX_VERTICES) {
+      ctx.addIssue({
+        code: "custom",
+        message: `polygon must have at most ${POLYGON_MAX_VERTICES} vertices.`,
+      });
+      return z.NEVER;
+    }
+    const ring: [number, number][] = [];
+    for (const vs of vertexStrs) {
+      const parts = vs.split(",");
+      if (parts.length !== 2) {
+        ctx.addIssue({ code: "custom", message: `polygon vertex "${vs}" must be "lon,lat".` });
+        return z.NEVER;
+      }
+      const lon = Number(parts[0]);
+      const lat = Number(parts[1]);
+      if (!Number.isFinite(lon) || lon < -180 || lon > 180) {
+        ctx.addIssue({
+          code: "custom",
+          message: `polygon vertex longitude "${parts[0]}" must be a number between -180 and 180.`,
+        });
+        return z.NEVER;
+      }
+      if (!Number.isFinite(lat) || lat < -90 || lat > 90) {
+        ctx.addIssue({
+          code: "custom",
+          message: `polygon vertex latitude "${parts[1]}" must be a number between -90 and 90.`,
+        });
+        return z.NEVER;
+      }
+      ring.push([lon, lat]);
+    }
+    // A WKT linear ring must be closed (first vertex repeated last). Close it
+    // here if the caller did not, so a 3-vertex triangle is a valid request.
+    const [firstLon, firstLat] = ring[0];
+    const [lastLon, lastLat] = ring[ring.length - 1];
+    if (firstLon !== lastLon || firstLat !== lastLat) {
+      ring.push([firstLon, firstLat]);
+    }
+    const coordList = ring.map(([lon, lat]) => `${lon} ${lat}`).join(", ");
+    return { wkt: `POLYGON((${coordList}))`, vertexCount: ring.length };
+  });
+
+/**
+ * GET /api/v1/telematics/vehicles/:vehicleId/geofence-status query schema.
+ * Provide EITHER a circle (centerLatitude + centerLongitude + radiusMeters) OR
+ * a polygon (`polygon=lon,lat;lon,lat;lon,lat`) — exactly one. `.strict()`
+ * rejects typo'd keys; the superRefine rejects "both", "neither", and a
+ * partial circle, each with a 400 naming what is wrong.
+ */
+export const GeofenceStatusQuerySchema = z
+  .object({
+    centerLatitude: coordParam(-90, 90, "centerLatitude").optional(),
+    centerLongitude: coordParam(-180, 180, "centerLongitude").optional(),
+    radiusMeters: coordParam(RADIUS_METERS_MIN, RADIUS_METERS_MAX, "radiusMeters").optional(),
+    polygon: PolygonParam.optional(),
+  })
+  .strict()
+  .superRefine((data, ctx) => {
+    const hasAnyCircle =
+      data.centerLatitude !== undefined ||
+      data.centerLongitude !== undefined ||
+      data.radiusMeters !== undefined;
+    const hasFullCircle =
+      data.centerLatitude !== undefined &&
+      data.centerLongitude !== undefined &&
+      data.radiusMeters !== undefined;
+    const hasPolygon = data.polygon !== undefined;
+
+    if (hasPolygon && hasAnyCircle) {
+      ctx.addIssue({
+        code: "custom",
+        message: "Provide either a circle (center + radius) or a polygon, not both.",
+      });
+      return;
+    }
+    if (!hasPolygon && !hasAnyCircle) {
+      ctx.addIssue({
+        code: "custom",
+        message:
+          "Provide a geofence: a circle (centerLatitude, centerLongitude, radiusMeters) or a polygon (lon,lat;lon,lat;lon,lat).",
+      });
+      return;
+    }
+    if (hasAnyCircle && !hasFullCircle) {
+      ctx.addIssue({
+        code: "custom",
+        message: "A circle geofence needs centerLatitude, centerLongitude, and radiusMeters.",
+      });
+    }
+  });
+
+export type GeofenceStatusQuery = z.infer<typeof GeofenceStatusQuerySchema>;

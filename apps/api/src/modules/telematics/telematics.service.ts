@@ -3,7 +3,7 @@ import { Injectable } from "@nestjs/common";
 import { type Prisma } from "@prisma/client";
 import { type Queue } from "bullmq";
 
-import { type GpsPingInput } from "./telematics.schemas";
+import { type GpsPingInput, type PingSortColumn, type PingSortDir } from "./telematics.schemas";
 
 // PrismaService is injected by NestJS via emitDecoratorMetadata (see
 // apps/api/tsconfig.json); the class reference must remain a value import at
@@ -46,6 +46,92 @@ export const GPS_INGEST_CONCURRENCY = 4;
 export interface GpsIngestJobData {
   createdById: string;
   pings: GpsPingInput[];
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// READ PATH (ADR-0029 T5) — the RBAC-gated raw/derived read split.
+// ──────────────────────────────────────────────────────────────────────────
+
+// Pagination defaults/bounds for the raw trace list — same `LIST_TAKE_` prefix
+// and 200 ceiling every Phase-1 list service uses. The clamp in `listRawPings`
+// is defense-in-depth: the controller validates `take` against the same
+// ceiling, but a future in-process caller could reach the service directly.
+export const LIST_TAKE_DEFAULT = 50;
+export const LIST_TAKE_MAX = 200;
+const LIST_TAKE_MIN = 1;
+
+// RAW trace projection (gps:read-raw). The native Float `latitude`/`longitude`
+// + movement + `timestamp` + FK/audit columns, read NATIVELY by Prisma. It
+// deliberately NEVER selects the `geometry` column — Prisma cannot select an
+// Unsupported type, and the generated GpsPing client type does not even expose
+// it, so `geometry: true` would not type-check. This is the type-safe hot path
+// the hybrid representation (ADR-0029 c8) keeps off raw SQL; spatial SQL is
+// confined to `geofenceStatus` below. Tier-5 coordinates DO travel to the
+// ADMIN caller over the wire (that is the raw-trace export, ADR-0027 c7), but
+// they never log (pino redact denylists the GPS keys) and never enter a span.
+const RAW_PING_SELECT = {
+  id: true,
+  vehicleId: true,
+  tripId: true,
+  latitude: true,
+  longitude: true,
+  altitude: true,
+  speed: true,
+  heading: true,
+  timestamp: true,
+  createdAt: true,
+  createdById: true,
+} satisfies Prisma.GpsPingSelect;
+
+export type RawPingItem = Prisma.GpsPingGetPayload<{ select: typeof RAW_PING_SELECT }>;
+
+export interface RawPingsResult {
+  items: RawPingItem[];
+  total: number;
+}
+
+// DERIVED live-location projection (gps:read-derived). The SINGLE latest fix —
+// a current position for the live-location map (ADR-0027 c7's derived view),
+// NOT the full trail. A single current point is genuinely lower-resolution
+// than the raw trace and so stays on the OFFICE_STAFF side of the
+// raw-vs-derived split; the anti-circumvention clause (ADR-0027 c6) keeps a
+// dense trail Tier 5, which is exactly why this returns ONE fix, not a list.
+const LOCATION_SELECT = {
+  latitude: true,
+  longitude: true,
+  altitude: true,
+  speed: true,
+  heading: true,
+  timestamp: true,
+} satisfies Prisma.GpsPingSelect;
+
+export type LocationFix = Prisma.GpsPingGetPayload<{ select: typeof LOCATION_SELECT }>;
+
+// A geofence the caller PARAMETERIZES per request (geofence-polygon storage is
+// deferred to its own slice — see telematics.schemas.ts). Either a circle
+// (proximity, ST_DWithin) or a polygon (containment, ST_Contains). The `wkt`
+// is built by the schema from validated finite numbers and bound as a
+// `$queryRaw` parameter (never interpolated).
+export type GeofenceQuery =
+  | { kind: "circle"; centerLatitude: number; centerLongitude: number; radiusMeters: number }
+  | { kind: "polygon"; wkt: string; vertexCount: number };
+
+// Geofence status of the vehicle's LATEST fix: a boolean (null when the
+// vehicle has no ping) plus the fix time it was evaluated against (the
+// timestamp is NOT Tier-5 location data — ADR-0027 c9 — so it is safe to
+// return and answers "inside as of when?"). Deliberately carries NO
+// coordinates: the spatial `$queryRaw` returns only this boolean + timestamp,
+// so even the raw-SQL path egresses no Tier-5 coordinate.
+export interface GeofenceStatusResult {
+  inside: boolean | null;
+  latestFixAt: Date | null;
+}
+
+// The raw row shape `geofenceStatus`'s `$queryRaw` returns: `ST_DWithin` /
+// `ST_Contains` yield a Postgres boolean, the aliased `timestamp` a Date.
+interface GeofenceStatusRow {
+  inside: boolean | null;
+  latestFixAt: Date | null;
 }
 
 @Injectable()
@@ -106,5 +192,155 @@ export class TelematicsService {
     }));
 
     return this.prisma.gpsPing.createMany({ data: rows });
+  }
+
+  /**
+   * RAW trace read (gps:read-raw, ADMIN-only — ADR-0027 c7). List one
+   * vehicle's full-resolution pings, time-bounded by `from`/`to` (inclusive)
+   * and paginated, newest fix first by default. Native Prisma read of the
+   * Float columns (RAW_PING_SELECT) — NO geometry, NO raw SQL: the hybrid
+   * representation keeps ordinary coordinate reads on the type-safe path.
+   *
+   * `vehicleId` is the path param, an exact-equality filter; an unknown id
+   * yields `{ items: [], total: 0 }` (the same survives-a-stale-referent UX
+   * the fuel-logs list documents). `skip`/`take` are clamped to safe bounds as
+   * defense-in-depth even though the controller already validated them.
+   */
+  async listRawPings({
+    vehicleId,
+    skip = 0,
+    take = LIST_TAKE_DEFAULT,
+    from,
+    to,
+    sortBy = "timestamp",
+    sortDir = "desc",
+  }: {
+    vehicleId: string;
+    skip?: number;
+    take?: number;
+    from?: Date;
+    to?: Date;
+    sortBy?: PingSortColumn;
+    sortDir?: PingSortDir;
+  }): Promise<RawPingsResult> {
+    const safeSkip = Number.isFinite(skip) && skip >= 0 ? Math.floor(skip) : 0;
+    const safeTakeRaw = Number.isFinite(take) ? Math.floor(take) : LIST_TAKE_DEFAULT;
+    const safeTake = Math.min(Math.max(safeTakeRaw, LIST_TAKE_MIN), LIST_TAKE_MAX);
+
+    // Inclusive `timestamp` range; each bound included only when present so an
+    // omitted filter does not generate a noisy `where` clause.
+    const range: Prisma.DateTimeFilter = {};
+    if (from) range.gte = from;
+    if (to) range.lte = to;
+    const hasRange = from !== undefined || to !== undefined;
+
+    const where: Prisma.GpsPingWhereInput = {
+      vehicleId,
+      ...(hasRange ? { timestamp: range } : {}),
+    };
+
+    // Primary sort by the requested column + direction; `id` as a stable
+    // tiebreaker so pagination is stable when two fixes share a timestamp
+    // (a real case for a batch flushed with identical device times).
+    const orderBy: Prisma.GpsPingOrderByWithRelationInput[] = [
+      { [sortBy]: sortDir } as Prisma.GpsPingOrderByWithRelationInput,
+      { id: sortDir } as Prisma.GpsPingOrderByWithRelationInput,
+    ];
+
+    const [items, total] = await this.prisma.$transaction([
+      this.prisma.gpsPing.findMany({
+        skip: safeSkip,
+        take: safeTake,
+        where,
+        orderBy,
+        select: RAW_PING_SELECT,
+      }),
+      this.prisma.gpsPing.count({ where }),
+    ]);
+
+    return { items, total };
+  }
+
+  /**
+   * DERIVED live location (gps:read-derived — ADMIN + OFFICE_STAFF). The single
+   * most-recent fix for the vehicle, or null if it has none. Native Prisma
+   * read (no raw SQL). This is the "live-location map" derived view ADR-0027
+   * c7 puts on the OFFICE_STAFF side of the split — ONE current point, not the
+   * trail (which would trip the anti-circumvention clause, ADR-0027 c6).
+   */
+  async latestLocation(vehicleId: string): Promise<LocationFix | null> {
+    return this.prisma.gpsPing.findFirst({
+      where: { vehicleId },
+      orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+      select: LOCATION_SELECT,
+    });
+  }
+
+  /**
+   * DERIVED geofence status (gps:read-derived) — the FIRST real PostGIS
+   * spatial query in FleetCo (ADR-0029 c13). Classify the vehicle's LATEST fix
+   * as inside/outside a caller-parameterized geofence, over the generated
+   * `geometry(Point, 4326)` column the hybrid representation exists to enable
+   * (ADR-0029 c8). Returns a single boolean (+ the fix time) — a genuinely
+   * lower-resolution derived product, never the trail.
+   *
+   * Raw `$queryRaw` is used because the predicate is inherently `ST_*`-shaped
+   * (Prisma cannot express it) — exactly the spatial path the hybrid
+   * representation confines raw SQL to. Every caller value is bound via the
+   * tagged-template `${}` (Prisma sends them as $1, $2, … parameters): the
+   * vehicleId, the center lon/lat/radius, and the polygon WKT are PARAMETERS,
+   * never string-interpolated, so there is no SQL-injection surface.
+   *
+   * GEOMETRY vs GEOGRAPHY (the documented choice this ticket calls for):
+   *   • CIRCLE → ST_DWithin. An SRID-4326 `geometry` ST_DWithin measures
+   *     distance in DEGREES, which is useless for a "within N metres" depot
+   *     fence (a degree is ~111 km of latitude and varies with longitude). So
+   *     both sides are cast to `::geography`, under which ST_DWithin is
+   *     METER-accurate on the WGS84 spheroid — the correct unit for a physical
+   *     geofence radius. Index note: the geography cast does not use the
+   *     point's `geometry` GIST index, but this query evaluates the predicate
+   *     against the SINGLE latest fix (ORDER BY timestamp DESC LIMIT 1, served
+   *     by the `(timestamp desc)` index), so there is no spatial scan to
+   *     accelerate; a future many-row proximity scan would add a geography
+   *     expression index or a degree-based bounding pre-filter.
+   *   • POLYGON → ST_Contains, evaluated in the native SRID-4326 `geometry`.
+   *     Containment is TOPOLOGICAL (point-in-polygon), so it is correct
+   *     regardless of the planar-degree units — no geography cast is needed or
+   *     wanted. Both the polygon (from ST_GeomFromText(wkt, 4326)) and the
+   *     point are SRID 4326, so they are directly comparable.
+   *
+   * ST_MakePoint(lon, lat) X,Y = lon,lat order (the PostGIS foot-gun, the same
+   * one the generated column and the schema's WKT builder observe). A swap
+   * would put latitude where longitude belongs; the service tests seed pings
+   * at Kathmandu coordinates and assert inside/outside so a swap fails loudly.
+   */
+  async geofenceStatus(vehicleId: string, geofence: GeofenceQuery): Promise<GeofenceStatusResult> {
+    let rows: GeofenceStatusRow[];
+    if (geofence.kind === "circle") {
+      rows = await this.prisma.$queryRaw<GeofenceStatusRow[]>`
+        SELECT
+          ST_DWithin(
+            "geometry"::geography,
+            ST_SetSRID(ST_MakePoint(${geofence.centerLongitude}, ${geofence.centerLatitude}), 4326)::geography,
+            ${geofence.radiusMeters}
+          ) AS inside,
+          "timestamp" AS "latestFixAt"
+        FROM "gps_ping"
+        WHERE "vehicleId" = ${vehicleId}
+        ORDER BY "timestamp" DESC, "id" DESC
+        LIMIT 1`;
+    } else {
+      rows = await this.prisma.$queryRaw<GeofenceStatusRow[]>`
+        SELECT
+          ST_Contains(ST_GeomFromText(${geofence.wkt}, 4326), "geometry") AS inside,
+          "timestamp" AS "latestFixAt"
+        FROM "gps_ping"
+        WHERE "vehicleId" = ${vehicleId}
+        ORDER BY "timestamp" DESC, "id" DESC
+        LIMIT 1`;
+    }
+
+    const row = rows[0];
+    return { inside: row?.inside ?? null, latestFixAt: row?.latestFixAt ?? null };
   }
 }
