@@ -11,6 +11,7 @@ import { CustomersModule } from "./modules/customers/customers.module";
 import { DriversModule } from "./modules/drivers/drivers.module";
 import { ExpenseLogsModule } from "./modules/expense-logs/expense-logs.module";
 import { FuelLogsModule } from "./modules/fuel-logs/fuel-logs.module";
+import { GeofencesModule } from "./modules/geofences/geofences.module";
 import { HealthModule } from "./modules/health/health.module";
 import { JobsModule } from "./modules/jobs/jobs.module";
 import { PrismaModule } from "./modules/prisma/prisma.module";
@@ -127,6 +128,7 @@ import { VehiclesModule } from "./modules/vehicles/vehicles.module";
     ReportsModule,
     TelematicsModule,
     RetentionModule,
+    GeofencesModule,
   ],
 })
 export class AppModule {}
