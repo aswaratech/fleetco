@@ -1,6 +1,6 @@
 import { InjectQueue } from "@nestjs/bullmq";
-import { Injectable } from "@nestjs/common";
-import { type Prisma } from "@prisma/client";
+import { Injectable, NotFoundException } from "@nestjs/common";
+import { type GeofenceType, type Prisma } from "@prisma/client";
 import { type Queue } from "bullmq";
 
 import { type GpsPingInput, type PingSortColumn, type PingSortDir } from "./telematics.schemas";
@@ -11,6 +11,16 @@ import { type GpsPingInput, type PingSortColumn, type PingSortDir } from "./tele
 // other vertical-slice service.
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports
 import { PrismaService } from "../prisma/prisma.service";
+
+// GeofencesService is injected to resolve a STORED fence by id in the G5
+// geofence-status wiring (ADR-0030 G5). It is the geofence aggregate's PUBLIC
+// service interface — GeofencesModule exports it for exactly this consumer
+// (its export comment names the G5 wiring), so reading a stored fence goes
+// through the module boundary rather than reaching into the geofence table
+// directly (CLAUDE.md §"talk through public service interfaces"). Imported as a
+// runtime value for DI, same eslint override as PrismaService above.
+// eslint-disable-next-line @typescript-eslint/consistent-type-imports
+import { GeofencesService } from "../geofences/geofences.service";
 
 // The named queue this feature owns (ADR-0029 commitment 2: per-feature queue
 // ownership — the root config lives in the @Global() QueueModule from T1, but
@@ -107,24 +117,45 @@ const LOCATION_SELECT = {
 
 export type LocationFix = Prisma.GpsPingGetPayload<{ select: typeof LOCATION_SELECT }>;
 
-// A geofence the caller PARAMETERIZES per request (geofence-polygon storage is
-// deferred to its own slice — see telematics.schemas.ts). Either a circle
-// (proximity, ST_DWithin) or a polygon (containment, ST_Contains). The `wkt`
-// is built by the schema from validated finite numbers and bound as a
-// `$queryRaw` parameter (never interpolated).
+// A geofence to classify the vehicle's LATEST fix against. THREE kinds:
+//   • circle  — proximity (ST_DWithin), caller-parameterized per request.
+//   • polygon — containment (ST_Contains), caller-parameterized per request;
+//     the `wkt` is built by the schema from validated finite numbers.
+//   • stored  — a STORED Geofence by id (ADR-0030 G5). The service loads the
+//     row, reads its canonical `boundaryWkt`, and runs the SAME ST_Contains
+//     query as the polygon kind — the boundaryWkt is byte-identical to what a
+//     query-param polygon produces for the same vertices (the shared
+//     common/wkt builder, ADR-0030 commitment 1's coherence guarantee), so the
+//     spatial query body is unchanged; only the WKT's SOURCE differs (a stored
+//     row vs a query param).
+// Every value reaches Postgres bound as a `$queryRaw` parameter, never
+// string-interpolated.
 export type GeofenceQuery =
   | { kind: "circle"; centerLatitude: number; centerLongitude: number; radiusMeters: number }
-  | { kind: "polygon"; wkt: string; vertexCount: number };
+  | { kind: "polygon"; wkt: string; vertexCount: number }
+  | { kind: "stored"; geofenceId: string };
+
+// The stored fence echoed back when a `geofenceId` was supplied: its id + type
+// only (both Tier-3 config, ADR-0027 c6) — NEVER the boundary coordinates, so
+// the derived status egresses a boolean + timestamp + the fence's own id/type,
+// and nothing finer.
+export interface ResolvedGeofence {
+  id: string;
+  type: GeofenceType;
+}
 
 // Geofence status of the vehicle's LATEST fix: a boolean (null when the
 // vehicle has no ping) plus the fix time it was evaluated against (the
 // timestamp is NOT Tier-5 location data — ADR-0027 c9 — so it is safe to
 // return and answers "inside as of when?"). Deliberately carries NO
 // coordinates: the spatial `$queryRaw` returns only this boolean + timestamp,
-// so even the raw-SQL path egresses no Tier-5 coordinate.
+// so even the raw-SQL path egresses no Tier-5 coordinate. `resolvedGeofence` is
+// populated ONLY on the stored (`geofenceId`) path so the controller can echo
+// WHICH stored fence was evaluated; it is null for the circle/polygon kinds.
 export interface GeofenceStatusResult {
   inside: boolean | null;
   latestFixAt: Date | null;
+  resolvedGeofence: ResolvedGeofence | null;
 }
 
 // The raw row shape `geofenceStatus`'s `$queryRaw` returns: `ST_DWithin` /
@@ -139,6 +170,7 @@ export class TelematicsService {
   constructor(
     private readonly prisma: PrismaService,
     @InjectQueue(GPS_INGEST_QUEUE) private readonly queue: Queue<GpsIngestJobData>,
+    private readonly geofences: GeofencesService,
   ) {}
 
   /**
@@ -279,10 +311,19 @@ export class TelematicsService {
   /**
    * DERIVED geofence status (gps:read-derived) — the FIRST real PostGIS
    * spatial query in FleetCo (ADR-0029 c13). Classify the vehicle's LATEST fix
-   * as inside/outside a caller-parameterized geofence, over the generated
-   * `geometry(Point, 4326)` column the hybrid representation exists to enable
-   * (ADR-0029 c8). Returns a single boolean (+ the fix time) — a genuinely
-   * lower-resolution derived product, never the trail.
+   * as inside/outside a geofence, over the generated `geometry(Point, 4326)`
+   * column the hybrid representation exists to enable (ADR-0029 c8). Returns a
+   * single boolean (+ the fix time) — a genuinely lower-resolution derived
+   * product, never the trail.
+   *
+   * As of ADR-0030 G5 the geofence may be a STORED fence (by `geofenceId`), not
+   * only a caller-parameterized circle/polygon: the service loads the fence via
+   * the GeofencesService public interface, throws 404 for a missing id, and
+   * runs the SAME ST_Contains query against the stored row's `boundaryWkt`
+   * (which is byte-identical to a query-param polygon's WKT for the same
+   * vertices — the shared common/wkt builder, ADR-0030 c1). On that path it
+   * echoes the resolved fence's id + type (in `resolvedGeofence`), never its
+   * coordinates. This is the "one-line change" ADR-0029 T5 anticipated.
    *
    * Raw `$queryRaw` is used because the predicate is inherently `ST_*`-shaped
    * (Prisma cannot express it) — exactly the spatial path the hybrid
@@ -315,9 +356,10 @@ export class TelematicsService {
    * at Kathmandu coordinates and assert inside/outside so a swap fails loudly.
    */
   async geofenceStatus(vehicleId: string, geofence: GeofenceQuery): Promise<GeofenceStatusResult> {
-    let rows: GeofenceStatusRow[];
+    // CIRCLE → ST_DWithin proximity (meter-accurate via the geography cast).
+    // Returns early; resolvedGeofence is null (there is no stored row).
     if (geofence.kind === "circle") {
-      rows = await this.prisma.$queryRaw<GeofenceStatusRow[]>`
+      const rows = await this.prisma.$queryRaw<GeofenceStatusRow[]>`
         SELECT
           ST_DWithin(
             "geometry"::geography,
@@ -329,18 +371,46 @@ export class TelematicsService {
         WHERE "vehicleId" = ${vehicleId}
         ORDER BY "timestamp" DESC, "id" DESC
         LIMIT 1`;
-    } else {
-      rows = await this.prisma.$queryRaw<GeofenceStatusRow[]>`
-        SELECT
-          ST_Contains(ST_GeomFromText(${geofence.wkt}, 4326), "geometry") AS inside,
-          "timestamp" AS "latestFixAt"
-        FROM "gps_ping"
-        WHERE "vehicleId" = ${vehicleId}
-        ORDER BY "timestamp" DESC, "id" DESC
-        LIMIT 1`;
+      const row = rows[0];
+      return {
+        inside: row?.inside ?? null,
+        latestFixAt: row?.latestFixAt ?? null,
+        resolvedGeofence: null,
+      };
     }
 
+    // POLYGON (query-param) or STORED (by id) — both classify with the SAME
+    // ST_Contains query over the SAME WKT representation. Resolve the WKT (and,
+    // for a stored fence, the id + type to echo) first.
+    //
+    // STORED (ADR-0030 G5 — the "one-line change" T5 anticipated): load the row
+    // through the GeofencesService PUBLIC interface (GeofencesModule exported it
+    // for exactly this), 404 if it is gone, and read its canonical
+    // `boundaryWkt`. That text is byte-identical to a query-param polygon's WKT
+    // for the same vertices (the shared common/wkt builder, ADR-0030 c1), so
+    // the spatial query below does NOT change — only the WKT's source does.
+    let wkt: string;
+    let resolvedGeofence: ResolvedGeofence | null = null;
+    if (geofence.kind === "stored") {
+      const fence = await this.geofences.findById(geofence.geofenceId);
+      if (!fence) {
+        throw new NotFoundException(`Geofence ${geofence.geofenceId} not found.`);
+      }
+      wkt = fence.boundaryWkt;
+      resolvedGeofence = { id: fence.id, type: fence.type };
+    } else {
+      wkt = geofence.wkt;
+    }
+
+    const rows = await this.prisma.$queryRaw<GeofenceStatusRow[]>`
+      SELECT
+        ST_Contains(ST_GeomFromText(${wkt}, 4326), "geometry") AS inside,
+        "timestamp" AS "latestFixAt"
+      FROM "gps_ping"
+      WHERE "vehicleId" = ${vehicleId}
+      ORDER BY "timestamp" DESC, "id" DESC
+      LIMIT 1`;
     const row = rows[0];
-    return { inside: row?.inside ?? null, latestFixAt: row?.latestFixAt ?? null };
+    return { inside: row?.inside ?? null, latestFixAt: row?.latestFixAt ?? null, resolvedGeofence };
   }
 }

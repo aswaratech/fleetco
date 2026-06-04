@@ -11,6 +11,7 @@ import {
   Req,
   UseGuards,
 } from "@nestjs/common";
+import { type GeofenceType } from "@prisma/client";
 
 import { ZodValidationPipe } from "../../common/zod-validation.pipe";
 import { AuthGuard } from "../auth/auth.guard";
@@ -40,6 +41,7 @@ import {
   type GeofenceQuery,
   type LocationFix,
   type RawPingItem,
+  type ResolvedGeofence,
 } from "./telematics.service";
 
 // 202 Accepted acknowledgement (ADR-0029 commitment 10): the write is async,
@@ -72,10 +74,14 @@ export interface VehicleLocationResponse {
 
 // The geofence echoed back on a geofence-status response (so the caller sees
 // what was evaluated). The polygon case echoes only the vertex count, not the
-// whole ring — enough context without bloating the response.
+// whole ring — enough context without bloating the response. The stored case
+// (ADR-0030 G5) echoes the resolved fence's id + type (both Tier-3 config) so a
+// caller passing `geofenceId` sees WHICH stored fence was evaluated — but never
+// its coordinates (Tier-5 egress discipline holds on the derived read).
 export type GeofenceEcho =
   | { kind: "circle"; centerLatitude: number; centerLongitude: number; radiusMeters: number }
-  | { kind: "polygon"; vertexCount: number };
+  | { kind: "polygon"; vertexCount: number }
+  | { kind: "stored"; geofenceId: string; type: GeofenceType };
 
 // Wire response for GET …/vehicles/:vehicleId/geofence-status
 // (gps:read-derived). A single boolean (null when the vehicle has no fix) plus
@@ -88,11 +94,16 @@ export interface GeofenceStatusResponse {
   latestFixAt: Date | null;
 }
 
-// Narrow the validated geofence-status query (circle XOR polygon, guaranteed
-// by the schema's superRefine) into the service's GeofenceQuery union. The
-// explicit field checks avoid a non-null assertion and keep the function total
-// — the throw is unreachable after the refine but fails closed if it drifts.
+// Narrow the validated geofence-status query (circle XOR polygon XOR
+// geofenceId, guaranteed by the schema's three-way superRefine) into the
+// service's GeofenceQuery union. The explicit field checks avoid a non-null
+// assertion and keep the function total — the throw is unreachable after the
+// refine but fails closed if it drifts. geofenceId is checked first; the refine
+// guarantees the modes are mutually exclusive, so order does not affect output.
 function toGeofenceQuery(query: GeofenceStatusQuery): GeofenceQuery {
+  if (query.geofenceId !== undefined) {
+    return { kind: "stored", geofenceId: query.geofenceId };
+  }
   if (query.polygon) {
     return { kind: "polygon", wkt: query.polygon.wkt, vertexCount: query.polygon.vertexCount };
   }
@@ -108,20 +119,34 @@ function toGeofenceQuery(query: GeofenceStatusQuery): GeofenceQuery {
       radiusMeters: query.radiusMeters,
     };
   }
-  throw new BadRequestException("A geofence (circle or polygon) is required.");
+  throw new BadRequestException("A geofence (circle, polygon, or geofenceId) is required.");
 }
 
-// Build the safe-to-echo geofence descriptor for the response.
-function describeGeofence(geofence: GeofenceQuery): GeofenceEcho {
-  if (geofence.kind === "circle") {
-    return {
-      kind: "circle",
-      centerLatitude: geofence.centerLatitude,
-      centerLongitude: geofence.centerLongitude,
-      radiusMeters: geofence.radiusMeters,
-    };
+// Build the safe-to-echo geofence descriptor for the response. For a stored
+// fence the descriptor is the resolved row's id + type, which the SERVICE
+// loaded (it returns `resolved` on the stored path, or 404s a missing id), so
+// `resolved` is non-null whenever `geofence.kind === "stored"`; the guard fails
+// closed if that contract ever drifts rather than echo a half-built descriptor.
+function describeGeofence(
+  geofence: GeofenceQuery,
+  resolved: ResolvedGeofence | null,
+): GeofenceEcho {
+  switch (geofence.kind) {
+    case "circle":
+      return {
+        kind: "circle",
+        centerLatitude: geofence.centerLatitude,
+        centerLongitude: geofence.centerLongitude,
+        radiusMeters: geofence.radiusMeters,
+      };
+    case "polygon":
+      return { kind: "polygon", vertexCount: geofence.vertexCount };
+    case "stored":
+      if (!resolved) {
+        throw new BadRequestException("Stored geofence could not be resolved.");
+      }
+      return { kind: "stored", geofenceId: resolved.id, type: resolved.type };
   }
-  return { kind: "polygon", vertexCount: geofence.vertexCount };
 }
 
 // Telematics feature controller (ADR-0029 commitment 2). The route prefix
@@ -216,12 +241,18 @@ export class TelematicsController {
   }
 
   /**
-   * DERIVED geofence status (ADR-0027 c6 / ADR-0029 c13) — `gps:read-derived`,
-   * ADMIN + OFFICE_STAFF. The FIRST PostGIS geofencing: classify the vehicle's
-   * latest fix as inside/outside a caller-parameterized geofence (a circle via
-   * ST_DWithin, or a polygon via ST_Contains — see TelematicsService). Returns
-   * a single boolean (+ the fix time, NOT coordinates) — a Tier-3 derived
-   * status, kept genuinely lower-resolution than the raw trail.
+   * DERIVED geofence status (ADR-0027 c6 / ADR-0029 c13 / ADR-0030 G5) —
+   * `gps:read-derived`, ADMIN + OFFICE_STAFF. The FIRST PostGIS geofencing:
+   * classify the vehicle's latest fix as inside/outside a geofence supplied as
+   * a circle (ST_DWithin), a polygon (ST_Contains), or a STORED fence by
+   * `geofenceId` (the service loads it and 404s a missing id) — see
+   * TelematicsService. Returns a single boolean (+ the fix time, NOT
+   * coordinates) — a Tier-3 derived status, kept genuinely lower-resolution
+   * than the raw trail. On the geofenceId path the response also echoes the
+   * resolved fence's id + type (Tier-3 config), never its coordinates.
+   *
+   * The gate stays `gps:read-derived`: this reads geofence STATUS (a derived
+   * boolean), NOT the geofence CONFIG, so it is emphatically not `geofences:*`.
    */
   @Get("vehicles/:vehicleId/geofence-status")
   @RequirePermission("gps:read-derived")
@@ -230,7 +261,15 @@ export class TelematicsController {
     @Query(new ZodValidationPipe(GeofenceStatusQuerySchema)) query: GeofenceStatusQuery,
   ): Promise<GeofenceStatusResponse> {
     const geofence = toGeofenceQuery(query);
-    const { inside, latestFixAt } = await this.telematics.geofenceStatus(vehicleId, geofence);
-    return { vehicleId, geofence: describeGeofence(geofence), inside, latestFixAt };
+    const { inside, latestFixAt, resolvedGeofence } = await this.telematics.geofenceStatus(
+      vehicleId,
+      geofence,
+    );
+    return {
+      vehicleId,
+      geofence: describeGeofence(geofence, resolvedGeofence),
+      inside,
+      latestFixAt,
+    };
   }
 }

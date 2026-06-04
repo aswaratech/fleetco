@@ -4,6 +4,7 @@ import { Test } from "@nestjs/testing";
 import { type Queue } from "bullmq";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "vitest";
 
+import { GeofencesService } from "../src/modules/geofences/geofences.service";
 import { PrismaService } from "../src/modules/prisma/prisma.service";
 import { QueueModule } from "../src/modules/queue/queue.module";
 import { GpsIngestProcessor } from "../src/modules/telematics/gps-ingest.processor";
@@ -65,7 +66,9 @@ describe("gps-ingest worker (enqueue → bulk insert, ADR-0029 T3)", () => {
         BullModule.registerQueue({ name: GPS_INGEST_QUEUE }),
       ],
       // Real service (producer + insert) + the real @Processor worker + Prisma.
-      providers: [TelematicsService, GpsIngestProcessor, PrismaService],
+      // GeofencesService is the G5 dependency of TelematicsService (ADR-0030);
+      // it needs only PrismaService and is inert on the ingest/worker path.
+      providers: [TelematicsService, GeofencesService, GpsIngestProcessor, PrismaService],
     }).compile();
 
     app = moduleRef.createNestApplication({ logger: false });

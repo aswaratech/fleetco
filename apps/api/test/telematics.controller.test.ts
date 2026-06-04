@@ -9,6 +9,7 @@ import { ZodValidationPipe } from "../src/common/zod-validation.pipe";
 import { AuthGuard } from "../src/modules/auth/auth.guard";
 import { AUTH } from "../src/modules/auth/auth.tokens";
 import { RolesGuard } from "../src/modules/auth/roles.guard";
+import { GeofencesService } from "../src/modules/geofences/geofences.service";
 import { PrismaService } from "../src/modules/prisma/prisma.service";
 import { TelematicsController } from "../src/modules/telematics/telematics.controller";
 import { IngestBatchSchema } from "../src/modules/telematics/telematics.schemas";
@@ -192,6 +193,10 @@ describe("Telematics ingest HTTP boundary (real AuthGuard + RolesGuard chain)", 
       controllers: [TelematicsController],
       providers: [
         TelematicsService,
+        // TelematicsService injects GeofencesService for the G5 stored-fence
+        // wiring (ADR-0030); it depends only on PrismaService, already present.
+        // Inert for these ingest tests (no geofenceId path is exercised here).
+        GeofencesService,
         PrismaService,
         // Override the gps-ingest queue with the fake so these auth/validation
         // tests need no live Redis; the worker test exercises the real queue.
