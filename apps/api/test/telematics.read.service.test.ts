@@ -2,6 +2,7 @@ import { getQueueToken } from "@nestjs/bullmq";
 import { Test, type TestingModule } from "@nestjs/testing";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 
+import { GeofencesService } from "../src/modules/geofences/geofences.service";
 import { PrismaService } from "../src/modules/prisma/prisma.service";
 import { GeofenceStatusQuerySchema } from "../src/modules/telematics/telematics.schemas";
 import {
@@ -43,6 +44,7 @@ describe("TelematicsService reads + geofencing (ADR-0029 T5)", () => {
     module = await Test.createTestingModule({
       providers: [
         TelematicsService,
+        GeofencesService,
         PrismaService,
         { provide: getQueueToken(GPS_INGEST_QUEUE), useValue: fakeQueue },
       ],

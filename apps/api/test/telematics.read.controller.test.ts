@@ -9,6 +9,7 @@ import { ZodValidationPipe } from "../src/common/zod-validation.pipe";
 import { AuthGuard } from "../src/modules/auth/auth.guard";
 import { AUTH } from "../src/modules/auth/auth.tokens";
 import { RolesGuard } from "../src/modules/auth/roles.guard";
+import { GeofencesService } from "../src/modules/geofences/geofences.service";
 import { PrismaService } from "../src/modules/prisma/prisma.service";
 import { TelematicsController } from "../src/modules/telematics/telematics.controller";
 import {
@@ -180,6 +181,7 @@ describe("Telematics read RBAC (gps:read-raw / gps:read-derived, ADR-0029 T5)", 
       controllers: [TelematicsController],
       providers: [
         TelematicsService,
+        GeofencesService,
         PrismaService,
         { provide: getQueueToken(GPS_INGEST_QUEUE), useValue: fakeQueue },
         AuthGuard,

@@ -232,24 +232,30 @@ export type ListPingsQuery = z.infer<typeof ListPingsQuerySchema>;
 
 // ── Geofence status (gps:read-derived, ADMIN + OFFICE_STAFF) ──
 //
-// A parameterized geofence check over the vehicle's LATEST fix — a single
-// boolean ("is the vehicle inside this geofence right now?"), the derived,
-// genuinely-lower-resolution product ADR-0027 c6/c7 keeps on the OFFICE_STAFF
-// side of the raw-vs-derived split (NOT the full trail relabeled, which the
-// anti-circumvention clause keeps Tier 5). Two mutually-exclusive geofence
+// A geofence check over the vehicle's LATEST fix — a single boolean ("is the
+// vehicle inside this geofence right now?"), the derived, genuinely-lower-
+// resolution product ADR-0027 c6/c7 keeps on the OFFICE_STAFF side of the
+// raw-vs-derived split (NOT the full trail relabeled, which the
+// anti-circumvention clause keeps Tier 5). THREE mutually-exclusive geofence
 // shapes, exactly one per request (the superRefine enforces it):
 //
-//   • CIRCLE  — centerLatitude + centerLongitude + radiusMeters → ST_DWithin
+//   • CIRCLE   — centerLatitude + centerLongitude + radiusMeters → ST_DWithin
 //     (meter-accurate via a geography cast; see the service).
-//   • POLYGON — a vertex list `lon,lat;lon,lat;lon,lat` (≥3) → ST_Contains.
+//   • POLYGON  — a vertex list `lon,lat;lon,lat;lon,lat` (≥3) → ST_Contains.
+//   • GEOFENCE — a STORED fence by id (`geofenceId`). The service loads the
+//     row's canonical `boundaryWkt` and runs the SAME ST_Contains query as the
+//     polygon shape: the stored WKT is byte-identical to what a query-param
+//     polygon produces for the same vertices (the shared common/wkt builder,
+//     ADR-0030 commitment 1's coherence guarantee), so only the WKT's SOURCE
+//     differs. A missing id is a 404, resolved in the service (not here).
 //
-// Geofence-polygon STORAGE (a `geometry(Polygon, 4326)` company-configuration
-// aggregate, Tier 3 per ADR-0027 c6) is DEFERRED to its own sibling slice — it
-// needs its own design (depot / customer-site / route-corridor types, naming,
-// a management surface) and would balloon this read slice. T5 demonstrates
-// geofencing against a geofence the caller PARAMETERIZES per request; the
-// query is identical once a stored-polygon slice supplies the geometry from a
-// row instead of a query param. (Said explicitly in the PR description.)
+// The geofenceId shape (ADR-0030 G5) consumes the now-shipped Geofence storage
+// aggregate (ADR-0030 G1–G4) — the "one-line change" ADR-0029 T5 anticipated.
+// The earlier "geofence-polygon storage is deferred to its own sibling slice"
+// note (it needed depot / customer-site / route-corridor types, naming, and a
+// management surface) is now DISCHARGED: storage exists, and this is its read
+// wiring. The circle and polygon shapes are unchanged — a caller may still pass
+// an ad-hoc fence per request without storing it.
 
 // A coerced finite coordinate/number query param with bounds. Like `intParam`
 // but accepts decimals (coordinates are not integers). A present-but-empty
@@ -304,10 +310,13 @@ export type { ParsedPolygon };
 
 /**
  * GET /api/v1/telematics/vehicles/:vehicleId/geofence-status query schema.
- * Provide EITHER a circle (centerLatitude + centerLongitude + radiusMeters) OR
- * a polygon (`polygon=lon,lat;lon,lat;lon,lat`) — exactly one. `.strict()`
- * rejects typo'd keys; the superRefine rejects "both", "neither", and a
- * partial circle, each with a 400 naming what is wrong.
+ * Provide EXACTLY ONE of: a circle (centerLatitude + centerLongitude +
+ * radiusMeters), a polygon (`polygon=lon,lat;lon,lat;lon,lat`), or a stored
+ * fence (`geofenceId`). `.strict()` rejects typo'd keys; the superRefine
+ * rejects "none", "two or more", and a partial circle, each with a 400 naming
+ * what is wrong. (The `geofenceId` row is loaded — and 404'd if missing — in
+ * the service, not here; the schema only validates the cuid shape and the
+ * three-way exclusivity.)
  */
 export const GeofenceStatusQuerySchema = z
   .object({
@@ -315,6 +324,12 @@ export const GeofenceStatusQuerySchema = z
     centerLongitude: coordParam(-180, 180, "centerLongitude").optional(),
     radiusMeters: coordParam(RADIUS_METERS_MIN, RADIUS_METERS_MAX, "radiusMeters").optional(),
     polygon: PolygonParam.optional(),
+    // A STORED Geofence by id (ADR-0030 G5). Reuses the same `Cuid` helper the
+    // ingest path uses — loose enough for any Prisma cuid(), tight enough to
+    // keep query-string garbage out. The row is fetched in the service (which
+    // 404s a missing id); here it is only shape-validated and folded into the
+    // three-way exclusivity refine below.
+    geofenceId: Cuid.optional(),
   })
   .strict()
   .superRefine((data, ctx) => {
@@ -327,22 +342,33 @@ export const GeofenceStatusQuerySchema = z
       data.centerLongitude !== undefined &&
       data.radiusMeters !== undefined;
     const hasPolygon = data.polygon !== undefined;
+    const hasGeofenceId = data.geofenceId !== undefined;
 
-    if (hasPolygon && hasAnyCircle) {
-      ctx.addIssue({
-        code: "custom",
-        message: "Provide either a circle (center + radius) or a polygon, not both.",
-      });
-      return;
-    }
-    if (!hasPolygon && !hasAnyCircle) {
+    // Exactly one of the three geofence modes must be supplied. A circle counts
+    // as "present" if ANY of its three fields is set, so a partial circle
+    // alongside a polygon or a geofenceId is still two modes (rejected), never
+    // a silently-ignored one. This is the three-way generalization of the
+    // original circle-XOR-polygon refine (ADR-0030 G5).
+    const modeCount = (hasAnyCircle ? 1 : 0) + (hasPolygon ? 1 : 0) + (hasGeofenceId ? 1 : 0);
+
+    if (modeCount === 0) {
       ctx.addIssue({
         code: "custom",
         message:
-          "Provide a geofence: a circle (centerLatitude, centerLongitude, radiusMeters) or a polygon (lon,lat;lon,lat;lon,lat).",
+          "Provide a geofence: a circle (centerLatitude, centerLongitude, radiusMeters), a polygon (lon,lat;lon,lat;lon,lat), or a geofenceId.",
       });
       return;
     }
+    if (modeCount > 1) {
+      ctx.addIssue({
+        code: "custom",
+        message:
+          "Provide exactly one geofence: a circle (center + radius), a polygon, or a geofenceId — not more than one.",
+      });
+      return;
+    }
+    // Exactly one mode is present. If it is the circle, all three of its fields
+    // are required (a partial circle is the remaining error case).
     if (hasAnyCircle && !hasFullCircle) {
       ctx.addIssue({
         code: "custom",

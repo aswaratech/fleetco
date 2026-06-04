@@ -2,6 +2,7 @@ import { BullModule } from "@nestjs/bullmq";
 import { Module } from "@nestjs/common";
 
 import { AuthModule } from "../auth/auth.module";
+import { GeofencesModule } from "../geofences/geofences.module";
 import { GpsIngestProcessor } from "./gps-ingest.processor";
 import { TelematicsController } from "./telematics.controller";
 import { GPS_INGEST_QUEUE, TelematicsService } from "./telematics.service";
@@ -23,8 +24,14 @@ import { GPS_INGEST_QUEUE, TelematicsService } from "./telematics.service";
 // TelematicsService is exported so a future telematics read slice (T5) can
 // reuse it without a circular import through the controller layer, the same
 // convention every vertical-slice module follows.
+//
+// GeofencesModule is imported (ADR-0030 G5) so the TelematicsService can
+// resolve its exported GeofencesService and load a STORED fence by id in the
+// geofence-status query (the geofenceId branch). GeofencesModule does not
+// import TelematicsModule, so there is no circular dependency; the geofence
+// aggregate is reached through its public service interface, not its table.
 @Module({
-  imports: [AuthModule, BullModule.registerQueue({ name: GPS_INGEST_QUEUE })],
+  imports: [AuthModule, GeofencesModule, BullModule.registerQueue({ name: GPS_INGEST_QUEUE })],
   controllers: [TelematicsController],
   providers: [TelematicsService, GpsIngestProcessor],
   exports: [TelematicsService],
