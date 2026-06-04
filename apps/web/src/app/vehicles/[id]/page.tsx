@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
 import { NepaliDate } from "@/components/nepali-date";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Table,
@@ -12,6 +13,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
+import { complianceBadgeState } from "@/lib/compliance";
 import { getServerSession } from "@/lib/session";
 import {
   INSURANCE_TYPE_LABELS,
@@ -113,6 +115,29 @@ function formatDateTime(iso: string | null): string {
   const hh = String(date.getUTCHours()).padStart(2, "0");
   const mm = String(date.getUTCMinutes()).padStart(2, "0");
   return `${y}-${m}-${d} ${hh}:${mm}`;
+}
+
+// Iter N3 (ADR-0031 §E): a compliance-expiry date rendered with its status
+// badge. `complianceBadgeState` classifies the stored expiry against now by
+// UTC calendar day over the 30-day window (its own pure, tested logic); we
+// paint a red "Expired" / amber "Expiring soon" <Badge> beside the date, and
+// render NO badge for "ok" / "none" (the date stands alone). The existing
+// <NepaliDate> render is preserved — the badge is additive, not a replacement.
+// A <Badge> is a <span> (status, not action — DESIGN.md anti-pattern #2).
+function ComplianceExpiry({ iso }: { iso: string | null }): React.ReactElement {
+  const state = complianceBadgeState(iso, new Date());
+  let badge: React.ReactElement | null = null;
+  if (state === "expired") {
+    badge = <Badge variant="error">Expired</Badge>;
+  } else if (state === "expiring-soon") {
+    badge = <Badge variant="warning">Expiring soon</Badge>;
+  }
+  return (
+    <span className="inline-flex flex-wrap items-center gap-2">
+      <NepaliDate iso={iso} />
+      {badge}
+    </span>
+  );
 }
 
 export default async function VehicleDetailPage({
@@ -234,7 +259,7 @@ export default async function VehicleDetailPage({
             <DetailRow label="Bluebook number" value={valueOrDash(vehicle.bluebookNumber)} mono />
             <DetailRow
               label="Bluebook expires"
-              value={<NepaliDate iso={vehicle.bluebookExpiresAt} />}
+              value={<ComplianceExpiry iso={vehicle.bluebookExpiresAt} />}
             />
             <DetailRow label="Insurer" value={valueOrDash(vehicle.insurer)} />
             <DetailRow
@@ -252,7 +277,7 @@ export default async function VehicleDetailPage({
             />
             <DetailRow
               label="Insurance expires"
-              value={<NepaliDate iso={vehicle.insuranceExpiresAt} />}
+              value={<ComplianceExpiry iso={vehicle.insuranceExpiresAt} />}
             />
             <DetailRow
               label="Route permit number"
@@ -261,7 +286,7 @@ export default async function VehicleDetailPage({
             />
             <DetailRow
               label="Route permit expires"
-              value={<NepaliDate iso={vehicle.routePermitExpiresAt} />}
+              value={<ComplianceExpiry iso={vehicle.routePermitExpiresAt} />}
             />
           </dl>
         </section>
