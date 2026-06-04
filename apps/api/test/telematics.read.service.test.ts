@@ -1,0 +1,359 @@
+import { getQueueToken } from "@nestjs/bullmq";
+import { Test, type TestingModule } from "@nestjs/testing";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
+
+import { PrismaService } from "../src/modules/prisma/prisma.service";
+import { GeofenceStatusQuerySchema } from "../src/modules/telematics/telematics.schemas";
+import {
+  GPS_INGEST_QUEUE,
+  TelematicsService,
+  type GeofenceQuery,
+} from "../src/modules/telematics/telematics.service";
+import { resetDb } from "./db";
+import { seedGpsPing } from "./fixtures/gps-ping";
+import { seedUser, seedVehicle } from "./fixtures/trip";
+
+// Service-level tests for the T5 read split + the first PostGIS geofencing
+// (ADR-0029 T5), against a REAL PostGIS-enabled Postgres — the spatial
+// predicates (ST_Contains / ST_DWithin) cannot be exercised against a mock.
+// Shape mirrors gps-ping.schema.test.ts: one TestingModule, beforeEach
+// truncates via resetDb(), the seed helpers wire the FK parents.
+//
+// TelematicsService injects @InjectQueue(gps-ingest) for the INGEST path; the
+// READ methods under test never touch it, so a no-op fake queue satisfies DI
+// without a live Redis (the worker/ingest tests cover the real queue).
+
+const fakeQueue = { add: async () => ({ id: "noop" }) };
+
+// Kathmandu — lat (27.x) and lon (85.x) are far apart, so a lon/lat swap
+// anywhere in the spatial path (the generated point geometry, ST_MakePoint, or
+// the WKT builder) is unmissable. Same fix the schema round-trip test pins.
+const KTM_LAT = 27.7172;
+const KTM_LON = 85.324;
+
+describe("TelematicsService reads + geofencing (ADR-0029 T5)", () => {
+  let module: TestingModule;
+  let prisma: PrismaService;
+  let service: TelematicsService;
+  let adminId: string;
+  let vehicleId: string;
+  let otherVehicleId: string;
+
+  beforeAll(async () => {
+    module = await Test.createTestingModule({
+      providers: [
+        TelematicsService,
+        PrismaService,
+        { provide: getQueueToken(GPS_INGEST_QUEUE), useValue: fakeQueue },
+      ],
+    }).compile();
+    await module.init();
+    prisma = module.get(PrismaService);
+    service = module.get(TelematicsService);
+  });
+
+  afterAll(async () => {
+    await module.close();
+  });
+
+  beforeEach(async () => {
+    await resetDb(prisma);
+    adminId = await seedUser(prisma);
+    vehicleId = (await seedVehicle(prisma, adminId)).id;
+    otherVehicleId = (await seedVehicle(prisma, adminId)).id;
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // listRawPings — gps:read-raw (ADMIN-only): the full-resolution trace.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  describe("listRawPings", () => {
+    const at = (iso: string): Date => new Date(iso);
+
+    async function seedFourPlusOther(): Promise<void> {
+      await seedGpsPing(prisma, {
+        vehicleId,
+        createdById: adminId,
+        timestamp: at("2026-02-10T08:00:00Z"),
+        latitude: 27.7,
+        longitude: 85.3,
+      });
+      await seedGpsPing(prisma, {
+        vehicleId,
+        createdById: adminId,
+        timestamp: at("2026-02-12T08:00:00Z"),
+        latitude: 27.71,
+        longitude: 85.31,
+      });
+      await seedGpsPing(prisma, {
+        vehicleId,
+        createdById: adminId,
+        timestamp: at("2026-02-14T08:00:00Z"),
+        latitude: 27.72,
+        longitude: 85.32,
+      });
+      await seedGpsPing(prisma, {
+        vehicleId,
+        createdById: adminId,
+        timestamp: at("2026-02-16T08:00:00Z"),
+        latitude: 27.73,
+        longitude: 85.33,
+      });
+      // A ping for ANOTHER vehicle that the vehicleId filter must exclude.
+      await seedGpsPing(prisma, {
+        vehicleId: otherVehicleId,
+        createdById: adminId,
+        timestamp: at("2026-02-13T08:00:00Z"),
+      });
+    }
+
+    test("returns the vehicle's pings, newest fix first, native Floats, no geometry key", async () => {
+      await seedFourPlusOther();
+
+      const all = await service.listRawPings({ vehicleId });
+      expect(all.total).toBe(4); // the other vehicle's ping is excluded
+      expect(all.items.map((p) => p.timestamp.toISOString())).toEqual([
+        "2026-02-16T08:00:00.000Z",
+        "2026-02-14T08:00:00.000Z",
+        "2026-02-12T08:00:00.000Z",
+        "2026-02-10T08:00:00.000Z",
+      ]);
+      // Native Float columns are read by Prisma; the Unsupported geometry column
+      // is never selected (and not even on the type).
+      expect(all.items[0].latitude).toBeCloseTo(27.73, 6);
+      expect(all.items[0].longitude).toBeCloseTo(85.33, 6);
+      expect("geometry" in all.items[0]).toBe(false);
+    });
+
+    test("time-bounds on `timestamp` are inclusive", async () => {
+      await seedFourPlusOther();
+      const win = await service.listRawPings({
+        vehicleId,
+        from: at("2026-02-12T00:00:00Z"),
+        to: at("2026-02-14T23:59:59Z"),
+      });
+      expect(win.total).toBe(2);
+      expect(win.items.map((p) => p.timestamp.toISOString())).toEqual([
+        "2026-02-14T08:00:00.000Z",
+        "2026-02-12T08:00:00.000Z",
+      ]);
+    });
+
+    test("paginates with a stable total and no overlap across pages", async () => {
+      await seedFourPlusOther();
+      const page1 = await service.listRawPings({ vehicleId, take: 2, skip: 0 });
+      const page2 = await service.listRawPings({ vehicleId, take: 2, skip: 2 });
+      expect(page1.total).toBe(4); // total is the full count, not the page size
+      expect(page2.total).toBe(4);
+      expect(page1.items).toHaveLength(2);
+      expect(page2.items).toHaveLength(2);
+      const ids = new Set([...page1.items, ...page2.items].map((p) => p.id));
+      expect(ids.size).toBe(4); // the four are distinct — no row appears twice
+    });
+
+    test("ascending sort honours the requested direction", async () => {
+      await seedFourPlusOther();
+      const asc = await service.listRawPings({ vehicleId, sortBy: "timestamp", sortDir: "asc" });
+      expect(asc.items.map((p) => p.timestamp.toISOString())).toEqual([
+        "2026-02-10T08:00:00.000Z",
+        "2026-02-12T08:00:00.000Z",
+        "2026-02-14T08:00:00.000Z",
+        "2026-02-16T08:00:00.000Z",
+      ]);
+    });
+
+    test("an unknown vehicle yields an empty result set", async () => {
+      expect(await service.listRawPings({ vehicleId: "cknonexistent000" })).toEqual({
+        items: [],
+        total: 0,
+      });
+    });
+
+    test("an over-large take is clamped (defense-in-depth) and does not error", async () => {
+      await seedGpsPing(prisma, { vehicleId, createdById: adminId });
+      const res = await service.listRawPings({ vehicleId, take: 100_000 });
+      expect(res.total).toBe(1);
+      expect(res.items).toHaveLength(1);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // latestLocation — gps:read-derived: the single latest fix (live-map view).
+  // ─────────────────────────────────────────────────────────────────────────
+
+  describe("latestLocation", () => {
+    test("returns the most-recent fix only", async () => {
+      await seedGpsPing(prisma, {
+        vehicleId,
+        createdById: adminId,
+        timestamp: new Date("2026-02-10T08:00:00Z"),
+        latitude: 27.7,
+        longitude: 85.3,
+      });
+      await seedGpsPing(prisma, {
+        vehicleId,
+        createdById: adminId,
+        timestamp: new Date("2026-02-16T08:00:00Z"),
+        latitude: KTM_LAT,
+        longitude: KTM_LON,
+        altitude: 1400,
+        speed: 12.5,
+        heading: 270,
+      });
+
+      const fix = await service.latestLocation(vehicleId);
+      expect(fix).not.toBeNull();
+      expect(fix?.timestamp.toISOString()).toBe("2026-02-16T08:00:00.000Z");
+      expect(fix?.latitude).toBeCloseTo(KTM_LAT, 6);
+      expect(fix?.longitude).toBeCloseTo(KTM_LON, 6);
+      expect(fix?.altitude).toBe(1400);
+      expect(fix?.speed).toBe(12.5);
+      expect(fix?.heading).toBe(270);
+    });
+
+    test("a vehicle with no pings → null", async () => {
+      expect(await service.latestLocation(vehicleId)).toBeNull();
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // geofenceStatus — gps:read-derived: the FIRST PostGIS geofencing.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  describe("geofenceStatus — circle (ST_DWithin proximity, meters)", () => {
+    test("within vs beyond the radius, meter-accurate via the geography cast", async () => {
+      await seedGpsPing(prisma, {
+        vehicleId,
+        createdById: adminId,
+        latitude: KTM_LAT,
+        longitude: KTM_LON,
+      });
+
+      // Center AT the fix, 100 m radius → inside (distance ≈ 0). This also
+      // guards ST_MakePoint(lon, lat) order: a lat/lon swap would place the
+      // center thousands of km away and flip this to false.
+      const at = await service.geofenceStatus(vehicleId, {
+        kind: "circle",
+        centerLatitude: KTM_LAT,
+        centerLongitude: KTM_LON,
+        radiusMeters: 100,
+      });
+      expect(at.inside).toBe(true);
+      expect(at.latestFixAt).not.toBeNull();
+
+      // A center ~150 m north of the fix (0.00135° lat ≈ 150 m). With a 100 m
+      // radius the fix is BEYOND; with 250 m it is WITHIN. This is the
+      // meters-not-degrees proof: under a (wrong) plain-geometry ST_DWithin the
+      // 0.00135° separation is « 100, so it would be "within" at radius 100 —
+      // the geography cast is what makes 150 m > 100 m the correct verdict.
+      const centerNorth = { centerLatitude: KTM_LAT + 0.00135, centerLongitude: KTM_LON };
+      const beyond = await service.geofenceStatus(vehicleId, {
+        kind: "circle",
+        ...centerNorth,
+        radiusMeters: 100,
+      });
+      expect(beyond.inside).toBe(false);
+      const within = await service.geofenceStatus(vehicleId, {
+        kind: "circle",
+        ...centerNorth,
+        radiusMeters: 250,
+      });
+      expect(within.inside).toBe(true);
+    });
+
+    test("a vehicle with no fix → inside null", async () => {
+      const res = await service.geofenceStatus(vehicleId, {
+        kind: "circle",
+        centerLatitude: KTM_LAT,
+        centerLongitude: KTM_LON,
+        radiusMeters: 100,
+      });
+      expect(res.inside).toBeNull();
+      expect(res.latestFixAt).toBeNull();
+    });
+
+    test("evaluates the LATEST fix when several exist", async () => {
+      // Older fix is far away; newest is at KTM. A KTM geofence is "inside"
+      // only because the latest fix is used (ORDER BY timestamp DESC LIMIT 1).
+      await seedGpsPing(prisma, {
+        vehicleId,
+        createdById: adminId,
+        timestamp: new Date("2026-02-10T08:00:00Z"),
+        latitude: 28.2096,
+        longitude: 83.9856, // Pokhara, ~140 km away
+      });
+      await seedGpsPing(prisma, {
+        vehicleId,
+        createdById: adminId,
+        timestamp: new Date("2026-02-16T08:00:00Z"),
+        latitude: KTM_LAT,
+        longitude: KTM_LON,
+      });
+      const res = await service.geofenceStatus(vehicleId, {
+        kind: "circle",
+        centerLatitude: KTM_LAT,
+        centerLongitude: KTM_LON,
+        radiusMeters: 100,
+      });
+      expect(res.inside).toBe(true);
+      expect(res.latestFixAt?.toISOString()).toBe("2026-02-16T08:00:00.000Z");
+    });
+  });
+
+  describe("geofenceStatus — polygon (ST_Contains point-in-polygon)", () => {
+    // Build the GeofenceQuery from a polygon STRING via the REAL schema, so the
+    // schema's `lon,lat` → WKT `lon lat` order is under test end-to-end: a swap
+    // in the WKT builder would misplace the polygon and flip these verdicts.
+    function polygonGeofence(spec: string): GeofenceQuery {
+      const parsed = GeofenceStatusQuerySchema.parse({ polygon: spec });
+      if (!parsed.polygon) throw new Error("expected a parsed polygon");
+      return { kind: "polygon", wkt: parsed.polygon.wkt, vertexCount: parsed.polygon.vertexCount };
+    }
+
+    test("inside vs outside a polygon around Kathmandu", async () => {
+      await seedGpsPing(prisma, {
+        vehicleId,
+        createdById: adminId,
+        latitude: KTM_LAT,
+        longitude: KTM_LON,
+      });
+
+      // Box lon[85.30, 85.35] × lat[27.70, 27.74] contains KTM (85.324, 27.7172).
+      const around = polygonGeofence("85.30,27.70;85.35,27.70;85.35,27.74;85.30,27.74");
+      const inside = await service.geofenceStatus(vehicleId, around);
+      expect(inside.inside).toBe(true);
+      expect(inside.latestFixAt).not.toBeNull();
+
+      // A box around Pokhara excludes KTM.
+      const elsewhere = polygonGeofence("83.95,28.20;84.00,28.20;84.00,28.22;83.95,28.22");
+      expect((await service.geofenceStatus(vehicleId, elsewhere)).inside).toBe(false);
+    });
+
+    test("lon/lat order matters — a swapped-axes box does NOT contain the point", async () => {
+      await seedGpsPing(prisma, {
+        vehicleId,
+        createdById: adminId,
+        latitude: KTM_LAT,
+        longitude: KTM_LON,
+      });
+
+      // Correct orientation contains the fix…
+      const correct = polygonGeofence("85.30,27.70;85.35,27.70;85.35,27.74;85.30,27.74");
+      expect((await service.geofenceStatus(vehicleId, correct)).inside).toBe(true);
+
+      // …the SAME magnitudes with the axes swapped describe a polygon near
+      // (lon 27, lat 85) — the Arctic, not Kathmandu — so the fix is outside.
+      // This fails loudly if the point geometry or the WKT were ever read
+      // lat-first.
+      const swapped = polygonGeofence("27.70,85.30;27.70,85.35;27.74,85.35;27.74,85.30");
+      expect((await service.geofenceStatus(vehicleId, swapped)).inside).toBe(false);
+    });
+
+    test("a vehicle with no fix → inside null", async () => {
+      const none = polygonGeofence("85.30,27.70;85.35,27.70;85.35,27.74;85.30,27.74");
+      const res = await service.geofenceStatus(vehicleId, none);
+      expect(res.inside).toBeNull();
+      expect(res.latestFixAt).toBeNull();
+    });
+  });
+});
