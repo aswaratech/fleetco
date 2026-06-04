@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 
 import { Button } from "@/components/ui/button";
@@ -25,6 +26,23 @@ import {
 
 import { updateGeofenceAction } from "../../actions";
 import type { Geofence } from "../../types";
+
+// Client-only Leaflet map editor (Leaflet touches `window` at module load),
+// loaded via next/dynamic + ssr:false. It serializes the drawn ring to the
+// SAME `lon,lat;…` string the coordinate-entry field uses; the edit form
+// pre-fills it from the stored boundary, so editing on the map and editing the
+// field write to one source of truth (ADR-0030 G4).
+const GeofenceMapEditor = dynamic(
+  () => import("../../geofence-map-editor").then((m) => m.GeofenceMapEditor),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="border-border-subtle bg-surface-canvas text-text-muted flex h-80 w-full items-center justify-center rounded-md border text-sm">
+        Loading map…
+      </div>
+    ),
+  },
+);
 
 interface CustomerOption {
   id: string;
@@ -205,6 +223,7 @@ export function EditGeofenceForm({
           render={({ field }) => (
             <FormItem>
               <FormLabel>Boundary</FormLabel>
+              <GeofenceMapEditor value={field.value} onChange={field.onChange} />
               <FormControl>
                 <textarea
                   rows={4}
@@ -214,9 +233,10 @@ export function EditGeofenceForm({
                 />
               </FormControl>
               <FormDescription>
-                Vertices as <span className="font-mono">lon,lat</span> pairs separated by{" "}
+                Draw or adjust the boundary on the map, or edit the vertices below as{" "}
+                <span className="font-mono">lon,lat</span> pairs separated by{" "}
                 <span className="font-mono">;</span> — at least 3, WGS84. The ring closes
-                automatically. A map editor lands in a later slice.
+                automatically; the map and the field stay in sync.
               </FormDescription>
               <FormMessage />
             </FormItem>

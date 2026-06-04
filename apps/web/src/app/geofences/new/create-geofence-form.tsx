@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 
 import { Button } from "@/components/ui/button";
@@ -23,6 +24,24 @@ import {
 } from "@/lib/geofences-schema";
 
 import { createGeofenceAction } from "../actions";
+
+// The Leaflet map editor is client-only — Leaflet references `window` at
+// module load — so it loads via next/dynamic with ssr:false and never renders
+// on the server (the canonical App Router gotcha). It serializes a drawn ring
+// to the SAME `lon,lat;…` string this form's coordinate-entry field uses, so
+// the storage contract is unchanged (ADR-0030 G4). A fixed-height placeholder
+// holds the layout while the chunk loads.
+const GeofenceMapEditor = dynamic(
+  () => import("../geofence-map-editor").then((m) => m.GeofenceMapEditor),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="border-border-subtle bg-surface-canvas text-text-muted flex h-80 w-full items-center justify-center rounded-md border text-sm">
+        Loading map…
+      </div>
+    ),
+  },
+);
 
 interface CustomerOption {
   id: string;
@@ -187,6 +206,7 @@ export function CreateGeofenceForm({ customers }: CreateGeofenceFormProps): Reac
           render={({ field }) => (
             <FormItem>
               <FormLabel>Boundary</FormLabel>
+              <GeofenceMapEditor value={field.value} onChange={field.onChange} />
               <FormControl>
                 <textarea
                   rows={4}
@@ -197,10 +217,10 @@ export function CreateGeofenceForm({ customers }: CreateGeofenceFormProps): Reac
                 />
               </FormControl>
               <FormDescription>
-                Vertices as <span className="font-mono">lon,lat</span> pairs separated by{" "}
+                Draw the boundary on the map, or type / adjust the vertices below as{" "}
+                <span className="font-mono">lon,lat</span> pairs separated by{" "}
                 <span className="font-mono">;</span> — at least 3, WGS84 (longitude −180…180,
-                latitude −90…90). The ring closes automatically. A map editor lands in a later
-                slice.
+                latitude −90…90). The ring closes automatically; the map and the field stay in sync.
               </FormDescription>
               <FormMessage />
             </FormItem>
