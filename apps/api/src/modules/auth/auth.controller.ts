@@ -1,24 +1,16 @@
 import { Controller, Get, Req, UseGuards } from "@nestjs/common";
-import { UserRole } from "@prisma/client";
+import { type UserRole } from "@prisma/client";
 
 import { AuthGuard } from "./auth.guard";
 import type { AuthenticatedRequest } from "./auth.types";
+import { toUserRole } from "./permissions";
 
-// Narrow the better-auth session's `role` to the domain UserRole enum.
-// better-auth types the `role` additionalField (declared in auth.ts) as a
-// loose, nullable string — it has no native enum field type, so the field is
-// `type: "string"` and `required: false`, which surfaces on the session as
-// `string | null | undefined`. The underlying `user.role` column is a NOT NULL
-// Postgres enum with an OFFICE_STAFF default (ADR-0028 c2/c8), so a valid value
-// is ALWAYS present at runtime. This coercion converts the library's loose type
-// to the domain type once, at the HTTP boundary, and FAILS CLOSED to the
-// least-privileged role if an unexpected or empty value ever appears — a
-// corrupted session can never be silently treated as more privileged than
-// OFFICE_STAFF.
-function toUserRole(role: string | null | undefined): UserRole {
-  return role === UserRole.ADMIN || role === UserRole.DRIVER ? role : UserRole.OFFICE_STAFF;
-}
-
+// `toUserRole` (the fail-closed narrowing of better-auth's loose session role
+// to the domain UserRole enum) now lives in permissions.ts so that this
+// endpoint and the RolesGuard share ONE coercion and can never disagree on how
+// an unexpected value is treated — see the rationale there. It moved on the
+// arrival of its second consumer (the guard), the same extraction trigger the
+// shared zod-validation.pipe.ts records.
 @Controller()
 export class AuthController {
   @Get("me")
