@@ -17,6 +17,7 @@ import { PrismaModule } from "./modules/prisma/prisma.module";
 import { QueueModule } from "./modules/queue/queue.module";
 import { RedisModule } from "./modules/redis/redis.module";
 import { ReportsModule } from "./modules/reports/reports.module";
+import { RetentionModule } from "./modules/retention/retention.module";
 import { TelematicsModule } from "./modules/telematics/telematics.module";
 import { TripsModule } from "./modules/trips/trips.module";
 import { VehiclesModule } from "./modules/vehicles/vehicles.module";
@@ -125,6 +126,7 @@ import { VehiclesModule } from "./modules/vehicles/vehicles.module";
     ExpenseLogsModule,
     ReportsModule,
     TelematicsModule,
+    RetentionModule,
   ],
 })
 export class AppModule {}
