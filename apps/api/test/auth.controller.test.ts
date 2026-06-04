@@ -10,12 +10,15 @@ import type { AuthenticatedRequest } from "../src/modules/auth/auth.types";
 // Controller boundary test for AuthController's GET /me. auth.guard.test.ts
 // pins WHO gets in (the guard); this file pins the RESPONSE CONTRACT of the
 // single route that guard protects: given an authenticated request, me()
-// returns exactly { id, email } shaped from req.session.user — nothing more,
-// nothing less.
+// returns exactly { id, email, role } shaped from req.session.user — nothing
+// more, nothing less. The `role` field was added in the RBAC slice (ADR-0028
+// commitment 7) so the web can gate UI for UX; it rides session.user.role.
 //
 // Why this exists: every other Phase-1 controller has a boundary test, but
 // /me had none, so a regression that renamed a session field, leaked the
-// whole user object, or echoed the session token would not be caught.
+// whole user object, or echoed the session token would not be caught. With
+// `role` now in the response, this file also pins that the role is surfaced
+// (and that nothing ELSE — name, the session token — leaks alongside it).
 //
 // Pattern mirrors reports.controller.test.ts: the controller method is called
 // directly against a TestingModule with AuthGuard overridden pass-through (the
@@ -23,11 +26,19 @@ import type { AuthenticatedRequest } from "../src/modules/auth/auth.types";
 // this file does not reset or seed the test database.
 
 // A minimal session payload shaped like better-auth's getSession return (see
-// the VALID_SESSION shape in auth.guard.test.ts). Only req.session.user.id and
-// req.session.user.email are read by me(); the extra fields (name, the session
-// token) are present precisely so the "does not leak" assertion has something
-// to catch if me() ever started spreading the user or returning the session.
-function makeRequest(user: { id: string; email: string; name?: string }): AuthenticatedRequest {
+// the VALID_SESSION shape in auth.guard.test.ts). Only req.session.user.id,
+// req.session.user.email, and req.session.user.role are read by me(); the
+// extra fields (name, the session token) are present precisely so the "does
+// not leak" assertion has something to catch if me() ever started spreading
+// the user or returning the session. `role` defaults to OFFICE_STAFF (the
+// least-privileged live role) so call sites that don't care about role get a
+// realistic value; tests that assert role pass it explicitly.
+function makeRequest(user: {
+  id: string;
+  email: string;
+  name?: string;
+  role?: string;
+}): AuthenticatedRequest {
   return {
     session: {
       session: {
@@ -40,6 +51,7 @@ function makeRequest(user: { id: string; email: string; name?: string }): Authen
         id: user.id,
         email: user.email,
         name: user.name ?? "Test Admin",
+        role: user.role ?? "OFFICE_STAFF",
       },
     },
   } as unknown as AuthenticatedRequest;
@@ -75,26 +87,41 @@ describe("AuthController GET /me (response contract)", () => {
     await app.close();
   });
 
-  test("returns exactly { id, email } from the attached session", () => {
-    const result = controller.me(makeRequest({ id: "user_abc", email: "admin@fleetco.local" }));
-    expect(result).toEqual({ id: "user_abc", email: "admin@fleetco.local" });
+  test("returns exactly { id, email, role } from the attached session", () => {
+    const result = controller.me(
+      makeRequest({ id: "user_abc", email: "admin@fleetco.local", role: "ADMIN" }),
+    );
+    expect(result).toEqual({ id: "user_abc", email: "admin@fleetco.local", role: "ADMIN" });
   });
 
-  test("does not leak any field beyond id and email", () => {
+  test("does not leak any field beyond id, email, and role", () => {
     // A refactor that spread req.session.user (leaking `name`) or returned the
     // session (leaking the token) would surface here. Pinning the exact key
     // set is the contract.
     const result = controller.me(
-      makeRequest({ id: "user_xyz", email: "ceo@fleetco.local", name: "CEO" }),
+      makeRequest({ id: "user_xyz", email: "ceo@fleetco.local", name: "CEO", role: "ADMIN" }),
     );
-    expect(Object.keys(result).sort()).toEqual(["email", "id"]);
+    expect(Object.keys(result).sort()).toEqual(["email", "id", "role"]);
   });
 
-  test("maps id and email straight through without swapping them", () => {
+  test("maps id, email, and role straight through without swapping them", () => {
     // Distinct, non-interchangeable values so a swapped-field regression
     // (returning { id: email, email: id }) is caught.
-    const result = controller.me(makeRequest({ id: "id-1111", email: "distinct@example.com" }));
+    const result = controller.me(
+      makeRequest({ id: "id-1111", email: "distinct@example.com", role: "OFFICE_STAFF" }),
+    );
     expect(result.id).toBe("id-1111");
     expect(result.email).toBe("distinct@example.com");
+    expect(result.role).toBe("OFFICE_STAFF");
+  });
+
+  test("surfaces the OFFICE_STAFF role for a least-privileged session", () => {
+    // The /me role is what the web reads to gate UI (ADR-0028 c7). Pinning
+    // that an OFFICE_STAFF session reports OFFICE_STAFF (not silently widened
+    // to ADMIN) is the load-bearing UX-gating contract.
+    const result = controller.me(
+      makeRequest({ id: "user_staff", email: "staff@fleetco.local", role: "OFFICE_STAFF" }),
+    );
+    expect(result.role).toBe("OFFICE_STAFF");
   });
 });

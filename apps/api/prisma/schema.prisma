@@ -18,6 +18,23 @@ datasource db {
 // Tier annotations per ADR-0013 (Tier 1 = credentials/tokens, Tier 2 = PII).
 // Triple-slash comments surface as JSDoc on the generated Prisma client.
 
+// Authorization roles per ADR-0028 (office-staff RBAC model). Two LIVE
+// roles — ADMIN (the CEO/owner, the most-privileged human) and
+// OFFICE_STAFF (operational data entry plus derived views) — plus DRIVER,
+// which is reserved-but-undefined per ADR-0028 commitment 1: the enum
+// names it so the role type and permission map accept a third role
+// without rework, but it is granted no capabilities here; its permissions
+// (almost entirely row-level) land with the driver-app slice. The role is
+// stored on the better-auth-managed User and rides session.user.role so
+// the RolesGuard reads it with no extra query (ADR-0028 commitments 2/3).
+enum UserRole {
+  ADMIN
+  OFFICE_STAFF
+  DRIVER
+
+  @@map("user_role")
+}
+
 model User {
   id                 String       @id
   /// Tier 2 PII per ADR-0013 — excluded from default logging (pino redact covers *.email).
@@ -26,6 +43,8 @@ model User {
   /// Tier 2 PII per ADR-0013 — admin display name.
   name               String
   image              String?
+  /// Tier 3 per ADR-0013 — authorization metadata, not a credential or PII; intentionally NOT redacted (a session's role is operational signal).
+  role               UserRole     @default(OFFICE_STAFF)
   createdAt          DateTime     @default(now())
   updatedAt          DateTime     @updatedAt
   sessions           Session[]
