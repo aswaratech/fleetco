@@ -57,6 +57,7 @@ model User {
   fuelLogsCreated    FuelLog[]    @relation("FuelLogCreatedBy")
   expenseLogsCreated ExpenseLog[] @relation("ExpenseLogCreatedBy")
   gpsPingsCreated    GpsPing[]    @relation("GpsPingCreatedBy")
+  geofencesCreated   Geofence[]   @relation("GeofenceCreatedBy")
 
   @@map("user")
 }
@@ -509,6 +510,13 @@ model Customer {
   // end-to-end via the apps/api/test/customers-delete-blocker.test.ts
   // integration test.
   jobs Job[]
+
+  // Iter G1 (ADR-0030): CUSTOMER_SITE geofences reference Customer by id.
+  // Geofence.customerId uses onDelete: Restrict per ADR-0030 c4, which is
+  // covered for free by CustomersService.delete's EXISTING P2003 -> 409 arm
+  // (no CustomersService change in the geofence program) — deleting a
+  // customer that owns a customer-site fence returns a clean 409.
+  geofences Geofence[]
 
   @@index([status])
   @@index([createdById])
@@ -1004,4 +1012,117 @@ model GpsPing {
   @@index([timestamp(sort: Desc)])
   @@index([createdById])
   @@map("gps_ping")
+}
+
+// Geofences module. Owned by apps/api/src/modules/geofences/ per ADR-0001
+// (the feature module — service, controller, RBAC, web UI, Leaflet editor —
+// lands in G2–G5; G1 ships ONLY this schema, its hand-authored migration,
+// the test/db.ts truncate entry, and the round-trip schema test). First
+// Phase-2 geofence-configuration aggregate per ADR-0030, and the FIRST
+// PostGIS geometry(Polygon, 4326) in FleetCo (GpsPing T2 stored the first
+// Point). A Geofence is a company-defined boundary — the depot yard, a
+// customer site, or a route corridor — that the telematics derived-read
+// layer (ADR-0029 T5) classifies a vehicle's latest fix against.
+//
+// Tier annotations per ADR-0013 + ADR-0027 c6: a geofence is Tier 3
+// operational CONFIGURATION — a company asset like a Job record, NOT the
+// Tier-5 location trail it is checked against. So its columns carry Tier-3
+// marks and — unlike GpsPing's Tier-5 coordinates — NO pino-redact or
+// span-scrub entries are added (over-redacting operational config hides
+// signal; ADR-0030 c7 makes this explicit, clarifying ADR-0027 c5's
+// "geofence polygon geometry" hedge as span-scoped, not config-scoped).
+//
+// Polygon storage — the HYBRID representation (ADR-0030 commitment 1),
+// extending ADR-0029 c8's Point hybrid to a Polygon with ONE structural
+// change: a polygon has no scalar canonical form, so the geometry derives
+// from a canonical TEXT column (boundaryWkt) rather than from scalar floats.
+// boundaryWkt is the Prisma-native canonical boundary — a closed WGS84 ring
+// as POLYGON((lon lat, ...)) WKT, the exact representation
+// telematics.schemas.ts already parses, so a stored fence and a T5
+// query-param fence are byte-identical WKT and classify identically.
+// Alongside it sits a Postgres
+//   GENERATED ALWAYS AS (ST_GeomFromText("boundaryWkt", 4326)) STORED
+// geometry(Polygon, 4326) column with a GIST index, used only by spatial
+// queries (ST_Contains / ST_DWithin). ST_GeomFromText(text, 4326) — the
+// two-arg form with an explicit SRID — is IMMUTABLE in PostGIS, which is
+// what lets it drive a GENERATED ... STORED column (G1 verifies this against
+// the CI-pinned postgis/postgis:16-3.5). The geometry column is declared
+// Unsupported("geometry(Polygon, 4326)")? so Prisma tracks it for
+// migrate-diffing but never selects or inserts it (the database derives it
+// from boundaryWkt, so it cannot drift); the generated-column definition and
+// the GIST index are HAND-AUTHORED in the migration because Prisma's schema
+// language expresses neither. Because the column is GENERATED ... STORED,
+// inserts must NOT supply it — Prisma satisfies this for free by inserting
+// only boundaryWkt.
+//
+// CAUTION for future migrations (same as GpsPing): because geometry is a
+// plain Unsupported type (Prisma models neither the GENERATED default nor
+// the GIST index), prisma migrate dev may emit a SPURIOUS step that DROPs
+// geofence_geometry_idx or alters the generated default — that step MUST be
+// removed. The established workflow (used here) is migrate dev --create-only
+// then hand-edit, so the hand-authored SQL is never clobbered. prisma
+// migrate status is the operative drift check and reports in-sync; the
+// schema-datamodel-vs-DB diff intentionally shows the generated default +
+// GIST index, the accepted ADR-0030 hybrid cost.
+//
+// Validity is enforced in three layers (ADR-0030 c2): (a) Zod vertex checks
+// in the G2 service (reusing T5's parser), (b) the generated column's
+// parse-time rejection of structurally-broken WKT (ST_GeomFromText throws),
+// and (c) a service-level ST_IsValid gate against self-intersecting/bowtie
+// rings (G2). G1 ships the storage; the round-trip schema test pins that a
+// valid ring round-trips at SRID 4326 with vertex order preserved and that a
+// bowtie ring stores but reports ST_IsValid = false (the hazard G2 gates on).
+//
+// FK delete policy (ADR-0030 c4):
+//   - customerId — NULLABLE, onDelete: Restrict to Customer. A CUSTOMER_SITE
+//     fence belongs to a Customer; DEPOT and ROUTE_CORRIDOR fences have
+//     customerId = null. The type/ownership invariant (CUSTOMER_SITE requires
+//     non-null, the others null) is a G2 service/Zod .superRefine, NOT a DB
+//     constraint here. Restrict matches the house posture, and
+//     CustomersService.delete's EXISTING P2003 -> 409 arm covers this new
+//     referencer for free (no CustomersService change in G2).
+//   - createdById — required, onDelete: Restrict to User, filled from the
+//     authenticated principal (ADR-0021); the audit anchor for who created
+//     the fence.
+
+enum GeofenceType {
+  DEPOT
+  CUSTOMER_SITE
+  ROUTE_CORRIDOR
+
+  @@map("geofence_type")
+}
+
+model Geofence {
+  id          String                                  @id @default(cuid())
+  /// Tier 3 per ADR-0013 — human-readable geofence name.
+  name        String
+  /// Tier 3 per ADR-0013 — DEPOT / CUSTOMER_SITE / ROUTE_CORRIDOR.
+  type        GeofenceType
+  /// Tier 3 per ADR-0013 — canonical polygon boundary (closed WGS84 ring as
+  /// WKT); the geometry column is GENERATED from this, so it cannot drift.
+  boundaryWkt String
+  /// Tier 3 per ADR-0013 — PostGIS geometry(Polygon,4326), GENERATED ALWAYS
+  /// AS (ST_GeomFromText("boundaryWkt", 4326)) STORED with a GIST index, both
+  /// HAND-AUTHORED in the migration (Prisma expresses neither). Declared
+  /// Unsupported so Prisma tracks it for migrate-diff but never
+  /// selects/inserts it; derives from boundaryWkt so it cannot drift. Used
+  /// only by spatial queries.
+  geometry    Unsupported("geometry(Polygon, 4326)")?
+  /// Tier 3 per ADR-0013 — owning Customer for CUSTOMER_SITE fences; null for
+  /// DEPOT/ROUTE_CORRIDOR.
+  customerId  String?
+  customer    Customer?                               @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  createdAt   DateTime                                @default(now())
+  updatedAt   DateTime                                @updatedAt
+  /// References the User who created the geofence (ADR-0021 authenticated
+  /// principal). Audit field; Restrict because the fence's audit chain should
+  /// remain intact for the row's lifetime.
+  createdById String
+  createdBy   User                                    @relation("GeofenceCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@index([type])
+  @@index([customerId])
+  @@index([createdById])
+  @@map("geofence")
 }
