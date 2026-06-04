@@ -11,6 +11,31 @@ export function createAuth(prisma: PrismaClient) {
       enabled: true,
       autoSignIn: true,
     },
+    // RBAC role on the better-auth-managed User (ADR-0028 commitments 2/3).
+    // Declared as an additionalField so better-auth returns it on
+    // session.user.role automatically and the RolesGuard (T_GUARD) reads it
+    // with no extra query. The column itself is the Prisma `UserRole` enum
+    // (schema.prisma) — better-auth has no native enum field type, so it is
+    // declared `type: "string"` here and the allowed values are enforced at
+    // the Prisma/Postgres layer by the enum column.
+    //   - defaultValue OFFICE_STAFF: new users are least-privileged by
+    //     default (ADR-0028 c8); ADMIN is granted only by the explicit
+    //     privileged path (T_WIRE's create-user script), never by self-serve.
+    //   - input: false: the single most important privilege-escalation
+    //     defense (ADR-0028 c8) — `role` can NEVER be set through the public
+    //     sign-up / update API, only by a direct server-side Prisma write.
+    //   - required: false: the value is always supplied (defaultValue on
+    //     create + NOT NULL DB default), so it is never required as input.
+    user: {
+      additionalFields: {
+        role: {
+          type: "string",
+          required: false,
+          defaultValue: "OFFICE_STAFF",
+          input: false,
+        },
+      },
+    },
     secret: env.BETTER_AUTH_SECRET,
     baseURL: env.BETTER_AUTH_URL,
     basePath: "/auth",
