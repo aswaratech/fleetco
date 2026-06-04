@@ -56,6 +56,7 @@ model User {
   jobsCreated        Job[]        @relation("JobCreatedBy")
   fuelLogsCreated    FuelLog[]    @relation("FuelLogCreatedBy")
   expenseLogsCreated ExpenseLog[] @relation("ExpenseLogCreatedBy")
+  gpsPingsCreated    GpsPing[]    @relation("GpsPingCreatedBy")
 
   @@map("user")
 }
@@ -219,6 +220,7 @@ model Vehicle {
   trips       Trip[]       @relation("TripVehicle")
   fuelLogs    FuelLog[]
   expenseLogs ExpenseLog[]
+  gpsPings    GpsPing[]
 
   @@index([status])
   @@index([kind])
@@ -409,6 +411,7 @@ model Trip {
 
   fuelLogs    FuelLog[]
   expenseLogs ExpenseLog[]
+  gpsPings    GpsPing[]
 
   @@index([status])
   @@index([vehicleId])
@@ -855,4 +858,150 @@ model ExpenseLog {
   @@index([date(sort: Desc)])
   @@index([createdById])
   @@map("expense_log")
+}
+
+// GPS telematics ingestion. Owned by apps/api/src/modules/telematics/
+// per ADR-0001 (the feature module — ingestion endpoint, worker, read
+// endpoints — lands in T3/T5; T2 ships ONLY this schema, its migration,
+// the pino-redact egress additions, and the deferred Trip-delete
+// resolution). First Phase-2 telematics aggregate per ADR-0029, and the
+// FIRST PostGIS geometry in FleetCo. A GpsPing is one raw GPS fix
+// reported for a vehicle; this is expected to be the highest-row-count
+// table in the system, which is why the storage representation (below)
+// is chosen deliberately before the first ping lands.
+//
+// Tier annotations per ADR-0013 + ADR-0027: the coordinate/movement
+// columns (latitude, longitude, altitude, speed, heading) and the
+// derived geometry are **Tier 5** — the most sensitive class, a raw
+// location trail (ADR-0027 commitment 1 classes the whole
+// lat/lon/altitude/speed/heading fix as Tier 5). They are never logged
+// (the pino `redact` list in apps/api/src/app.module.ts gained the GPS
+// attribute keys in this same slice, ADR-0027 commitment 5) and, once
+// the ADR-0026 span-scrub seam exists, never exported in a span; raw
+// pings are pruned after the retention window (the `traces-prune` job,
+// T4). The FK/audit columns and `timestamp` are NOT Tier-5 location
+// data — `timestamp` is the fix time, which travels with the Tier-5 fix
+// but is not independently sensitive (ADR-0027 commitment 9), so it is
+// not redacted (over-redacting operational time hides signal).
+//
+// Coordinate storage — the HYBRID representation (ADR-0029 commitment
+// 8). The canonical coordinate columns are the Prisma-native `Float`
+// `latitude` / `longitude`: Prisma reads and inserts them natively, so
+// the high-frequency insert path and ordinary coordinate reads stay
+// type-safe. Alongside them sits a Postgres
+//   GENERATED ALWAYS AS (ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)) STORED
+// `geometry(Point, 4326)` column with a GIST index, used only by spatial
+// queries (geofencing via ST_Contains / ST_DWithin — the derived read
+// layer's first real spatial query, T5). The geometry column is
+// declared `Unsupported("geometry(Point, 4326)")?` so Prisma tracks its
+// existence for migrate-diffing but never tries to select or insert it
+// (it is database-derived and so cannot drift from the floats — the
+// same "drift is the failure mode" discipline the project enforces
+// elsewhere); the generated-column definition and the GIST index are
+// HAND-AUTHORED in the migration because Prisma's schema language
+// expresses neither generated columns nor geometry types. Because the
+// column is GENERATED ... STORED, inserts must NOT supply it — Prisma
+// satisfies this for free by inserting only the Float columns. NOTE the
+// `ST_MakePoint(longitude, latitude)` argument order: X,Y = lon,lat (the
+// classic PostGIS foot-gun); the round-trip test
+// (apps/api/test/gps-ping.schema.test.ts) asserts ST_X returns the
+// longitude and ST_Y the latitude, the regression guard against a
+// future ST_MakePoint(lat, lon) swap.
+//
+// CAUTION for future migrations: because the datamodel expresses
+// `geometry` as a plain Unsupported type (Prisma models neither the
+// GENERATED default nor the GIST index), `prisma migrate dev` diffs this
+// against the DB and may emit a SPURIOUS step that DROPs
+// `gps_ping_geometry_idx` or alters the generated default — that step
+// MUST be removed. The established workflow (used for this migration) is
+// `prisma migrate dev --create-only` then hand-edit, so the hand-authored
+// geometry SQL is never clobbered. `prisma migrate status` (migrations vs
+// DB) is the operative drift check and reports in-sync; the
+// schema-datamodel-vs-DB diff intentionally shows the generated default +
+// GIST index, which is the accepted, ADR-0029-documented hybrid cost.
+//
+// FK delete policy mirrors FuelLog (ADR-0029 commitment 7):
+//   - vehicleId — required, onDelete: Restrict: a ping always belongs
+//     to a vehicle; orphaning it would corrupt per-vehicle route
+//     reconstruction.
+//   - tripId — nullable, onDelete: Restrict: collection is scoped to
+//     on-trip windows (ADR-0027 c2) so most pings carry a trip, but a
+//     fix captured at a shift boundary may not; when set, Restrict
+//     protects per-trip route reconstruction exactly as it protects
+//     per-trip fuel cost. This FK makes Trip a referenced aggregate,
+//     which is what makes the deferred TripsService.delete P2003 -> 409
+//     mapping due — resolved in this same slice.
+//   - createdById — required, onDelete: Restrict to User, filled from
+//     the authenticated principal (ADR-0021); the audit anchor for who
+//     submitted the ping.
+
+model GpsPing {
+  id          String                                @id @default(cuid())
+  /// FK to Vehicle. Indexed individually so list filters by vehicleId
+  /// (the "trace for this vehicle" query) hit an index. onDelete:
+  /// Restrict per ADR-0029 commitment 7 — a ping always belongs to a
+  /// vehicle and orphaning it would corrupt per-vehicle route history.
+  vehicleId   String
+  vehicle     Vehicle                               @relation(fields: [vehicleId], references: [id], onDelete: Restrict)
+  /// Nullable FK to Trip. Collection is scoped to on-trip windows
+  /// (ADR-0027 c2), so most pings carry a trip; a fix captured at a
+  /// shift boundary may not. When set, onDelete: Restrict protects
+  /// per-trip route reconstruction — and makes Trip a referenced
+  /// aggregate (the FK that makes the deferred TripsService.delete
+  /// P2003 -> 409 resolution due, landed in this slice).
+  tripId      String?
+  trip        Trip?                                 @relation(fields: [tripId], references: [id], onDelete: Restrict)
+  /// Tier 5 per ADR-0027 — raw GPS latitude (WGS84, decimal degrees).
+  /// Canonical coordinate column (Prisma-native Float; the geometry is
+  /// derived from it). Never logged (pino redact) and, once the
+  /// ADR-0026 span-scrub seam exists, never exported in a span; raw
+  /// pings are pruned after the retention window (traces-prune, T4).
+  latitude    Float
+  /// Tier 5 per ADR-0027 — raw GPS longitude (WGS84, decimal degrees).
+  /// Canonical coordinate column; never logged / never span-exported;
+  /// pruned after the retention window. NOTE the geometry derives as
+  /// ST_MakePoint(longitude, latitude) — longitude is X, latitude is Y.
+  longitude   Float
+  /// Tier 5 per ADR-0027 — altitude in meters above the WGS84 ellipsoid.
+  /// Nullable (not every fix reports altitude). Never logged / never
+  /// span-exported; pruned after the retention window.
+  altitude    Float?
+  /// Tier 5 per ADR-0027 — ground speed in meters per second. Nullable.
+  /// Movement data travels with the location fix and is equally
+  /// sensitive. Never logged / never span-exported; pruned after the
+  /// retention window.
+  speed       Float?
+  /// Tier 5 per ADR-0027 — heading / course over ground in degrees
+  /// (0–360, clockwise from true north). Nullable. Never logged / never
+  /// span-exported; pruned after the retention window.
+  heading     Float?
+  /// The instant the fix was captured by the device (UTC). Indexed
+  /// `(timestamp desc)` for recency queries. ISO/UTC per CLAUDE.md. NOT
+  /// Tier-5 location data per ADR-0027 commitment 9: the fix time
+  /// travels with the Tier-5 fix but is not independently sensitive, so
+  /// it is not redacted (over-redacting operational time hides signal).
+  timestamp   DateTime
+  /// Tier 5 per ADR-0027 — PostGIS geometry(Point, 4326), GENERATED
+  /// ALWAYS AS (ST_SetSRID(ST_MakePoint(longitude, latitude), 4326))
+  /// STORED with a GIST index, both HAND-AUTHORED in the migration
+  /// (Prisma expresses neither). Declared Unsupported so Prisma tracks
+  /// it for migrate-diff but never selects/inserts it; the database
+  /// derives it from latitude/longitude so it cannot drift. Used only
+  /// by spatial queries (geofencing, T5). Same egress rules as the raw
+  /// coordinates: never logged / never span-exported; pruned with the
+  /// raw fix after the retention window.
+  geometry    Unsupported("geometry(Point, 4326)")?
+  createdAt   DateTime                              @default(now())
+  updatedAt   DateTime                              @updatedAt
+  /// References the User who submitted the ping (ADR-0021 authenticated
+  /// principal). Audit field; Restrict because the ping's audit chain
+  /// should remain intact for the row's lifetime.
+  createdById String
+  createdBy   User                                  @relation("GpsPingCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@index([vehicleId])
+  @@index([tripId])
+  @@index([timestamp(sort: Desc)])
+  @@index([createdById])
+  @@map("gps_ping")
 }

@@ -210,15 +210,20 @@ export class TripsController {
 
   /**
    * Hard delete. Returns HTTP 204 (no body) on success; 404 when the
-   * trip does not exist (service throws NotFoundException for P2025).
+   * trip does not exist (service throws NotFoundException for P2025);
+   * 409 when the trip is still referenced by another aggregate (service
+   * throws ConflictException for P2003).
    *
-   * Phase 2 adds the fuel-log and GPS-ping aggregates that will
-   * reference Trip by id; at that point this endpoint will either
-   * switch to soft delete or grow a P2003 → 409 catch arm the same
-   * way VehiclesController.remove / DriversController.remove did in
-   * iter-9 (this iter). The decision is deferred until those
-   * referencing aggregates land. The matching tech-debt entry will
-   * be reopened then.
+   * The previously-deferred resolution is now landed (ADR-0029 T2,
+   * commitment 7): GpsPing.tripId (onDelete: Restrict) makes Trip a
+   * referenced aggregate, so TripsService.delete maps Prisma P2003 -> 409
+   * the same way VehiclesController.remove / DriversController.remove do
+   * — a 409 catch arm, NOT soft delete (which would be a new
+   * cross-cutting pattern warranting its own ADR). FuelLog and
+   * ExpenseLog (also onDelete: Restrict on tripId, shipped in Phase 1)
+   * are covered by the same arm. See the service-layer delete()
+   * docstring and docs/runbook/api-error-mapping.md (P2003
+   * delete-when-referenced -> 409).
    */
   @Delete(":id")
   @HttpCode(HttpStatus.NO_CONTENT)

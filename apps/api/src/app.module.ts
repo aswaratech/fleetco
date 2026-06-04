@@ -69,6 +69,35 @@ import { VehiclesModule } from "./modules/vehicles/vehicles.module";
             "*.licenseNumber",
             "*.phoneNumber",
             "*.contactPerson",
+            // GPS telematics location keys (ADR-0029 commitment 12 /
+            // ADR-0027 commitment 5). The GpsPing coordinate + movement
+            // fields are Tier 5 (a raw location trail) and MUST NOT appear
+            // in logs. These land ATOMICALLY with the GpsPing schema (same
+            // PR) so a ping is never loggable before its keys are
+            // denylisted. The `*.<key>` wildcard matches the key at any
+            // nesting depth (same form as *.driverName above).
+            //
+            // KEEP IN SYNC: the ADR-0026 span-scrub denylist is the OTHER
+            // egress layer these same keys must be scrubbed from. That
+            // seam does NOT exist yet — apps/api/src/observability/otel.ts
+            // only builds the OTLP processor; there is no attribute-scrub
+            // hook to add keys to. When that seam lands (a later telematics
+            // ticket), it MUST denylist this exact key set, kept in sync
+            // with this list — the two layers (logs here, spans there) are
+            // the pair ADR-0027 commitment 5 names.
+            "*.latitude",
+            "*.longitude",
+            "*.lat",
+            "*.lng",
+            "*.lon",
+            "*.altitude",
+            "*.heading",
+            "*.speed",
+            "*.coordinates",
+            "*.geometry",
+            "*.location",
+            "*.point",
+            "*.position",
           ],
           censor: "[Redacted]",
         },

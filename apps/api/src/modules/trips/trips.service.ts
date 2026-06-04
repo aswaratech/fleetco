@@ -1,4 +1,9 @@
-import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
 import { Prisma, type Trip, type TripStatus } from "@prisma/client";
 
 import type {
@@ -473,10 +478,30 @@ export class TripsService {
   }
 
   /**
-   * Hard delete a Trip. No referencing slice exists in Phase 1 (fuel
-   * logs and GPS pings, which will reference Trip, arrive in Phase 2),
-   * so a P2003 mapping is not needed here today. P2025 (delete
-   * targets a non-existent row) maps to NotFoundException.
+   * Hard delete a Trip. Maps Prisma errors per
+   * docs/runbook/api-error-mapping.md:
+   *   - P2025 (delete targets a non-existent row) -> NotFoundException
+   *     (HTTP 404).
+   *   - P2003 (another row still references this Trip via an
+   *     onDelete: Restrict FK) -> ConflictException (HTTP 409).
+   *
+   * The P2003 arm lands in the GPS-telematics slice (ADR-0029 T2,
+   * commitment 7): GpsPing.tripId is an onDelete: Restrict FK, which
+   * makes Trip a referenced aggregate and makes this mapping due. It
+   * also corrects a latent gap the iter-8 docstring missed — FuelLog
+   * .tripId and ExpenseLog.tripId (both onDelete: Restrict, shipped in
+   * Phase 1) already referenced Trip, so deleting a Trip that had any
+   * fuel/expense log was raising P2003 that propagated as an HTTP 500
+   * until now.
+   *
+   * The message is the GENERIC "referenced by other records." shape
+   * (mirroring CustomersService.delete) rather than VehiclesService's
+   * count-of-trips message, because Trip has multiple heterogeneous
+   * referencers (FuelLog, ExpenseLog, GpsPing); naming a single count
+   * would be misleading and would cost extra queries across three
+   * tables. Resolution choice per ADR-0029 acceptance: a P2003 -> 409
+   * catch arm, NOT soft delete (which would be a new cross-cutting
+   * pattern warranting its own ADR).
    *
    * Returns void on success; the controller responds 204 No Content.
    */
@@ -484,8 +509,18 @@ export class TripsService {
     try {
       await this.prisma.trip.delete({ where: { id } });
     } catch (error) {
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2025") {
-        throw new NotFoundException(`Trip "${id}" not found.`);
+      if (error instanceof Prisma.PrismaClientKnownRequestError) {
+        // P2025 = delete targeted a non-existent row.
+        if (error.code === "P2025") {
+          throw new NotFoundException(`Trip "${id}" not found.`);
+        }
+        // P2003 = FK constraint violation on the referencing side: a
+        // FuelLog, ExpenseLog, or GpsPing (each onDelete: Restrict on
+        // tripId) still points at this Trip. Surface as 409 with the
+        // generic referenced-by-other-records message.
+        if (error.code === "P2003") {
+          throw new ConflictException(`Cannot delete trip: it is referenced by other records.`);
+        }
       }
       throw error;
     }
