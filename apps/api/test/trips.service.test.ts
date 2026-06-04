@@ -8,6 +8,7 @@ import { PrismaService } from "../src/modules/prisma/prisma.service";
 import { TripsService, LIST_TAKE_MAX } from "../src/modules/trips/trips.service";
 import { VehiclesService } from "../src/modules/vehicles/vehicles.service";
 import { resetDb } from "./db";
+import { seedGpsPing } from "./fixtures/gps-ping";
 import { seedDriver, seedTrip, seedUser, seedVehicle } from "./fixtures/trip";
 
 // Integration tests for TripsService against a real Postgres. The
@@ -987,6 +988,44 @@ describe("TripsService (integration, real Postgres)", () => {
 
     test("delete on non-existent trip → NotFoundException", async () => {
       await expect(service.delete("trip-does-not-exist")).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    // ADR-0029 T2 (commitment 7): GpsPing.tripId (onDelete: Restrict)
+    // makes Trip a referenced aggregate, so deleting a referenced Trip
+    // must surface as ConflictException (HTTP 409), not propagate as a
+    // raw P2003 / HTTP 500. Mirror of the Customers delete-blocker test
+    // (apps/api/test/customers.service.test.ts) — same generic
+    // "referenced by other records." message because Trip has multiple
+    // heterogeneous referencers (FuelLog, ExpenseLog, GpsPing). This
+    // also pins the fix for the latent gap where a Trip with fuel/expense
+    // logs already 500'd on delete.
+    test("delete on a trip referenced by a GpsPing → ConflictException (P2003 → 409)", async () => {
+      const trip = await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+      });
+      await seedGpsPing(prisma, {
+        vehicleId: vehicle.id,
+        tripId: trip.id,
+        createdById: adminId,
+      });
+
+      let thrown: unknown;
+      try {
+        await service.delete(trip.id);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(ConflictException);
+      expect((thrown as ConflictException).message).toBe(
+        "Cannot delete trip: it is referenced by other records.",
+      );
+
+      // The trip row survives the blocked delete (Restrict prevented it,
+      // and the catch arm did not swallow the rollback).
+      const refetched = await prisma.trip.findUnique({ where: { id: trip.id } });
+      expect(refetched).not.toBeNull();
     });
   });
 
