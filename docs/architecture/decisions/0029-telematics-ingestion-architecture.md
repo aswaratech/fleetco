@@ -1,8 +1,20 @@
 # ADR-0029: Telematics ingestion architecture — BullMQ integration shape and GPS-ping storage representation
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-04
-- **Decider:** Product owner (CEO) — pending acceptance
+- **Decider:** Product owner (CEO)
+- **Accepted:** 2026-06-04
+
+## Acceptance
+
+Accepted by the product owner (CEO) on 2026-06-04, ratifying the recommended picks on every open decision this ADR left to acceptance (see "Revisit when" bullet 1):
+
+- **BullMQ integration library (commitment 1):** `@nestjs/bullmq` — the official NestJS wrapper layered on `bullmq` — over driving the raw `bullmq` engine by hand.
+- **Coordinate representation (commitment 8):** the **hybrid**, option (c) — Prisma-native `Float` `latitude`/`longitude` as the canonical columns, plus a Postgres `GENERATED ALWAYS … STORED geometry(Point, 4326)` column with a GIST index for spatial queries.
+- **Dependency (commitment 6):** adding `bullmq` (+ `@nestjs/bullmq`) is sanctioned — it is the wiring of ADR-0020's already-chosen substrate, not a new infrastructure decision and not a forbidden broker. The dependency installs in the code program's first ticket.
+- **Trip-delete resolution (commitment 7):** the deferred `TripsService.delete` decision is resolved as a `P2003 → 409` catch arm mirroring `VehiclesController.remove` / `DriversController.remove` / `CustomersController.remove` — not soft delete (which would be a new cross-cutting pattern warranting its own ADR). The code slice (T2) lands it when `GpsPing.tripId` arrives.
+
+The glossary's BullMQ/PostGIS/Geofence entries and the `docs/CURRENT_PHASE.md` note that the ingestion architecture is set update **with the implementing code slices**, not here — per the "Relationship to prior ADRs" subsection below, which keeps semantic memory pointing at the still-accurate existing entries until the code lands.
 
 ## Context
 
