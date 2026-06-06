@@ -15,6 +15,7 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { NepaliDatePicker } from "@/components/nepali-date-picker";
 import { UpdateJobFormSchema, type UpdateJobFormValues } from "@/lib/jobs-schema";
 
 import { updateJobAction } from "../../actions";
@@ -167,7 +168,10 @@ export function EditJobForm({ job }: EditJobFormProps): React.ReactElement {
               <FormItem>
                 <FormLabel>Scheduled start (optional)</FormLabel>
                 <FormControl>
-                  <Input type="date" className="font-mono" {...field} />
+                  <NepaliDatePicker
+                    value={field.value || null}
+                    onChange={(iso) => field.onChange(iso ?? "")}
+                  />
                 </FormControl>
                 <FormMessage />
               </FormItem>
@@ -181,7 +185,10 @@ export function EditJobForm({ job }: EditJobFormProps): React.ReactElement {
               <FormItem>
                 <FormLabel>Scheduled end (optional)</FormLabel>
                 <FormControl>
-                  <Input type="date" className="font-mono" {...field} />
+                  <NepaliDatePicker
+                    value={field.value || null}
+                    onChange={(iso) => field.onChange(iso ?? "")}
+                  />
                 </FormControl>
                 <FormMessage />
               </FormItem>
@@ -197,7 +204,10 @@ export function EditJobForm({ job }: EditJobFormProps): React.ReactElement {
               <FormItem>
                 <FormLabel>Actual start (optional)</FormLabel>
                 <FormControl>
-                  <Input type="date" className="font-mono" {...field} />
+                  <NepaliDatePicker
+                    value={field.value || null}
+                    onChange={(iso) => field.onChange(iso ?? "")}
+                  />
                 </FormControl>
                 <FormMessage />
               </FormItem>
@@ -211,7 +221,10 @@ export function EditJobForm({ job }: EditJobFormProps): React.ReactElement {
               <FormItem>
                 <FormLabel>Actual end (optional)</FormLabel>
                 <FormControl>
-                  <Input type="date" className="font-mono" {...field} />
+                  <NepaliDatePicker
+                    value={field.value || null}
+                    onChange={(iso) => field.onChange(iso ?? "")}
+                  />
                 </FormControl>
                 <FormMessage />
               </FormItem>

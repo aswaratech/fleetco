@@ -15,6 +15,7 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { NepaliDatePicker } from "@/components/nepali-date-picker";
 import {
   CreateDriverFormSchema,
   type CreateDriverFormValues,
@@ -214,7 +215,10 @@ export function CreateDriverForm(): React.ReactElement {
               <FormItem>
                 <FormLabel>Date of birth (optional)</FormLabel>
                 <FormControl>
-                  <Input type="date" {...field} />
+                  <NepaliDatePicker
+                    value={field.value || null}
+                    onChange={(iso) => field.onChange(iso ?? "")}
+                  />
                 </FormControl>
                 <FormMessage />
               </FormItem>
@@ -228,7 +232,10 @@ export function CreateDriverForm(): React.ReactElement {
               <FormItem>
                 <FormLabel>Hired at</FormLabel>
                 <FormControl>
-                  <Input type="date" {...field} />
+                  <NepaliDatePicker
+                    value={field.value || null}
+                    onChange={(iso) => field.onChange(iso ?? "")}
+                  />
                 </FormControl>
                 <FormMessage />
               </FormItem>
@@ -242,7 +249,10 @@ export function CreateDriverForm(): React.ReactElement {
               <FormItem>
                 <FormLabel>License expires</FormLabel>
                 <FormControl>
-                  <Input type="date" {...field} />
+                  <NepaliDatePicker
+                    value={field.value || null}
+                    onChange={(iso) => field.onChange(iso ?? "")}
+                  />
                 </FormControl>
                 <FormMessage />
               </FormItem>

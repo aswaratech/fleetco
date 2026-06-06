@@ -15,6 +15,7 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { NepaliDatePicker } from "@/components/nepali-date-picker";
 import {
   DriverFormSchema,
   type DriverFormValues,
@@ -216,7 +217,10 @@ export function EditDriverForm({ driver }: EditDriverFormProps): React.ReactElem
               <FormItem>
                 <FormLabel>Date of birth (optional)</FormLabel>
                 <FormControl>
-                  <Input type="date" {...field} />
+                  <NepaliDatePicker
+                    value={field.value || null}
+                    onChange={(iso) => field.onChange(iso ?? "")}
+                  />
                 </FormControl>
                 <FormMessage />
               </FormItem>
@@ -230,7 +234,10 @@ export function EditDriverForm({ driver }: EditDriverFormProps): React.ReactElem
               <FormItem>
                 <FormLabel>Hired at</FormLabel>
                 <FormControl>
-                  <Input type="date" {...field} />
+                  <NepaliDatePicker
+                    value={field.value || null}
+                    onChange={(iso) => field.onChange(iso ?? "")}
+                  />
                 </FormControl>
                 <FormMessage />
               </FormItem>
@@ -244,7 +251,10 @@ export function EditDriverForm({ driver }: EditDriverFormProps): React.ReactElem
               <FormItem>
                 <FormLabel>License expires</FormLabel>
                 <FormControl>
-                  <Input type="date" {...field} />
+                  <NepaliDatePicker
+                    value={field.value || null}
+                    onChange={(iso) => field.onChange(iso ?? "")}
+                  />
                 </FormControl>
                 <FormMessage />
               </FormItem>
