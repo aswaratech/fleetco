@@ -14,7 +14,7 @@ import {
   FormLabel,
   FormMessage,
 } from "@/components/ui/form";
-import { Input } from "@/components/ui/input";
+import { NepaliDatePicker } from "@/components/nepali-date-picker";
 import { CreateJobFormSchema, type CreateJobFormValues } from "@/lib/jobs-schema";
 
 import { createJobAction } from "../actions";
@@ -48,12 +48,13 @@ interface CreateJobFormProps {
 // a sub-hundred-customer alphabetical list. Promote when the cap is
 // approached (the page shell caps at 200).
 //
-// The four date pairs (scheduled start/end, actual start/end) are
-// native <input type="date"> elements, which surfaces the OS-native
-// date picker and produces a YYYY-MM-DD string the API's
-// z.coerce.date() accepts. Server-side cross-field validation is
-// duplicated in the form's resolver for immediate feedback; the
-// authoritative rule still runs on the API.
+// The four date pairs (scheduled start/end, actual start/end) use the
+// <NepaliDatePicker> (ADR-0032 B2), which emits the SAME YYYY-MM-DD
+// string the native <input type="date"> did, so the API's
+// z.coerce.date() accepts it unchanged and the cross-field end>=start
+// rules keep working on the identical string. Server-side cross-field
+// validation is duplicated in the form's resolver for immediate
+// feedback; the authoritative rule still runs on the API.
 //
 // 400 with the customer-not-found message is surfaced as a field-level
 // error on the customer picker (via setError + result.field ===
@@ -171,7 +172,10 @@ export function CreateJobForm({ customers }: CreateJobFormProps): React.ReactEle
               <FormItem>
                 <FormLabel>Scheduled start (optional)</FormLabel>
                 <FormControl>
-                  <Input type="date" className="font-mono" {...field} />
+                  <NepaliDatePicker
+                    value={field.value || null}
+                    onChange={(iso) => field.onChange(iso ?? "")}
+                  />
                 </FormControl>
                 <FormMessage />
               </FormItem>
@@ -185,7 +189,10 @@ export function CreateJobForm({ customers }: CreateJobFormProps): React.ReactEle
               <FormItem>
                 <FormLabel>Scheduled end (optional)</FormLabel>
                 <FormControl>
-                  <Input type="date" className="font-mono" {...field} />
+                  <NepaliDatePicker
+                    value={field.value || null}
+                    onChange={(iso) => field.onChange(iso ?? "")}
+                  />
                 </FormControl>
                 <FormMessage />
               </FormItem>
@@ -201,7 +208,10 @@ export function CreateJobForm({ customers }: CreateJobFormProps): React.ReactEle
               <FormItem>
                 <FormLabel>Actual start (optional)</FormLabel>
                 <FormControl>
-                  <Input type="date" className="font-mono" {...field} />
+                  <NepaliDatePicker
+                    value={field.value || null}
+                    onChange={(iso) => field.onChange(iso ?? "")}
+                  />
                 </FormControl>
                 <FormMessage />
               </FormItem>
@@ -215,7 +225,10 @@ export function CreateJobForm({ customers }: CreateJobFormProps): React.ReactEle
               <FormItem>
                 <FormLabel>Actual end (optional)</FormLabel>
                 <FormControl>
-                  <Input type="date" className="font-mono" {...field} />
+                  <NepaliDatePicker
+                    value={field.value || null}
+                    onChange={(iso) => field.onChange(iso ?? "")}
+                  />
                 </FormControl>
                 <FormMessage />
               </FormItem>
