@@ -16,6 +16,7 @@ import { formatNepaliDate } from "@/lib/nepali-date";
 import { getServerSession } from "@/lib/session";
 
 import { PerVehicleCostFilters } from "./per-vehicle-cost-filters";
+import type { PerVehicleCostReport, PerVehicleCostRow } from "./types";
 
 // Per-vehicle cost report — Phase 1 vertical slice, iter 23 (Reports
 // v1, the last Phase-1 slice). Server-rendered; reads the session
@@ -59,24 +60,6 @@ import { PerVehicleCostFilters } from "./per-vehicle-cost-filters";
 // support arbitrary sorts on this surface (and the operator's eye
 // for "where's the cost going" wants totalPaisa-desc by default).
 // A future iter that wants a different sort can widen the API.
-
-interface PerVehicleCostRow {
-  vehicleId: string;
-  registrationNumber: string;
-  fuelPaisa: number;
-  expensePaisa: number;
-  totalPaisa: number;
-  fuelLogCount: number;
-  expenseLogCount: number;
-}
-
-interface PerVehicleCostReport {
-  from: string;
-  to: string;
-  rows: PerVehicleCostRow[];
-  totals: { fuelPaisa: number; expensePaisa: number; totalPaisa: number };
-  companyLevel: { expensePaisa: number; expenseLogCount: number };
-}
 
 // Vehicles list response shape — see apps/api/src/modules/vehicles/
 // vehicles.controller.ts. We only need the id + registrationNumber
@@ -217,7 +200,7 @@ export default async function PerVehicleCostPage({
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {report.rows.map((row) => (
+                {report.rows.map((row: PerVehicleCostRow) => (
                   <TableRow key={row.vehicleId}>
                     <TableCell className="text-text-primary font-mono">
                       <Link
