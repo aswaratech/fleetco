@@ -2,6 +2,8 @@ import { isSpanContextValid, trace } from "@opentelemetry/api";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { BatchSpanProcessor, type SpanProcessor } from "@opentelemetry/sdk-trace-node";
 
+import { GpsSpanScrubProcessor } from "./span-scrub";
+
 // FleetCo-authored OpenTelemetry seams (ADR-0024). The API does NOT stand
 // up its own OpenTelemetry NodeSDK: Sentry v9's `Sentry.init()` already owns
 // the global TracerProvider, registers Sentry's span processor on it, and
@@ -23,8 +25,16 @@ import { BatchSpanProcessor, type SpanProcessor } from "@opentelemetry/sdk-trace
  * Returns an empty array when `endpoint` is undefined or empty — the no-op
  * posture that mirrors the `SENTRY_DSN` guard in `main.ts`. With no endpoint
  * configured (the Phase-1 default), the API constructs no OTLP exporter and
- * ships no OTLP telemetry. When an endpoint is set, returns a single
- * OTLP/HTTP `BatchSpanProcessor`.
+ * ships no OTLP telemetry (and so there is nothing to scrub for OTLP).
+ *
+ * When an endpoint is set, returns two processors in order: the
+ * `GpsSpanScrubProcessor` at **index 0**, then the OTLP/HTTP
+ * `BatchSpanProcessor`. The scrub processor leads the array on purpose —
+ * OpenTelemetry runs processors in registration order, so it deletes the GPS
+ * Tier-5 attributes (ADR-0026 commitment 5 / ADR-0027 commitment 5) from each
+ * span's `onEnd` before the `BatchSpanProcessor` reads them for export,
+ * guaranteeing no coordinate ever leaves the process in a span. See
+ * `span-scrub.ts` (the OTLP-egress twin of the pino `redact` GPS denylist).
  *
  * `endpoint` is the full OTLP/HTTP **traces** URL (e.g.
  * `https://collector.example.com/v1/traces`), passed verbatim to the
@@ -38,7 +48,9 @@ export function buildOtlpSpanProcessors(endpoint: string | undefined): SpanProce
     return [];
   }
   const exporter = new OTLPTraceExporter({ url: endpoint });
-  return [new BatchSpanProcessor(exporter)];
+  // Scrub processor FIRST (index 0), exporter SECOND: the scrub's onEnd must
+  // run before the BatchSpanProcessor reads attributes for OTLP egress.
+  return [new GpsSpanScrubProcessor(), new BatchSpanProcessor(exporter)];
 }
 
 /**

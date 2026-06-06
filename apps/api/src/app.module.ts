@@ -81,13 +81,14 @@ import { VehiclesModule } from "./modules/vehicles/vehicles.module";
             // nesting depth (same form as *.driverName above).
             //
             // KEEP IN SYNC: the ADR-0026 span-scrub denylist is the OTHER
-            // egress layer these same keys must be scrubbed from. That
-            // seam does NOT exist yet — apps/api/src/observability/otel.ts
-            // only builds the OTLP processor; there is no attribute-scrub
-            // hook to add keys to. When that seam lands (a later telematics
-            // ticket), it MUST denylist this exact key set, kept in sync
-            // with this list — the two layers (logs here, spans there) are
-            // the pair ADR-0027 commitment 5 names.
+            // egress layer these same keys must be scrubbed from. That seam
+            // now EXISTS — apps/api/src/observability/span-scrub.ts exports
+            // GPS_SPAN_SCRUB_DENYLIST (this exact key set, minus the `*.`
+            // wildcard prefix) and its GpsSpanScrubProcessor deletes those
+            // keys from every span before OTLP egress (wired at index 0 in
+            // otel.ts's buildOtlpSpanProcessors). Adding a coordinate/movement
+            // key here MUST add it there too — the two layers (logs here,
+            // spans there) are the pair ADR-0027 commitment 5 names.
             "*.latitude",
             "*.longitude",
             "*.lat",

@@ -3,6 +3,7 @@ import { BatchSpanProcessor } from "@opentelemetry/sdk-trace-node";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { buildOtlpSpanProcessors, otelTraceMixin } from "../src/observability/otel";
+import { GpsSpanScrubProcessor } from "../src/observability/span-scrub";
 
 // Unit tests for the two FleetCo-authored OpenTelemetry seams (ADR-0024).
 // Per the ticket, we pin ONLY these pure helpers — not Sentry's internal
@@ -28,13 +29,17 @@ describe("buildOtlpSpanProcessors", () => {
     expect(buildOtlpSpanProcessors("")).toEqual([]);
   });
 
-  test("returns a single OTLP BatchSpanProcessor when an endpoint is set", async () => {
+  test("returns the GPS scrub processor then the OTLP BatchSpanProcessor when an endpoint is set", async () => {
     const processors = buildOtlpSpanProcessors("https://collector.example.com/v1/traces");
-    expect(processors).toHaveLength(1);
-    expect(processors[0]).toBeInstanceOf(BatchSpanProcessor);
-    // Release the processor's exporter/batch resources so Vitest exits
-    // cleanly. shutdown() is a no-op flush here (no spans were ever queued).
-    await processors[0].shutdown();
+    // The scrub processor leads the array (index 0) so it deletes GPS Tier-5
+    // attributes before the BatchSpanProcessor reads them for OTLP egress
+    // (ADR-0026 c5 / ADR-0027 c5). span-scrub.test.ts proves the deletion.
+    expect(processors).toHaveLength(2);
+    expect(processors[0]).toBeInstanceOf(GpsSpanScrubProcessor);
+    expect(processors[1]).toBeInstanceOf(BatchSpanProcessor);
+    // Release each processor's resources so Vitest exits cleanly. shutdown()
+    // is a no-op flush here (no spans were ever queued).
+    await Promise.all(processors.map((processor) => processor.shutdown()));
   });
 });
 
