@@ -15,6 +15,7 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { NepaliDatePicker } from "@/components/nepali-date-picker";
 import {
   CreateVehicleFormSchema,
   type CreateVehicleFormValues,
@@ -243,7 +244,10 @@ export function CreateVehicleForm(): React.ReactElement {
             <FormItem>
               <FormLabel>Acquired at</FormLabel>
               <FormControl>
-                <Input type="date" {...field} />
+                <NepaliDatePicker
+                  value={field.value || null}
+                  onChange={(iso) => field.onChange(iso ?? "")}
+                />
               </FormControl>
               <FormMessage />
             </FormItem>
@@ -279,7 +283,10 @@ export function CreateVehicleForm(): React.ReactElement {
                 <FormItem>
                   <FormLabel>Bluebook expires at</FormLabel>
                   <FormControl>
-                    <Input type="date" {...field} />
+                    <NepaliDatePicker
+                      value={field.value || null}
+                      onChange={(iso) => field.onChange(iso ?? "")}
+                    />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -349,7 +356,10 @@ export function CreateVehicleForm(): React.ReactElement {
                 <FormItem>
                   <FormLabel>Insurance expires at</FormLabel>
                   <FormControl>
-                    <Input type="date" {...field} />
+                    <NepaliDatePicker
+                      value={field.value || null}
+                      onChange={(iso) => field.onChange(iso ?? "")}
+                    />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -379,7 +389,10 @@ export function CreateVehicleForm(): React.ReactElement {
                 <FormItem>
                   <FormLabel>Route permit expires at</FormLabel>
                   <FormControl>
-                    <Input type="date" {...field} />
+                    <NepaliDatePicker
+                      value={field.value || null}
+                      onChange={(iso) => field.onChange(iso ?? "")}
+                    />
                   </FormControl>
                   <FormMessage />
                 </FormItem>

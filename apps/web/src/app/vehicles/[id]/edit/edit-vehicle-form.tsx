@@ -15,6 +15,7 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { NepaliDatePicker } from "@/components/nepali-date-picker";
 import {
   VehicleFormSchema,
   type VehicleFormValues,
@@ -253,7 +254,10 @@ export function EditVehicleForm({ vehicle }: EditVehicleFormProps): React.ReactE
               <FormItem>
                 <FormLabel>Acquired at</FormLabel>
                 <FormControl>
-                  <Input type="date" {...field} />
+                  <NepaliDatePicker
+                    value={field.value || null}
+                    onChange={(iso) => field.onChange(iso ?? "")}
+                  />
                 </FormControl>
                 <FormMessage />
               </FormItem>
@@ -333,7 +337,10 @@ export function EditVehicleForm({ vehicle }: EditVehicleFormProps): React.ReactE
                 <FormItem>
                   <FormLabel>Bluebook expires at</FormLabel>
                   <FormControl>
-                    <Input type="date" {...field} />
+                    <NepaliDatePicker
+                      value={field.value || null}
+                      onChange={(iso) => field.onChange(iso ?? "")}
+                    />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -403,7 +410,10 @@ export function EditVehicleForm({ vehicle }: EditVehicleFormProps): React.ReactE
                 <FormItem>
                   <FormLabel>Insurance expires at</FormLabel>
                   <FormControl>
-                    <Input type="date" {...field} />
+                    <NepaliDatePicker
+                      value={field.value || null}
+                      onChange={(iso) => field.onChange(iso ?? "")}
+                    />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -433,7 +443,10 @@ export function EditVehicleForm({ vehicle }: EditVehicleFormProps): React.ReactE
                 <FormItem>
                   <FormLabel>Route permit expires at</FormLabel>
                   <FormControl>
-                    <Input type="date" {...field} />
+                    <NepaliDatePicker
+                      value={field.value || null}
+                      onChange={(iso) => field.onChange(iso ?? "")}
+                    />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
