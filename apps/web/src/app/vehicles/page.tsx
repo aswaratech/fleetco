@@ -2,6 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { NepaliDate } from "@/components/nepali-date";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Table,
@@ -12,6 +13,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
+import { worstComplianceState } from "@/lib/compliance";
 import { getServerSession } from "@/lib/session";
 import { VEHICLE_KIND_LABELS, VEHICLE_STATUS_LABELS } from "@/lib/vehicles-schema";
 
@@ -75,6 +77,27 @@ function formatKilometers(km: number): string {
     maximumFractionDigits: 1,
   });
   return `${formatter.format(km)} km`;
+}
+
+// Worst-of-three compliance roll-up cell — the sanctioned vehicles-list column
+// (ADR-0031 §E / "Revisit when": "add the worst-of-three indicator column to
+// vehicles/page.tsx, reusing complianceBadgeState"). `worstComplianceState`
+// classifies the vehicle's three document expiries (bluebook / insurance /
+// route permit) against now and returns the MOST URGENT state; we paint the
+// same red "Expired" / amber "Expiring soon" <Badge> the Vehicle detail
+// Compliance section uses, and render a quiet em-dash when every document is
+// current ("ok") or unscanned ("none") so a compliant fleet reads as a calm
+// column rather than a wall of chips. Read-only — this column is NOT in the
+// sort whitelist (worst-of-three is a derived value, not a server-sortable
+// scalar column).
+function ComplianceRollUp({ vehicle }: { vehicle: Vehicle }): React.ReactElement {
+  const state = worstComplianceState(
+    [vehicle.bluebookExpiresAt, vehicle.insuranceExpiresAt, vehicle.routePermitExpiresAt],
+    new Date(),
+  );
+  if (state === "expired") return <Badge variant="error">Expired</Badge>;
+  if (state === "expiring-soon") return <Badge variant="warning">Expiring soon</Badge>;
+  return <>—</>;
 }
 
 // Build the link for a pagination control. Filter and sort values are
@@ -442,6 +465,11 @@ export default async function VehiclesPage({
                       Acquired
                     </SortableHeader>
                     <TableHead>Status</TableHead>
+                    {/* Compliance roll-up (worst of bluebook / insurance /
+                        route-permit expiry). Read-only — not a SortableHeader,
+                        because worst-of-three is a derived value with no
+                        server-side sort column. */}
+                    <TableHead>Compliance</TableHead>
                     <SortableHeader
                       column="odometerCurrentKm"
                       activeColumn={data.sortBy}
@@ -480,6 +508,9 @@ export default async function VehiclesPage({
                       </TableCell>
                       <TableCell className="text-text-secondary">
                         {VEHICLE_STATUS_LABELS[v.status] ?? v.status}
+                      </TableCell>
+                      <TableCell className="text-text-secondary">
+                        <ComplianceRollUp vehicle={v} />
                       </TableCell>
                       <TableCell className="text-text-primary text-right tabular-nums">
                         {formatKilometers(v.odometerCurrentKm)}
