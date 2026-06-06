@@ -3,7 +3,7 @@
 import { useRouter, useSearchParams } from "next/navigation";
 import { useTransition } from "react";
 
-import { Input } from "@/components/ui/input";
+import { NepaliDatePicker } from "@/components/nepali-date-picker";
 
 // Filter toolbar for /reports/per-vehicle-cost. Client island so the
 // date inputs can debounce-push URL changes inside a useTransition;
@@ -61,42 +61,22 @@ export function PerVehicleCostFilters({
         <label htmlFor="report-filter-from" className="text-text-muted text-xs font-medium">
           From
         </label>
-        <Input
+        <NepaliDatePicker
           id="report-filter-from"
-          type="date"
-          className="w-44"
-          defaultValue={from}
-          onBlur={(e) => {
-            if ((e.target.value || "") !== from) {
-              setParam("from", e.target.value);
-            }
-          }}
-          onChange={(e) => {
-            if (e.target.value.length === 10 && e.target.value !== from) {
-              setParam("from", e.target.value);
-            }
-          }}
+          className="w-56"
+          value={from || null}
+          onChange={(iso) => setParam("from", iso ?? "")}
         />
       </div>
       <div className="flex flex-col gap-1">
         <label htmlFor="report-filter-to" className="text-text-muted text-xs font-medium">
           To
         </label>
-        <Input
+        <NepaliDatePicker
           id="report-filter-to"
-          type="date"
-          className="w-44"
-          defaultValue={to}
-          onBlur={(e) => {
-            if ((e.target.value || "") !== to) {
-              setParam("to", e.target.value);
-            }
-          }}
-          onChange={(e) => {
-            if (e.target.value.length === 10 && e.target.value !== to) {
-              setParam("to", e.target.value);
-            }
-          }}
+          className="w-56"
+          value={to || null}
+          onChange={(iso) => setParam("to", iso ?? "")}
         />
       </div>
       <div className="flex flex-col gap-1">
