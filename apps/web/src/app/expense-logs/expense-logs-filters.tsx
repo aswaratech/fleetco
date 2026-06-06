@@ -3,7 +3,7 @@
 import { useRouter, useSearchParams } from "next/navigation";
 import { useTransition } from "react";
 
-import { Input } from "@/components/ui/input";
+import { NepaliDatePicker } from "@/components/nepali-date-picker";
 
 import { EXPENSE_CATEGORY_OPTIONS } from "./types";
 
@@ -90,44 +90,22 @@ export function ExpenseLogsFilters({
         <label htmlFor="expense-logs-filter-start" className="text-text-muted text-xs font-medium">
           From
         </label>
-        <Input
+        <NepaliDatePicker
           id="expense-logs-filter-start"
-          type="date"
-          className="w-44"
-          defaultValue={startDate ?? ""}
-          onBlur={(e) => {
-            if ((e.target.value || "") !== (startDate ?? "")) {
-              setParam("startDate", e.target.value);
-            }
-          }}
-          onChange={(e) => {
-            // Native date input commits on every typed character; the
-            // commit lands once the value is a complete date.
-            if (e.target.value.length === 10 && e.target.value !== (startDate ?? "")) {
-              setParam("startDate", e.target.value);
-            }
-          }}
+          className="w-56"
+          value={startDate || null}
+          onChange={(iso) => setParam("startDate", iso ?? "")}
         />
       </div>
       <div className="flex flex-col gap-1">
         <label htmlFor="expense-logs-filter-end" className="text-text-muted text-xs font-medium">
           To
         </label>
-        <Input
+        <NepaliDatePicker
           id="expense-logs-filter-end"
-          type="date"
-          className="w-44"
-          defaultValue={endDate ?? ""}
-          onBlur={(e) => {
-            if ((e.target.value || "") !== (endDate ?? "")) {
-              setParam("endDate", e.target.value);
-            }
-          }}
-          onChange={(e) => {
-            if (e.target.value.length === 10 && e.target.value !== (endDate ?? "")) {
-              setParam("endDate", e.target.value);
-            }
-          }}
+          className="w-56"
+          value={endDate || null}
+          onChange={(iso) => setParam("endDate", iso ?? "")}
         />
       </div>
     </div>
