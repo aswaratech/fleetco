@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { Select as SelectPrimitive } from "radix-ui";
+import { Check, ChevronDown, ChevronUp } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
@@ -16,21 +17,20 @@ import { cn } from "@/lib/utils";
 //     button.tsx, form.tsx, and alert-dialog.tsx). No new top-level
 //     dependency is introduced.
 //   - Local edits to the upstream:
-//       (a) Replaced lucide-react `ChevronDownIcon` / `ChevronUpIcon` /
-//           `CheckIcon` imports with three local inline SVG components
-//           (ChevronDown, ChevronUp, Check). lucide-react is NOT a
-//           direct dependency of apps/web at the time of this copy
-//           (`apps/web/package.json` lists no `lucide-react`); the
-//           DESIGN.md §Iconography section describes Lucide as the
-//           project's icon library but no install has happened yet, and
-//           adding a new top-level dependency is forbidden by CLAUDE.md
-//           §Dependencies without first proposing it as a separate
-//           ticket. The three icons used here are simple enough to
-//           inline at byte-equivalent cost; once Lucide is properly
-//           introduced (likely the iter-5 testing slice or an
-//           explicit dependency-add ticket), this file's three
-//           inline-SVG bodies can be replaced with the matching named
-//           imports.
+//       (a) Icons import from `lucide-react` — `Check` / `ChevronDown` /
+//           `ChevronUp`, the project icon library per DESIGN.md
+//           §Iconography. lucide-react was adopted (and this file's three
+//           prior byte-equivalent inline-SVG substitutes removed) in the
+//           P2 polish/debt ticket `feat/lucide-react-adoption` (2026-06-06),
+//           discharging the "lucide-react not yet adopted" tech-debt entry.
+//           We import the non-suffixed aliases (`ChevronDown`, …); current
+//           upstream shadcn-ui uses the `*Icon` names (`ChevronDownIcon`,
+//           …) — same components, lucide-react exports both. Each call-site
+//           passes an explicit `strokeWidth` (1.5 for the size-4 chevrons,
+//           1.75 for the size-4 Check) plus `aria-hidden="true"`, so the
+//           render is byte-identical to the removed inline SVGs and honors
+//           DESIGN.md §Iconography "Stroke width" (1.5/1.75 — NOT Lucide's
+//           default of 2). A true null visual diff; no size class changed.
 //       (b) Aligned import paths to project convention (`@/lib/utils`).
 //       (c) Kept Tailwind class strings byte-for-byte from upstream; the
 //           CSS variable aliases in apps/web/src/app/globals.css already
@@ -46,67 +46,6 @@ import { cn } from "@/lib/utils";
 // DESIGN.md §"Inputs and forms" calls out the shadcn-ui Select as the
 // canonical dropdown for selecting from an enumerated set; the iter-4
 // list-page filter toolbar is its first use.
-
-interface IconProps extends React.SVGProps<SVGSVGElement> {
-  className?: string;
-}
-
-function ChevronDown({ className, ...props }: IconProps) {
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      className={className}
-      {...props}
-    >
-      <path d="m6 9 6 6 6-6" />
-    </svg>
-  );
-}
-
-function ChevronUp({ className, ...props }: IconProps) {
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      className={className}
-      {...props}
-    >
-      <path d="m18 15-6-6-6 6" />
-    </svg>
-  );
-}
-
-function Check({ className, ...props }: IconProps) {
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.75"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      className={className}
-      {...props}
-    >
-      <path d="M20 6 9 17l-5-5" />
-    </svg>
-  );
-}
 
 function Select({ ...props }: React.ComponentProps<typeof SelectPrimitive.Root>) {
   return <SelectPrimitive.Root data-slot="select" {...props} />;
@@ -140,7 +79,7 @@ function SelectTrigger({
     >
       {children}
       <SelectPrimitive.Icon asChild>
-        <ChevronDown className="size-4 opacity-50" />
+        <ChevronDown className="size-4 opacity-50" strokeWidth={1.5} aria-hidden="true" />
       </SelectPrimitive.Icon>
     </SelectPrimitive.Trigger>
   );
@@ -212,7 +151,7 @@ function SelectItem({
         className="absolute right-2 flex size-3.5 items-center justify-center"
       >
         <SelectPrimitive.ItemIndicator>
-          <Check className="size-4" />
+          <Check className="size-4" strokeWidth={1.75} aria-hidden="true" />
         </SelectPrimitive.ItemIndicator>
       </span>
       <SelectPrimitive.ItemText>{children}</SelectPrimitive.ItemText>
@@ -243,7 +182,7 @@ function SelectScrollUpButton({
       className={cn("flex cursor-default items-center justify-center py-1", className)}
       {...props}
     >
-      <ChevronUp className="size-4" />
+      <ChevronUp className="size-4" strokeWidth={1.5} aria-hidden="true" />
     </SelectPrimitive.ScrollUpButton>
   );
 }
@@ -258,7 +197,7 @@ function SelectScrollDownButton({
       className={cn("flex cursor-default items-center justify-center py-1", className)}
       {...props}
     >
-      <ChevronDown className="size-4" />
+      <ChevronDown className="size-4" strokeWidth={1.5} aria-hidden="true" />
     </SelectPrimitive.ScrollDownButton>
   );
 }

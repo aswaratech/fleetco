@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
+import { ChevronDown, ChevronUp } from "lucide-react";
 
 import { NepaliDate } from "@/components/nepali-date";
 import { Badge } from "@/components/ui/badge";
@@ -139,27 +140,19 @@ function sortParams(
   return qs ? `?${qs}` : "";
 }
 
-// Inline arrow icon for the active-sort indicator. Inline-SVG keeps
-// the page free of the lucide-react dependency, which is not currently
-// installed in apps/web/package.json. DESIGN.md §Iconography names
-// Lucide as the future icon library, but introducing it is a separate
-// dependency-add ticket; the chevron paths here are visually
-// equivalent to Lucide's `chevron-up`/`chevron-down` at 12px.
+// Active-sort indicator. asc → Lucide `ChevronUp`, desc → `ChevronDown`
+// (mirrors the chevron paths the prior inline SVG drew). Rendered from
+// lucide-react — DESIGN.md §Iconography names it the project icon library,
+// adopted in feat/lucide-react-adoption. The explicit strokeWidth={1.75}
+// + aria-hidden preserve the prior inline render exactly (a null visual
+// diff): Lucide's default stroke is 2, not the 1.75 this 12px indicator
+// uses per DESIGN.md §Iconography "Stroke width".
 function SortArrow({ direction }: { direction: SortDir }): React.ReactElement {
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.75"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      className="ml-1 inline size-3 align-[-1px]"
-    >
-      {direction === "asc" ? <path d="m18 15-6-6-6 6" /> : <path d="m6 9 6 6 6-6" />}
-    </svg>
+  const className = "ml-1 inline size-3 align-[-1px]";
+  return direction === "asc" ? (
+    <ChevronUp className={className} strokeWidth={1.75} aria-hidden="true" />
+  ) : (
+    <ChevronDown className={className} strokeWidth={1.75} aria-hidden="true" />
   );
 }
 
