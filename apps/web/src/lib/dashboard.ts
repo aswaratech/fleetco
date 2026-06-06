@@ -30,7 +30,7 @@
 // every import relative is what lets the test load the module at all.
 
 import { apiFetch } from "./api";
-import { complianceBadgeState, type ComplianceBadgeState } from "./compliance";
+import { worstComplianceState, type ComplianceBadgeState } from "./compliance";
 import type { ExpenseLogListItem } from "../app/expense-logs/types";
 import type { FuelLogListItem } from "../app/fuel-logs/types";
 import type {
@@ -53,25 +53,16 @@ export type VehicleComplianceFields = Pick<
   "bluebookExpiresAt" | "insuranceExpiresAt" | "routePermitExpiresAt"
 >;
 
-// Worst-of precedence for a vehicle's three documents: its compliance state is
-// the MOST URGENT of its bluebook / insurance / route-permit states. Higher
-// rank = more urgent = "worse" — `expired` outranks `expiring-soon` outranks
-// `ok` outranks `none` (DESIGN.md §"Home dashboard" card 1: "a vehicle's state
-// is the worst of its three documents").
-const COMPLIANCE_RANK: Record<ComplianceBadgeState, number> = {
-  none: 0,
-  ok: 1,
-  "expiring-soon": 2,
-  expired: 3,
-};
-
 /**
- * The worst (most urgent) compliance state across a vehicle's three documents.
+ * The worst (most urgent) compliance state across a vehicle's three documents
+ * — DESIGN.md §"Home dashboard" card 1: "a vehicle's state is the worst of its
+ * three documents."
  *
- * Each document is classified by the SHIPPED `complianceBadgeState` helper —
- * the 30-day window and the UTC-calendar-day rule live there (ADR-0031
- * commitment 5); this function never re-derives them, it only takes the worst
- * of the three results.
+ * A thin vehicle-object-shaped wrapper over `worstComplianceState`
+ * (lib/compliance.ts): the worst-of precedence and the per-document 30-day /
+ * UTC-calendar-day rule both live there and are never re-derived here. Kept as
+ * a named helper because `rollUpCompliance` and the dashboard read a vehicle's
+ * three named `*ExpiresAt` fields, not a bare array.
  *
  * @param vehicle the three `*ExpiresAt` fields (null when a document is unscanned)
  * @param now     the reference instant; compared by UTC calendar day (compliance.ts)
@@ -80,14 +71,9 @@ export function vehicleComplianceState(
   vehicle: VehicleComplianceFields,
   now: Date,
 ): ComplianceBadgeState {
-  const states: ComplianceBadgeState[] = [
-    complianceBadgeState(vehicle.bluebookExpiresAt, now),
-    complianceBadgeState(vehicle.insuranceExpiresAt, now),
-    complianceBadgeState(vehicle.routePermitExpiresAt, now),
-  ];
-  return states.reduce<ComplianceBadgeState>(
-    (worst, state) => (COMPLIANCE_RANK[state] > COMPLIANCE_RANK[worst] ? state : worst),
-    "none",
+  return worstComplianceState(
+    [vehicle.bluebookExpiresAt, vehicle.insuranceExpiresAt, vehicle.routePermitExpiresAt],
+    now,
   );
 }
 
