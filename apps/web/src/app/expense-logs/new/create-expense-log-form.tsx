@@ -15,6 +15,7 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { NepaliDatePicker } from "@/components/nepali-date-picker";
 import {
   CreateExpenseLogFormSchema,
   EXPENSE_CATEGORIES,
@@ -211,7 +212,10 @@ export function CreateExpenseLogForm({
             <FormItem>
               <FormLabel>Date</FormLabel>
               <FormControl>
-                <Input type="date" className="font-mono" {...field} />
+                <NepaliDatePicker
+                  value={field.value || null}
+                  onChange={(iso) => field.onChange(iso ?? "")}
+                />
               </FormControl>
               <FormMessage />
             </FormItem>
