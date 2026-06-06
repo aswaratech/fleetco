@@ -269,21 +269,23 @@ export class FuelLogsService {
    * conflict. The error object's `meta.field_name` tells us which
    * FK; we route by lowercased substring match.
    *
-   * Odometer monotonicity check (defer): a fuel log's
-   * odometerReadingKm should arguably be >= the previous fuel log's
-   * reading for the same vehicle. We do NOT enforce this in iter
-   * 20. Backdated corrections, replacement-odometer events (a
-   * broken odometer swap means the new reading is LOWER), and
-   * operator data-entry mistakes all push back on a hard rule. The
-   * iter that adds the per-vehicle km/L report will surface the
-   * inconsistency as a soft warning on the detail page; that's the
-   * right place for it.
-   *
-   * FUTURE(km/L report): when the per-vehicle km/L report ships,
-   * the detail page will compute the fill-to-fill delta against the
-   * previous log for the same vehicle and surface a soft warning
-   * when the current odometer < previous odometer. The warning is
-   * informational, not a hard rejection, for the reasons above.
+   * Odometer monotonicity — RECORDED DECISION (non-monotonic by
+   * design): a fuel log's `odometerReadingKm` is deliberately NOT
+   * required to be >= the previous fill's reading for the same
+   * vehicle, and there is intentionally no write-time guard here.
+   * A hard reject would fight three legitimate realities: backdated
+   * corrections (a receipt entered days late, out of order),
+   * odometer swaps / replacements (a broken-odometer swap makes the
+   * new reading genuinely LOWER than the old one), and the future
+   * bulk-import path (which must accept historical rows in whatever
+   * order they arrive). The soft signal that actually matters — a
+   * per-vehicle km/L outlier — belongs with the future per-vehicle
+   * fuel-efficiency report, which can surface a fill whose odometer
+   * regresses as an informational warning; it does NOT belong on
+   * this write path. This discharges the "Fuel-log odometer-
+   * monotonicity check deferred" debt as option (b), the documented
+   * decision — see docs/tech-debt.md (Paid-off) and the glossary's
+   * "Fuel log" / "Odometer" entries.
    */
   async create(input: CreateFuelLogInput, createdById: string): Promise<FuelLogDetail> {
     // Service-layer cross-field check before we even attempt the
