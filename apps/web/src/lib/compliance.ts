@@ -78,3 +78,52 @@ export function complianceBadgeState(
   if (expiryDay <= today + windowDays * MS_PER_DAY) return "expiring-soon";
   return "ok";
 }
+
+// Worst-of precedence across several compliance states: a roll-up's state is
+// the MOST URGENT of its inputs. Higher rank = more urgent = "worse" —
+// `expired` outranks `expiring-soon` outranks `ok` outranks `none`. This is the
+// single source of truth for "which compliance state is worse"; both the
+// vehicles-list roll-up column (vehicles/page.tsx) and the Home dashboard's
+// per-vehicle roll-up (lib/dashboard.ts's `vehicleComplianceState`) reach it
+// through `worstComplianceState` rather than re-declaring the ordering.
+const COMPLIANCE_RANK: Record<ComplianceBadgeState, number> = {
+  none: 0,
+  ok: 1,
+  "expiring-soon": 2,
+  expired: 3,
+};
+
+/**
+ * The worst (most urgent) compliance state across several expiry dates.
+ *
+ * The array-shaped sibling of `complianceBadgeState`: it classifies EACH expiry
+ * with that shipped helper and returns the worst result by the precedence
+ * `expired` > `expiring-soon` > `ok` > `none`. The 30-day window and the
+ * UTC-calendar-day rule live in `complianceBadgeState` (ADR-0031 commitment 5)
+ * and are never re-derived here — `windowDays` is forwarded to it verbatim for
+ * every expiry. An empty list, or one of all null / undefined / unparseable
+ * dates, is `none` (the reduce floor).
+ *
+ * The vehicles-list compliance column passes a vehicle's three document
+ * expiries (bluebook / insurance / route permit) and paints the single worst
+ * state as one badge (ADR-0031 §E / "Revisit when"). `lib/dashboard.ts`'s
+ * `vehicleComplianceState` is a vehicle-object-shaped wrapper over this same
+ * primitive.
+ *
+ * @param expiries   the stored ISO/UTC expiry dates; each null / undefined /
+ *                   unparseable contributes `none`
+ * @param now        the reference instant (callers pass `new Date()`); compared
+ *                   by UTC calendar day, not by instant
+ * @param windowDays the expiring-soon window in days (default 30), forwarded to
+ *                   `complianceBadgeState` for every expiry
+ */
+export function worstComplianceState(
+  expiries: readonly (string | null | undefined)[],
+  now: Date,
+  windowDays = 30,
+): ComplianceBadgeState {
+  return expiries.reduce<ComplianceBadgeState>((worst, expiry) => {
+    const state = complianceBadgeState(expiry, now, windowDays);
+    return COMPLIANCE_RANK[state] > COMPLIANCE_RANK[worst] ? state : worst;
+  }, "none");
+}

@@ -1,11 +1,17 @@
 import { afterEach, describe, expect, test } from "vitest";
 
-import { complianceBadgeState } from "../src/lib/compliance";
+import { complianceBadgeState, worstComplianceState } from "../src/lib/compliance";
 
 /**
- * Pins `complianceBadgeState` — the pure helper that classifies a vehicle
- * compliance-document expiry date into a badge state (ADR-0031 commitment 5 /
- * §E). All correctness lives in this pure function; the `<Badge>` component is
+ * Pins the two pure compliance helpers (ADR-0031 commitment 5 / §E):
+ *   - `complianceBadgeState` — classifies ONE compliance-document expiry date
+ *     into a badge state.
+ *   - `worstComplianceState` — the array-shaped sibling: the worst (most urgent)
+ *     state across several expiries, built strictly on `complianceBadgeState`.
+ *     This is the helper the sanctioned vehicles-list roll-up column consumes
+ *     (ADR-0031 "Revisit when").
+ *
+ * All correctness lives in these pure functions; the `<Badge>` component is
  * markup-only and ships untested-by-render exactly like the money/units/BS
  * formatters' callers (no jsdom harness — vitest collects only
  * `test/**`/`*.test.ts` under the node env).
@@ -153,6 +159,114 @@ describe("complianceBadgeState — UTC determinism across server timezones", () 
         expect(complianceBadgeState(isoDaysFromNow(0), NOW)).toBe("expiring-soon");
         expect(complianceBadgeState(isoDaysFromNow(30), NOW)).toBe("expiring-soon");
         expect(complianceBadgeState(isoDaysFromNow(31), NOW)).toBe("ok");
+      });
+    }
+  });
+});
+
+describe("worstComplianceState — the worst of several expiries", () => {
+  test("empty list → 'none' (the reduce floor)", () => {
+    expect(worstComplianceState([], NOW)).toBe("none");
+  });
+
+  test("all null / undefined → 'none'", () => {
+    expect(worstComplianceState([null, undefined, null], NOW)).toBe("none");
+  });
+
+  test("all current ('ok') → 'ok'", () => {
+    expect(worstComplianceState([isoDaysFromNow(60), isoDaysFromNow(90)], NOW)).toBe("ok");
+  });
+
+  test("a single current document among unscanned → 'ok' (ok outranks none)", () => {
+    expect(worstComplianceState([null, isoDaysFromNow(60), undefined], NOW)).toBe("ok");
+  });
+
+  test("a single 'expiring-soon' → 'expiring-soon'", () => {
+    expect(worstComplianceState([isoDaysFromNow(10)], NOW)).toBe("expiring-soon");
+  });
+
+  test("expiring-soon outranks ok and none", () => {
+    expect(worstComplianceState([isoDaysFromNow(60), isoDaysFromNow(10), null], NOW)).toBe(
+      "expiring-soon",
+    );
+  });
+
+  test("one expired + one expiring-soon → 'expired'", () => {
+    expect(worstComplianceState([isoDaysFromNow(-1), isoDaysFromNow(10)], NOW)).toBe("expired");
+  });
+
+  test("expired wins regardless of position in the list", () => {
+    expect(
+      worstComplianceState([isoDaysFromNow(60), isoDaysFromNow(10), isoDaysFromNow(-5)], NOW),
+    ).toBe("expired");
+    expect(
+      worstComplianceState([isoDaysFromNow(-5), isoDaysFromNow(10), isoDaysFromNow(60)], NOW),
+    ).toBe("expired");
+  });
+
+  test("the exact three-document call the vehicles-list column makes", () => {
+    // [bluebook, insurance, routePermit]: a lapsed bluebook, a soon-expiring
+    // insurance, and an unscanned route permit roll up to the worst — expired.
+    expect(worstComplianceState([isoDaysFromNow(-2), isoDaysFromNow(20), null], NOW)).toBe(
+      "expired",
+    );
+  });
+
+  test("forwards a custom windowDays to complianceBadgeState (not re-derived)", () => {
+    // day-45 is 'ok' under the default 30-day window but 'expiring-soon' under a
+    // 60-day window — proving windowDays is forwarded per expiry, not hardcoded.
+    expect(worstComplianceState([isoDaysFromNow(45)], NOW)).toBe("ok");
+    expect(worstComplianceState([isoDaysFromNow(45)], NOW, 60)).toBe("expiring-soon");
+  });
+
+  test("over a single expiry it equals complianceBadgeState for every state", () => {
+    // The "built strictly on the shipped helper" guarantee: a one-element
+    // roll-up is exactly the scalar classification, for each of the four states.
+    for (const days of [-1, 0, 30, 31, 60]) {
+      const iso = isoDaysFromNow(days);
+      expect(worstComplianceState([iso], NOW)).toBe(complianceBadgeState(iso, NOW));
+    }
+  });
+});
+
+describe("worstComplianceState — UTC determinism inherited from complianceBadgeState", () => {
+  const ORIGINAL_TZ = process.env.TZ;
+  afterEach(() => {
+    if (ORIGINAL_TZ === undefined) delete process.env.TZ;
+    else process.env.TZ = ORIGINAL_TZ;
+  });
+
+  function underTz(tz: string, fn: () => void): void {
+    const prev = process.env.TZ;
+    process.env.TZ = tz;
+    try {
+      fn();
+    } finally {
+      if (prev === undefined) delete process.env.TZ;
+      else process.env.TZ = prev;
+    }
+  }
+
+  test("a mixed roll-up classifies identically in every zone", () => {
+    // The wrapper only reduces over complianceBadgeState, which truncates both
+    // operands to their UTC calendar day, so the worst-of result is zone-
+    // independent. An evening-UTC `now` against midnight-UTC expiries is the
+    // combination a local-getter regression would shift across a day boundary.
+    const eveningNow = new Date("2026-06-15T20:00:00.000Z");
+    const expiries = [
+      "2026-07-15T00:00:00.000Z", // day 30 — expiring-soon (inclusive edge)
+      "2026-07-16T00:00:00.000Z", // day 31 — ok
+      null, // unscanned — none
+    ];
+    for (const tz of [
+      "UTC",
+      "Asia/Kathmandu",
+      "America/Chicago",
+      "America/Anchorage",
+      "Pacific/Kiritimati",
+    ]) {
+      underTz(tz, () => {
+        expect(worstComplianceState(expiries, eveningNow)).toBe("expiring-soon");
       });
     }
   });
