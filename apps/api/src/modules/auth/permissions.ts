@@ -109,13 +109,33 @@ export const ROLE_CAPABILITY_MAP: Record<UserRole, ReadonlySet<Capability>> = {
   // The threat model is "limit the blast radius of a compromised office-staff
   // session", not "office staff is hostile".
   [UserRole.OFFICE_STAFF]: new Set<Capability>(OPERATIONAL_CAPABILITIES),
-  // DRIVER — reserved but UNDEFINED (ADR-0028 c1): no capabilities. The enum
-  // names it so this map (and the guard) accept a third role without rework,
-  // but a driver's permissions are almost entirely row-level and depend on the
-  // deferred scoping work + the driver-app design, so they land with that
-  // slice, not here. An empty set means a DRIVER session is inert against every
-  // gated route today — the safe default for a not-yet-built role.
-  [UserRole.DRIVER]: new Set<Capability>(),
+  // DRIVER — DEFINED as of ADR-0034 (the driver-app auth slice), transitioning
+  // from ADR-0028 c1's reserved-but-empty placeholder. D2 grants exactly the two
+  // write capabilities a driver exercises from the phone: `trips:*` (start / stop
+  // their own trips) and `fuel-logs:*` (log fuel / odometer against their own
+  // trip). Two things are load-bearing to understand:
+  //
+  //  (1) These caps do NOT, by themselves, gate the trips / fuel-logs routes.
+  //      Those Phase-1 controllers are auth-guarded but NOT RolesGuard-gated (no
+  //      `@RequirePermission`), so `roleHasCapability` is never consulted for
+  //      them. Per ADR-0034 c7 the SOLE new enforcement is a SERVICE-LAYER
+  //      own-record predicate (DriverScopeService.resolveOwnDriverId): a DRIVER
+  //      may read / act on only their OWN trips and fuel logs (resolved through
+  //      the Driver.userId link, ADR-0034 c4), and may not create or delete
+  //      either. The set here is the map's RECORD of the grant (and future-proofs
+  //      any route that later opts into `@RequirePermission`); the row-scope is
+  //      what actually constrains a driver.
+  //
+  //  (2) `gps:ingest` and `gps:read-derived` — the other two caps ADR-0034 c6
+  //      assigns DRIVER — are DEFERRED, not forgotten. ADR-0034 c5's hard rule is
+  //      that no DRIVER WRITE capability enters this map without its row-level
+  //      predicate IN THE SAME CHANGE. `gps:ingest` is write-equivalent and its
+  //      own-vehicle scope is the offline-producer work (D4/D5, ADR-0035);
+  //      `gps:read-derived` would, unscoped, expose every vehicle's derived
+  //      status, and its own-vehicle scope is the geofence-context work (D6).
+  //      Each is granted when its scope lands — the lean set (c6) is reached
+  //      incrementally, never as an unscoped write.
+  [UserRole.DRIVER]: new Set<Capability>(["trips:*", "fuel-logs:*"]),
 };
 
 // Does `role` hold `capability`? Exact set-membership against the coarse map

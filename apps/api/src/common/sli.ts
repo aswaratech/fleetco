@@ -12,6 +12,8 @@
 //     pino-http request-completion log line (enrichLogWithAvailabilitySignal).
 //   - the trips controller (T_SLI2) — adds the trip-creation-success signal,
 //     reusing the `sli` field vocabulary established here.
+//   - the trips controller (D2, ADR-0034 c9) — also adds the driver-app
+//     trip-start-success signal on the PATCH → IN_PROGRESS path.
 //   - the performance budget (T_PERF) — reuses SLI_LATENCY_BUDGET_MS so the
 //     committed budget doc and the emitted signal cannot drift.
 //
@@ -50,6 +52,26 @@ export const SLI_API_AVAILABILITY = "api_availability";
  * signal from one shared source rather than a hard-coded string literal.
  */
 export const SLI_TRIP_CREATION_SUCCESS = "trip_creation_success";
+
+/**
+ * The value of the `sli` field tagging a driver-app trip-start-success signal
+ * (ADR-0034 commitment 9). Trip start is the driver app's first business-critical
+ * write: the PATCH that transitions a trip to IN_PROGRESS. `TripsController.update`
+ * emits one line per trip-start attempt carrying this tag plus `sli_good` (true on
+ * success, false on a thrown-and-rethrown error) and, on failure, `error_kind`
+ * (the exception's class name only — never `err.message`, which the trips service
+ * embeds the literal vehicle/driver id into per ADR-0013). Only the
+ * `status === "IN_PROGRESS"` transition is tagged — a notes-only PATCH, a stop
+ * (→ COMPLETED), or a cancel is NOT a trip-start. The 99.0% target is ADR-0026
+ * commitment 6's provisional one (matching ADR-0011's core-operation SLO, since a
+ * failed trip-start blocks a driver from working); this constant only INSTRUMENTS
+ * that target — it does not re-set it. Per ADR-0034 c9 the SLI counts server-side
+ * failures of trip-start requests that REACH the API (an unreachable API is the
+ * cellular network's problem, not this indicator's), so it is defined by the
+ * operation, not the caller's role. A future 28-day report filters log lines where
+ * `sli === "trip_start_success"` and computes the share with `sli_good === true`.
+ */
+export const SLI_TRIP_START_SUCCESS = "trip_start_success";
 
 /**
  * The structured per-request signal merged onto a request-completion log line.

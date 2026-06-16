@@ -1,6 +1,11 @@
-import { BadRequestException, NotFoundException, type INestApplication } from "@nestjs/common";
+import {
+  BadRequestException,
+  ForbiddenException,
+  NotFoundException,
+  type INestApplication,
+} from "@nestjs/common";
 import { Test, type TestingModule } from "@nestjs/testing";
-import { TripStatus, type Vehicle, type Driver } from "@prisma/client";
+import { TripStatus, UserRole, type Vehicle, type Driver } from "@prisma/client";
 import { Logger } from "nestjs-pino";
 import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -8,6 +13,7 @@ import { ZodValidationPipe } from "../src/common/zod-validation.pipe";
 import { AuthGuard } from "../src/modules/auth/auth.guard";
 import { AUTH } from "../src/modules/auth/auth.tokens";
 import type { AuthenticatedRequest } from "../src/modules/auth/auth.types";
+import { DriverScopeService, type Actor } from "../src/modules/auth/driver-scope.service";
 import { PrismaService } from "../src/modules/prisma/prisma.service";
 import { TripsController } from "../src/modules/trips/trips.controller";
 import { TripsService } from "../src/modules/trips/trips.service";
@@ -18,6 +24,11 @@ import {
 } from "../src/modules/trips/trips.schemas";
 import { resetDb } from "./db";
 import { seedDriver, seedTrip, seedUser, seedVehicle } from "./fixtures/trip";
+
+// A non-DRIVER acting principal for the existing (ADMIN/OFFICE_STAFF) cases and
+// for seeding via the service in the write-path block. The own-record predicate
+// is a no-op for it (resolveOwnDriverId → null).
+const STAFF_ACTOR: Actor = { userId: "staff-actor", role: UserRole.OFFICE_STAFF };
 
 // Integration tests for TripsController, mirroring drivers.controller.test.ts
 // in shape. Two layers:
@@ -154,12 +165,14 @@ describe("TripsController.list / getById (integration, real Prisma)", () => {
   let adminId: string;
   let vehicle: Vehicle;
   let driver: Driver;
+  let fakeRequest: AuthenticatedRequest;
 
   beforeAll(async () => {
     module = await Test.createTestingModule({
       controllers: [TripsController],
       providers: [
         TripsService,
+        DriverScopeService,
         PrismaService,
         // AUTH is required by AuthGuard's constructor. The override
         // below replaces the guard itself, but Nest still resolves
@@ -192,6 +205,10 @@ describe("TripsController.list / getById (integration, real Prisma)", () => {
     adminId = await seedUser(prisma);
     vehicle = await seedVehicle(prisma, adminId);
     driver = await seedDriver(prisma, adminId);
+    // The list/getById handlers now read the session to build the actor
+    // (ADR-0034). No role → OFFICE_STAFF via toUserRole, so these read-path
+    // tests assert the unchanged non-DRIVER behavior.
+    fakeRequest = { session: { user: { id: adminId } } } as unknown as AuthenticatedRequest;
   });
 
   test("list() returns the documented response shape { items, total, skip, take, sortBy, sortDir }", async () => {
@@ -210,13 +227,16 @@ describe("TripsController.list / getById (integration, real Prisma)", () => {
       endedAt: new Date("2026-01-06T18:00:00Z"),
     });
 
-    const response = await controller.list({
-      status: [TripStatus.COMPLETED],
-      sortBy: "startedAt",
-      sortDir: "asc",
-      skip: 0,
-      take: 10,
-    });
+    const response = await controller.list(
+      {
+        status: [TripStatus.COMPLETED],
+        sortBy: "startedAt",
+        sortDir: "asc",
+        skip: 0,
+        take: 10,
+      },
+      fakeRequest,
+    );
 
     expect(response).toMatchObject({
       total: 1,
@@ -242,7 +262,7 @@ describe("TripsController.list / getById (integration, real Prisma)", () => {
       createdById: adminId,
     });
 
-    const response = await controller.list({});
+    const response = await controller.list({}, fakeRequest);
 
     // LIST_TAKE_DEFAULT is 20 per trips.service.ts; pinned here so a
     // change to that constant surfaces in the test as well as in the
@@ -273,7 +293,7 @@ describe("TripsController.list / getById (integration, real Prisma)", () => {
       status: TripStatus.COMPLETED,
     });
 
-    const response = await controller.list({});
+    const response = await controller.list({}, fakeRequest);
     expect(response.total).toBe(3);
     expect(response.items).toHaveLength(3);
   });
@@ -293,7 +313,7 @@ describe("TripsController.list / getById (integration, real Prisma)", () => {
       createdById: adminId,
     });
 
-    const response = await controller.list({ vehicleId: vehicle.id });
+    const response = await controller.list({ vehicleId: vehicle.id }, fakeRequest);
     expect(response.total).toBe(1);
     expect(response.items[0]?.vehicleId).toBe(vehicle.id);
   });
@@ -311,7 +331,7 @@ describe("TripsController.list / getById (integration, real Prisma)", () => {
       notes: "Pokhara delivery",
     });
 
-    const response = await controller.getById(created.id);
+    const response = await controller.getById(created.id, fakeRequest);
     expect(response.id).toBe(created.id);
     // Full Vehicle and Driver objects — every column should be
     // present, not the slim list projection. Assert a few
@@ -334,7 +354,7 @@ describe("TripsController.list / getById (integration, real Prisma)", () => {
     // commits to "Trip {id} not found" wording; we assert the id
     // appears so a future message refactor that dropped it would fail.
     try {
-      await controller.getById("nonexistent-id");
+      await controller.getById("nonexistent-id", fakeRequest);
       throw new Error("expected NotFoundException");
     } catch (error) {
       expect(error).toBeInstanceOf(NotFoundException);
@@ -518,6 +538,7 @@ describe("TripsController.create / update / remove (integration, real Prisma)", 
       controllers: [TripsController],
       providers: [
         TripsService,
+        DriverScopeService,
         PrismaService,
         { provide: AUTH, useValue: { api: { getSession: () => null } } },
         // T_SLI2: TripsController injects nestjs-pino's Logger; bind the
@@ -674,7 +695,7 @@ describe("TripsController.create / update / remove (integration, real Prisma)", 
       notes: "original note",
     });
 
-    const after = await controller.update(before.id, { notes: "Updated note" });
+    const after = await controller.update(before.id, { notes: "Updated note" }, fakeRequest);
     expect(after.id).toBe(before.id);
     expect(after.notes).toBe("Updated note");
     // Other fields stay put — diff-PATCH semantics confirmed at the
@@ -693,11 +714,15 @@ describe("TripsController.create / update / remove (integration, real Prisma)", 
       status: TripStatus.PLANNED,
     });
 
-    const after = await controller.update(before.id, {
-      status: TripStatus.IN_PROGRESS,
-      startedAt: new Date("2026-02-01T08:00:00Z").toISOString(),
-      startOdometerKm: 80000,
-    });
+    const after = await controller.update(
+      before.id,
+      {
+        status: TripStatus.IN_PROGRESS,
+        startedAt: new Date("2026-02-01T08:00:00Z").toISOString(),
+        startOdometerKm: 80000,
+      },
+      fakeRequest,
+    );
     expect(after.status).toBe(TripStatus.IN_PROGRESS);
     expect(after.startOdometerKm).toBe(80000);
   });
@@ -714,13 +739,17 @@ describe("TripsController.create / update / remove (integration, real Prisma)", 
     });
 
     try {
-      await controller.update(before.id, {
-        status: TripStatus.COMPLETED,
-        startedAt: new Date("2026-02-01T08:00:00Z").toISOString(),
-        endedAt: new Date("2026-02-02T18:00:00Z").toISOString(),
-        startOdometerKm: 80000,
-        endOdometerKm: 80350,
-      });
+      await controller.update(
+        before.id,
+        {
+          status: TripStatus.COMPLETED,
+          startedAt: new Date("2026-02-01T08:00:00Z").toISOString(),
+          endedAt: new Date("2026-02-02T18:00:00Z").toISOString(),
+          startOdometerKm: 80000,
+          endOdometerKm: 80350,
+        },
+        fakeRequest,
+      );
       throw new Error("expected BadRequestException");
     } catch (error) {
       expect(error).toBeInstanceOf(BadRequestException);
@@ -729,12 +758,146 @@ describe("TripsController.create / update / remove (integration, real Prisma)", 
 
   test("update() of an unknown id throws NotFoundException (HTTP 404)", async () => {
     try {
-      await controller.update("nonexistent-id", { notes: "X" });
+      await controller.update("nonexistent-id", { notes: "X" }, fakeRequest);
       throw new Error("expected NotFoundException");
     } catch (error) {
       expect(error).toBeInstanceOf(NotFoundException);
       expect((error as NotFoundException).message).toContain("nonexistent-id");
     }
+  });
+
+  // D2 (ADR-0034 c9): the "driver-app trip-start success" SLI — emitted on the
+  // PATCH → IN_PROGRESS transition only, mirroring the trip-creation SLI shape.
+  test("update() starting a trip emits the trip-start-success SLI (sli_good:true, no error_kind)", async () => {
+    const before = await seedTrip(prisma, {
+      vehicleId: vehicle.id,
+      driverId: driver.id,
+      createdById: adminId,
+      status: TripStatus.PLANNED,
+    });
+    await controller.update(
+      before.id,
+      {
+        status: TripStatus.IN_PROGRESS,
+        startedAt: new Date("2026-06-16T06:00:00Z").toISOString(),
+        startOdometerKm: 80000,
+      },
+      fakeRequest,
+    );
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ sli: "trip_start_success", sli_good: true }),
+    );
+    const logged: unknown = logSpy.mock.calls.at(-1)?.[0];
+    expect(logged).not.toHaveProperty("error_kind");
+  });
+
+  test("update() start failure emits sli_good:false + error_kind, still throws, leaks no id/message", async () => {
+    const before = await seedTrip(prisma, {
+      vehicleId: vehicle.id,
+      driverId: driver.id,
+      createdById: adminId,
+      status: TripStatus.PLANNED,
+    });
+    // status: IN_PROGRESS without startedAt/startOdometerKm fails the merged-shape
+    // cross-field rule in the service — a genuine server-side trip-start failure.
+    await expect(
+      controller.update(before.id, { status: TripStatus.IN_PROGRESS }, fakeRequest),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sli: "trip_start_success",
+        sli_good: false,
+        error_kind: "BadRequestException",
+      }),
+    );
+    // error_kind is the class name only — the trip id never enters the log line.
+    const logged: unknown = logSpy.mock.calls.at(-1)?.[0];
+    expect(JSON.stringify(logged)).not.toContain(before.id);
+  });
+
+  test("update() that is not a start (notes-only edit) emits no trip-start SLI", async () => {
+    const before = await seedTrip(prisma, {
+      vehicleId: vehicle.id,
+      driverId: driver.id,
+      createdById: adminId,
+      status: TripStatus.PLANNED,
+      notes: "before",
+    });
+    await controller.update(before.id, { notes: "after" }, fakeRequest);
+    expect(logSpy).not.toHaveBeenCalledWith(expect.objectContaining({ sli: "trip_start_success" }));
+  });
+
+  test("update() stopping a trip (→ COMPLETED) emits no trip-start SLI", async () => {
+    const before = await seedTrip(prisma, {
+      vehicleId: vehicle.id,
+      driverId: driver.id,
+      createdById: adminId,
+      status: TripStatus.IN_PROGRESS,
+      startedAt: new Date("2026-06-16T06:00:00Z"),
+      startOdometerKm: 80000,
+    });
+    await controller.update(
+      before.id,
+      {
+        status: TripStatus.COMPLETED,
+        endedAt: new Date("2026-06-16T14:00:00Z").toISOString(),
+        endOdometerKm: 80250,
+      },
+      fakeRequest,
+    );
+    expect(logSpy).not.toHaveBeenCalledWith(expect.objectContaining({ sli: "trip_start_success" }));
+  });
+
+  // D2 (ADR-0034 c4): the controller threads the DRIVER actor into the service,
+  // which scopes a driver to their own trip and forbids create.
+  test("a DRIVER starts their own trip; a foreign trip 404s; create is forbidden", async () => {
+    const driverUserId = await seedUser(prisma, UserRole.DRIVER);
+    const ownDriver = await seedDriver(prisma, adminId, { userId: driverUserId });
+    const driverRequest = {
+      session: { user: { id: driverUserId, role: "DRIVER" } },
+    } as unknown as AuthenticatedRequest;
+
+    const ownTrip = await seedTrip(prisma, {
+      vehicleId: vehicle.id,
+      driverId: ownDriver.id,
+      createdById: adminId,
+      status: TripStatus.PLANNED,
+    });
+    const started = await controller.update(
+      ownTrip.id,
+      {
+        status: TripStatus.IN_PROGRESS,
+        startedAt: new Date("2026-06-16T06:00:00Z").toISOString(),
+        startOdometerKm: 80000,
+      },
+      driverRequest,
+    );
+    expect(started.status).toBe(TripStatus.IN_PROGRESS);
+
+    const foreignTrip = await seedTrip(prisma, {
+      vehicleId: vehicle.id,
+      driverId: driver.id,
+      createdById: adminId,
+      status: TripStatus.PLANNED,
+    });
+    await expect(
+      controller.update(
+        foreignTrip.id,
+        {
+          status: TripStatus.IN_PROGRESS,
+          startedAt: new Date("2026-06-16T06:00:00Z").toISOString(),
+          startOdometerKm: 80000,
+        },
+        driverRequest,
+      ),
+    ).rejects.toBeInstanceOf(NotFoundException);
+
+    await expect(
+      controller.create(
+        { vehicleId: vehicle.id, driverId: ownDriver.id, status: TripStatus.PLANNED },
+        driverRequest,
+      ),
+    ).rejects.toBeInstanceOf(ForbiddenException);
   });
 
   test("remove() deletes the row and resolves without a body (HTTP 204)", async () => {
@@ -745,6 +908,7 @@ describe("TripsController.create / update / remove (integration, real Prisma)", 
         status: TripStatus.PLANNED,
       },
       adminId,
+      STAFF_ACTOR,
     );
 
     // @HttpCode(HttpStatus.NO_CONTENT) is applied at the decorator
@@ -752,7 +916,7 @@ describe("TripsController.create / update / remove (integration, real Prisma)", 
     // value (void). The HTTP status is verified indirectly via the
     // method's declared return type — if a refactor changed remove()
     // to return a body, the type system would catch it.
-    const result = await controller.remove(created.id);
+    const result = await controller.remove(created.id, fakeRequest);
     expect(result).toBeUndefined();
 
     const refetched = await prisma.trip.findUnique({ where: { id: created.id } });
@@ -761,7 +925,7 @@ describe("TripsController.create / update / remove (integration, real Prisma)", 
 
   test("remove() of an unknown id throws NotFoundException (HTTP 404)", async () => {
     try {
-      await controller.remove("nonexistent-id");
+      await controller.remove("nonexistent-id", fakeRequest);
       throw new Error("expected NotFoundException");
     } catch (error) {
       expect(error).toBeInstanceOf(NotFoundException);

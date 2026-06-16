@@ -22,10 +22,12 @@ import {
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports
 import { Logger } from "nestjs-pino";
 
-import { SLI_TRIP_CREATION_SUCCESS } from "../../common/sli";
+import { SLI_TRIP_CREATION_SUCCESS, SLI_TRIP_START_SUCCESS } from "../../common/sli";
 import { ZodValidationPipe } from "../../common/zod-validation.pipe";
 import { AuthGuard } from "../auth/auth.guard";
 import type { AuthenticatedRequest } from "../auth/auth.types";
+import type { Actor } from "../auth/driver-scope.service";
+import { toUserRole } from "../auth/permissions";
 
 // TripsService is injected by NestJS via emitDecoratorMetadata; the
 // class reference must remain a value import at runtime. Same pattern
@@ -88,6 +90,19 @@ export class TripsController {
     private readonly logger: Logger,
   ) {}
 
+  // Build the acting principal from the AuthGuard-populated session. `role` is
+  // coerced through `toUserRole` (the single fail-closed coercion the guard and
+  // `/me` also use), so the service-layer own-record predicate can never disagree
+  // with the guard on how an unexpected role value is treated. Threading this is
+  // NOT a guard change — it is the same shape as passing request.session.user.id
+  // as createdById (ADR-0034 c4/c7).
+  private actorOf(request: AuthenticatedRequest): Actor {
+    return {
+      userId: request.session.user.id,
+      role: toUserRole(request.session.user.role),
+    };
+  }
+
   /**
    * List trips with filter / sort / pagination. ZodValidationPipe runs
    * `ListTripsQuerySchema` over the full query object, which:
@@ -108,21 +123,25 @@ export class TripsController {
   @Get()
   async list(
     @Query(new ZodValidationPipe(ListTripsQuerySchema)) query: ListTripsQuery,
+    @Req() request: AuthenticatedRequest,
   ): Promise<TripsListResponse> {
     const skip = query.skip ?? 0;
     const take = query.take ?? LIST_TAKE_DEFAULT;
     const sortBy: TripSortColumn = query.sortBy ?? "createdAt";
     const sortDir: TripSortDir = query.sortDir ?? "desc";
 
-    const { items, total } = await this.trips.list({
-      skip,
-      take,
-      status: query.status,
-      vehicleId: query.vehicleId,
-      driverId: query.driverId,
-      sortBy,
-      sortDir,
-    });
+    const { items, total } = await this.trips.list(
+      {
+        skip,
+        take,
+        status: query.status,
+        vehicleId: query.vehicleId,
+        driverId: query.driverId,
+        sortBy,
+        sortDir,
+      },
+      this.actorOf(request),
+    );
     return { items, total, skip, take, sortBy, sortDir };
   }
 
@@ -135,8 +154,11 @@ export class TripsController {
    * runbook.
    */
   @Get(":id")
-  async getById(@Param("id") id: string): Promise<TripDetail> {
-    const trip = await this.trips.findById(id);
+  async getById(
+    @Param("id") id: string,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<TripDetail> {
+    const trip = await this.trips.findById(id, this.actorOf(request));
     if (!trip) {
       throw new NotFoundException(`Trip ${id} not found`);
     }
@@ -177,7 +199,7 @@ export class TripsController {
     @Req() request: AuthenticatedRequest,
   ): Promise<TripDetail> {
     try {
-      const trip = await this.trips.create(body, request.session.user.id);
+      const trip = await this.trips.create(body, request.session.user.id, this.actorOf(request));
       this.logger.log({ sli: SLI_TRIP_CREATION_SUCCESS, sli_good: true });
       return trip;
     } catch (err) {
@@ -204,8 +226,30 @@ export class TripsController {
   async update(
     @Param("id") id: string,
     @Body(new ZodValidationPipe(UpdateTripSchema)) body: UpdateTripInput,
+    @Req() request: AuthenticatedRequest,
   ): Promise<TripDetail> {
-    return this.trips.update(id, body);
+    const actor = this.actorOf(request);
+    // The "driver-app trip-start success" SLI (ADR-0034 c9). A trip-start is the
+    // PATCH that transitions a trip to IN_PROGRESS; only those attempts count (a
+    // notes-only edit, a stop → COMPLETED, or a cancel is not a start). Mirrors
+    // the trip-creation-success try/catch in create(): success → sli_good:true;
+    // a thrown error → sli_good:false + error_kind (the exception CLASS NAME
+    // only, never err.message — it embeds vehicle/driver ids per ADR-0013),
+    // rethrown unchanged. Counts every trip-start reaching the API regardless of
+    // caller (the SLI is defined by the operation, c9). The own-record gate lives
+    // in the service; this layer only instruments the start.
+    if (body.status !== "IN_PROGRESS") {
+      return this.trips.update(id, body, actor);
+    }
+    try {
+      const trip = await this.trips.update(id, body, actor);
+      this.logger.log({ sli: SLI_TRIP_START_SUCCESS, sli_good: true });
+      return trip;
+    } catch (err) {
+      const errorKind = err instanceof Error ? err.constructor.name : "UnknownError";
+      this.logger.log({ sli: SLI_TRIP_START_SUCCESS, sli_good: false, error_kind: errorKind });
+      throw err;
+    }
   }
 
   /**
@@ -227,7 +271,7 @@ export class TripsController {
    */
   @Delete(":id")
   @HttpCode(HttpStatus.NO_CONTENT)
-  async remove(@Param("id") id: string): Promise<void> {
-    await this.trips.delete(id);
+  async remove(@Param("id") id: string, @Req() request: AuthenticatedRequest): Promise<void> {
+    await this.trips.delete(id, this.actorOf(request));
   }
 }

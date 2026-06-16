@@ -1,5 +1,10 @@
-import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
-import { Prisma } from "@prisma/client";
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
+import { Prisma, UserRole } from "@prisma/client";
 
 import type {
   CreateFuelLogInput,
@@ -21,6 +26,13 @@ export type { CreateFuelLogInput, UpdateFuelLogInput };
 // Trips / Customers / Jobs services.
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports
 import { PrismaService } from "../prisma/prisma.service";
+
+// DriverScopeService is injected (value import, same eslint override). It is the
+// auth module's own-record resolver; `Actor` is the {userId, role} principal the
+// controller threads in so the service can scope a DRIVER to their own fuel-log
+// entries (ADR-0034 c4). A non-DRIVER actor imposes no restriction.
+// eslint-disable-next-line @typescript-eslint/consistent-type-imports
+import { DriverScopeService, type Actor } from "../auth/driver-scope.service";
 
 // Pagination defaults and bounds. Same `LIST_TAKE_` prefix as every
 // other vertical-slice service (the iter-6 kickoff named the
@@ -106,7 +118,10 @@ export interface ListResult {
 
 @Injectable()
 export class FuelLogsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly driverScope: DriverScopeService,
+  ) {}
 
   /**
    * List fuel logs with optional filter / sort / pagination. The list
@@ -135,25 +150,28 @@ export class FuelLogsService {
    * example), and a clamp here ensures the database is never asked
    * for an unbounded result.
    */
-  async list({
-    skip = 0,
-    take = LIST_TAKE_DEFAULT,
-    vehicleId,
-    tripId,
-    startDate,
-    endDate,
-    sortBy = "date",
-    sortDir = "desc",
-  }: {
-    skip?: number;
-    take?: number;
-    vehicleId?: string;
-    tripId?: string;
-    startDate?: Date;
-    endDate?: Date;
-    sortBy?: FuelLogSortColumn;
-    sortDir?: FuelLogSortDir;
-  }): Promise<ListResult> {
+  async list(
+    {
+      skip = 0,
+      take = LIST_TAKE_DEFAULT,
+      vehicleId,
+      tripId,
+      startDate,
+      endDate,
+      sortBy = "date",
+      sortDir = "desc",
+    }: {
+      skip?: number;
+      take?: number;
+      vehicleId?: string;
+      tripId?: string;
+      startDate?: Date;
+      endDate?: Date;
+      sortBy?: FuelLogSortColumn;
+      sortDir?: FuelLogSortDir;
+    },
+    actor: Actor,
+  ): Promise<ListResult> {
     const safeSkip = Number.isFinite(skip) && skip >= 0 ? Math.floor(skip) : 0;
     const safeTakeRaw = Number.isFinite(take) ? Math.floor(take) : LIST_TAKE_DEFAULT;
     const safeTake = Math.min(Math.max(safeTakeRaw, LIST_TAKE_MIN), LIST_TAKE_MAX);
@@ -172,6 +190,11 @@ export class FuelLogsService {
       ...(vehicleId ? { vehicleId } : {}),
       ...(tripId ? { tripId } : {}),
       ...(hasDateRange ? { date: dateRange } : {}),
+      // DRIVER own-record scope (ADR-0034 c4): a driver sees ONLY the fuel logs
+      // THEY created (createdById = their user id — server-set on create, so it
+      // is the precise "my entries" predicate and needs no Driver lookup). Last
+      // spread so a client filter cannot widen it. Non-DRIVER → no restriction.
+      ...(actor.role === UserRole.DRIVER ? { createdById: actor.userId } : {}),
     };
 
     // Primary sort by the requested column + direction; secondary tie-
@@ -222,9 +245,14 @@ export class FuelLogsService {
    * mistyped a URL sees what they asked for. Mirror of
    * JobsService.getById.
    */
-  async getById(id: string): Promise<FuelLogDetail> {
+  async getById(id: string, actor: Actor): Promise<FuelLogDetail> {
     const row = await this.findById(id);
     if (!row) {
+      throw new NotFoundException(`Fuel log ${id} not found`);
+    }
+    // DRIVER own-record gate (ADR-0034 c4): a driver may read ONLY their own
+    // entries. A foreign row → 404 (existence-hiding), uniform with a missing id.
+    if (actor.role === UserRole.DRIVER && row.createdById !== actor.userId) {
       throw new NotFoundException(`Fuel log ${id} not found`);
     }
     return row;
@@ -287,7 +315,28 @@ export class FuelLogsService {
    * decision — see docs/tech-debt.md (Paid-off) and the glossary's
    * "Fuel log" / "Odometer" entries.
    */
-  async create(input: CreateFuelLogInput, createdById: string): Promise<FuelLogDetail> {
+  async create(
+    input: CreateFuelLogInput,
+    createdById: string,
+    actor: Actor,
+  ): Promise<FuelLogDetail> {
+    // DRIVER own-record scope (ADR-0034 c4): a driver may log fuel ONLY against
+    // one of their OWN trips — which is also what defines "their vehicle" (the
+    // vehicle on that trip; there is no standing Driver→Vehicle link). So a
+    // driver-created fuel log MUST carry a tripId, and that trip must be theirs.
+    // `createdById` is already the driver's user id (the controller sets it from
+    // the session). resolveOwnDriverId also fails closed (403) for an unlinked
+    // driver. For a non-DRIVER it returns null and this block is skipped.
+    const ownDriverId = await this.driverScope.resolveOwnDriverId(actor);
+    if (ownDriverId !== null) {
+      if (!input.tripId) {
+        throw new BadRequestException(
+          "A driver fuel log must be paired with one of your own trips.",
+        );
+      }
+      await this.assertTripOwnedByDriver(input.tripId, ownDriverId);
+    }
+
     // Service-layer cross-field check before we even attempt the
     // insert: if the operator picked a trip that's for a different
     // vehicle, fail fast with a clear message naming both
@@ -365,10 +414,27 @@ export class FuelLogsService {
    * docblock and the iter-20 kickoff for the immutability
    * rationale.
    */
-  async update(id: string, input: UpdateFuelLogInput): Promise<FuelLogDetail> {
+  async update(id: string, input: UpdateFuelLogInput, actor: Actor): Promise<FuelLogDetail> {
     const existing = await this.prisma.fuelLog.findUnique({ where: { id } });
     if (!existing) {
       throw new NotFoundException(`Fuel log ${id} not found`);
+    }
+
+    // DRIVER own-record gate (ADR-0034 c4): a driver may edit ONLY their own
+    // entries (createdById = their user id); a foreign row → 404 (existence-
+    // hiding). If a driver re-pairs the log to a different trip, that trip must
+    // also be theirs — re-asserted here, alongside the trip-vehicle consistency
+    // rule that runs for everyone below.
+    if (actor.role === UserRole.DRIVER) {
+      if (existing.createdById !== actor.userId) {
+        throw new NotFoundException(`Fuel log ${id} not found`);
+      }
+      if (Object.prototype.hasOwnProperty.call(input, "tripId") && input.tripId) {
+        const ownDriverId = await this.driverScope.resolveOwnDriverId(actor);
+        if (ownDriverId !== null) {
+          await this.assertTripOwnedByDriver(input.tripId, ownDriverId);
+        }
+      }
     }
 
     const has = (key: keyof UpdateFuelLogInput): boolean =>
@@ -455,7 +521,14 @@ export class FuelLogsService {
    * Returns void on success; the controller responds 204 No
    * Content.
    */
-  async delete(id: string): Promise<void> {
+  async delete(id: string, actor: Actor): Promise<void> {
+    // DRIVER may not delete fuel logs (ADR-0034): a driver corrects an entry via
+    // PATCH (own-scoped); hard delete of a fuel / odometer record is an
+    // operational action reserved for office/admin. 403 (a capability denial),
+    // not 404.
+    if (actor.role === UserRole.DRIVER) {
+      throw new ForbiddenException();
+    }
     try {
       await this.prisma.fuelLog.delete({ where: { id } });
     } catch (error) {
@@ -504,6 +577,25 @@ export class FuelLogsService {
       throw new BadRequestException(
         `Trip ${tripId} is for vehicle ${tripRegistration}, not vehicle ${thisRegistration}.`,
       );
+    }
+  }
+
+  /**
+   * Assert the trip is the DRIVER's OWN trip (ADR-0034 c4) — the predicate that
+   * binds a driver-created (or driver-re-paired) fuel log to their own vehicle,
+   * which is the vehicle on their own trip (there is no standing Driver→Vehicle
+   * link). Throws NotFoundException (404, existence-hiding) when the trip is
+   * missing OR belongs to another driver, so a driver cannot use this write path
+   * to probe foreign trip ids — uniform with the trips own-record gate. Used only
+   * on the DRIVER write paths (create, and a tripId-touching PATCH).
+   */
+  private async assertTripOwnedByDriver(tripId: string, ownDriverId: string): Promise<void> {
+    const trip = await this.prisma.trip.findUnique({
+      where: { id: tripId },
+      select: { driverId: true },
+    });
+    if (!trip || trip.driverId !== ownDriverId) {
+      throw new NotFoundException(`Trip ${tripId} not found`);
     }
   }
 }

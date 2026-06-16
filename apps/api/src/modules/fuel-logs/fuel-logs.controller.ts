@@ -16,6 +16,8 @@ import {
 import { ZodValidationPipe } from "../../common/zod-validation.pipe";
 import { AuthGuard } from "../auth/auth.guard";
 import type { AuthenticatedRequest } from "../auth/auth.types";
+import type { Actor } from "../auth/driver-scope.service";
+import { toUserRole } from "../auth/permissions";
 
 import {
   CreateFuelLogSchema,
@@ -75,6 +77,17 @@ export interface FuelLogsListResponse {
 export class FuelLogsController {
   constructor(private readonly fuelLogs: FuelLogsService) {}
 
+  // Build the acting principal from the AuthGuard-populated session. `role` is
+  // coerced through `toUserRole` (the single fail-closed coercion the guard and
+  // `/me` also use). Threading this is NOT a guard change — it is the same shape
+  // as passing request.session.user.id as createdById (ADR-0034 c4/c7).
+  private actorOf(request: AuthenticatedRequest): Actor {
+    return {
+      userId: request.session.user.id,
+      role: toUserRole(request.session.user.role),
+    };
+  }
+
   /**
    * List fuel logs with filter / sort / pagination. ZodValidationPipe
    * runs `ListFuelLogsQuerySchema` over the full query object, which:
@@ -94,22 +107,26 @@ export class FuelLogsController {
   @Get()
   async list(
     @Query(new ZodValidationPipe(ListFuelLogsQuerySchema)) query: ListFuelLogsQuery,
+    @Req() request: AuthenticatedRequest,
   ): Promise<FuelLogsListResponse> {
     const skip = query.skip ?? 0;
     const take = query.take ?? LIST_TAKE_DEFAULT;
     const sortBy: FuelLogSortColumn = query.sortBy ?? "date";
     const sortDir: FuelLogSortDir = query.sortDir ?? "desc";
 
-    const { items, total } = await this.fuelLogs.list({
-      skip,
-      take,
-      vehicleId: query.vehicleId,
-      tripId: query.tripId,
-      startDate: query.startDate,
-      endDate: query.endDate,
-      sortBy,
-      sortDir,
-    });
+    const { items, total } = await this.fuelLogs.list(
+      {
+        skip,
+        take,
+        vehicleId: query.vehicleId,
+        tripId: query.tripId,
+        startDate: query.startDate,
+        endDate: query.endDate,
+        sortBy,
+        sortDir,
+      },
+      this.actorOf(request),
+    );
     return { items, total, skip, take, sortBy, sortDir };
   }
 
@@ -123,8 +140,11 @@ export class FuelLogsController {
    * JobsController.getById.
    */
   @Get(":id")
-  async getById(@Param("id") id: string): Promise<FuelLogDetail> {
-    return this.fuelLogs.getById(id);
+  async getById(
+    @Param("id") id: string,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<FuelLogDetail> {
+    return this.fuelLogs.getById(id, this.actorOf(request));
   }
 
   /**
@@ -151,7 +171,7 @@ export class FuelLogsController {
     @Body(new ZodValidationPipe(CreateFuelLogSchema)) body: CreateFuelLogInput,
     @Req() request: AuthenticatedRequest,
   ): Promise<FuelLogDetail> {
-    return this.fuelLogs.create(body, request.session.user.id);
+    return this.fuelLogs.create(body, request.session.user.id, this.actorOf(request));
   }
 
   /**
@@ -169,8 +189,9 @@ export class FuelLogsController {
   async update(
     @Param("id") id: string,
     @Body(new ZodValidationPipe(UpdateFuelLogSchema)) body: UpdateFuelLogInput,
+    @Req() request: AuthenticatedRequest,
   ): Promise<FuelLogDetail> {
-    return this.fuelLogs.update(id, body);
+    return this.fuelLogs.update(id, body, this.actorOf(request));
   }
 
   /**
@@ -187,7 +208,7 @@ export class FuelLogsController {
    */
   @Delete(":id")
   @HttpCode(HttpStatus.NO_CONTENT)
-  async remove(@Param("id") id: string): Promise<void> {
-    await this.fuelLogs.delete(id);
+  async remove(@Param("id") id: string, @Req() request: AuthenticatedRequest): Promise<void> {
+    await this.fuelLogs.delete(id, this.actorOf(request));
   }
 }

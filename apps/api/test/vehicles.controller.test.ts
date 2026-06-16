@@ -6,6 +6,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest"
 
 import { AuthGuard } from "../src/modules/auth/auth.guard";
 import { AUTH } from "../src/modules/auth/auth.tokens";
+import { DriverScopeService } from "../src/modules/auth/driver-scope.service";
 import { DriversService } from "../src/modules/drivers/drivers.service";
 import { PrismaService } from "../src/modules/prisma/prisma.service";
 import { TripsService } from "../src/modules/trips/trips.service";
@@ -170,6 +171,7 @@ describe("VehiclesController.list (integration, real Prisma)", () => {
         // VehiclesController gained a TripsService dep in iter 12 for
         // the GET /:id/stats route; supply both services so DI resolves.
         TripsService,
+        DriverScopeService,
         DriversService,
         PrismaService,
         // AUTH is required by AuthGuard's constructor. The override
@@ -301,6 +303,7 @@ describe("VehiclesController.getStats (iter-12 cross-slice read)", () => {
       providers: [
         VehiclesService,
         TripsService,
+        DriverScopeService,
         DriversService,
         PrismaService,
         { provide: AUTH, useValue: { api: { getSession: () => null } } },

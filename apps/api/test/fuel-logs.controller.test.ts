@@ -7,6 +7,7 @@ import { ZodValidationPipe } from "../src/common/zod-validation.pipe";
 import { AuthGuard } from "../src/modules/auth/auth.guard";
 import { AUTH } from "../src/modules/auth/auth.tokens";
 import type { AuthenticatedRequest } from "../src/modules/auth/auth.types";
+import { DriverScopeService } from "../src/modules/auth/driver-scope.service";
 import { FuelLogsController } from "../src/modules/fuel-logs/fuel-logs.controller";
 import {
   CreateFuelLogSchema,
@@ -165,12 +166,17 @@ describe("FuelLogsController.list (integration, real Prisma)", () => {
   let controller: FuelLogsController;
   let adminId: string;
   let vehicleId: string;
+  // list builds the actor from the session; for a non-DRIVER reader the
+  // own-record predicate is a no-op (no Driver lookup), so a fixed fake session
+  // suffices (ADR-0034).
+  const fakeRequest = { session: { user: { id: "reader" } } } as unknown as AuthenticatedRequest;
 
   beforeAll(async () => {
     module = await Test.createTestingModule({
       controllers: [FuelLogsController],
       providers: [
         FuelLogsService,
+        DriverScopeService,
         PrismaService,
         // AUTH is required by AuthGuard's constructor. The override
         // below replaces the guard itself, but Nest still resolves
@@ -237,13 +243,16 @@ describe("FuelLogsController.list (integration, real Prisma)", () => {
     await seedFuelLog();
     await seedFuelLog({ date: new Date("2026-02-20T08:00:00Z") });
 
-    const response = await controller.list({
-      vehicleId,
-      sortBy: "date",
-      sortDir: "desc",
-      skip: 0,
-      take: 10,
-    });
+    const response = await controller.list(
+      {
+        vehicleId,
+        sortBy: "date",
+        sortDir: "desc",
+        skip: 0,
+        take: 10,
+      },
+      fakeRequest,
+    );
 
     expect(response).toMatchObject({
       total: 2,
@@ -267,7 +276,7 @@ describe("FuelLogsController.list (integration, real Prisma)", () => {
   test("empty query → controller applies defaults (sortBy=date, sortDir=desc, skip=0, take=LIST_TAKE_DEFAULT)", async () => {
     await seedFuelLog();
 
-    const response = await controller.list({});
+    const response = await controller.list({}, fakeRequest);
 
     expect(response.skip).toBe(0);
     // LIST_TAKE_DEFAULT is 20 per fuel-logs.service.ts; pinned here
@@ -288,7 +297,7 @@ describe("FuelLogsController.list (integration, real Prisma)", () => {
     await seedFuelLog();
     await seedFuelLog();
 
-    const response = await controller.list({});
+    const response = await controller.list({}, fakeRequest);
     expect(response.total).toBe(3);
     expect(response.items).toHaveLength(3);
   });
@@ -310,7 +319,7 @@ describe("FuelLogsController.list (integration, real Prisma)", () => {
     await seedFuelLog();
     await seedFuelLog({ vehicleId: otherVehicle.id });
 
-    const response = await controller.list({ vehicleId: otherVehicle.id });
+    const response = await controller.list({ vehicleId: otherVehicle.id }, fakeRequest);
     expect(response.total).toBe(1);
     expect(response.items).toHaveLength(1);
     expect(response.items[0].vehicleId).toBe(otherVehicle.id);
@@ -324,12 +333,17 @@ describe("FuelLogsController.getById (integration, real Prisma)", () => {
   let controller: FuelLogsController;
   let adminId: string;
   let vehicleId: string;
+  // getById builds the actor from the session; for a non-DRIVER reader the
+  // own-record predicate is a no-op (no Driver lookup), so a fixed fake session
+  // suffices (ADR-0034).
+  const fakeRequest = { session: { user: { id: "reader" } } } as unknown as AuthenticatedRequest;
 
   beforeAll(async () => {
     module = await Test.createTestingModule({
       controllers: [FuelLogsController],
       providers: [
         FuelLogsService,
+        DriverScopeService,
         PrismaService,
         { provide: AUTH, useValue: { api: { getSession: () => null } } },
       ],
@@ -389,7 +403,7 @@ describe("FuelLogsController.getById (integration, real Prisma)", () => {
       },
     });
 
-    const fetched = await controller.getById(created.id);
+    const fetched = await controller.getById(created.id, fakeRequest);
     expect(fetched.id).toBe(created.id);
     expect(fetched.station).toBe("NOC Naxal");
     expect(fetched.vehicle.id).toBe(vehicleId);
@@ -435,7 +449,7 @@ describe("FuelLogsController.getById (integration, real Prisma)", () => {
       },
     });
 
-    const fetched = await controller.getById(created.id);
+    const fetched = await controller.getById(created.id, fakeRequest);
     expect(fetched.id).toBe(created.id);
     expect(fetched.trip).not.toBeNull();
     expect(fetched.trip?.id).toBe(trip.id);
@@ -448,7 +462,7 @@ describe("FuelLogsController.getById (integration, real Prisma)", () => {
     // service to throw, which Nest's default exception filter then
     // maps to HTTP 404 with the standard body.
     try {
-      await controller.getById("nonexistent-id");
+      await controller.getById("nonexistent-id", fakeRequest);
       throw new Error("expected NotFoundException");
     } catch (error) {
       expect(error).toBeInstanceOf(NotFoundException);
@@ -594,6 +608,7 @@ describe("FuelLogsController.create / update / remove (integration, real Prisma)
       controllers: [FuelLogsController],
       providers: [
         FuelLogsService,
+        DriverScopeService,
         PrismaService,
         { provide: AUTH, useValue: { api: { getSession: () => null } } },
       ],
@@ -753,7 +768,7 @@ describe("FuelLogsController.create / update / remove (integration, real Prisma)
       },
       fakeRequest,
     );
-    const updated = await controller.update(created.id, { station: "NOC Thapathali" });
+    const updated = await controller.update(created.id, { station: "NOC Thapathali" }, fakeRequest);
     expect(updated.station).toBe("NOC Thapathali");
     expect(updated.litersMl).toBe(created.litersMl);
     expect(updated.totalCostPaisa).toBe(created.totalCostPaisa);
@@ -769,14 +784,18 @@ describe("FuelLogsController.create / update / remove (integration, real Prisma)
       },
       fakeRequest,
     );
-    const updated = await controller.update(created.id, { pricePerLiterPaisa: 15_025 });
+    const updated = await controller.update(
+      created.id,
+      { pricePerLiterPaisa: 15_025 },
+      fakeRequest,
+    );
     // round((12345 * 15025) / 1000) = round(185_483.625) = 185_484
     expect(updated.totalCostPaisa).toBe(185_484);
   });
 
   test("update() unknown id → NotFoundException (HTTP 404)", async () => {
     try {
-      await controller.update("ckmissingfuellog12345678", { station: "anything" });
+      await controller.update("ckmissingfuellog12345678", { station: "anything" }, fakeRequest);
       throw new Error("expected NotFoundException");
     } catch (error) {
       expect(error).toBeInstanceOf(NotFoundException);
@@ -794,13 +813,13 @@ describe("FuelLogsController.create / update / remove (integration, real Prisma)
       },
       fakeRequest,
     );
-    const result = await controller.remove(created.id);
+    const result = await controller.remove(created.id, fakeRequest);
     expect(result).toBeUndefined();
     const refetched = await prisma.fuelLog.findUnique({ where: { id: created.id } });
     expect(refetched).toBeNull();
 
     try {
-      await controller.remove("ckmissingfuellog12345678");
+      await controller.remove("ckmissingfuellog12345678", fakeRequest);
       throw new Error("expected NotFoundException");
     } catch (error) {
       expect(error).toBeInstanceOf(NotFoundException);

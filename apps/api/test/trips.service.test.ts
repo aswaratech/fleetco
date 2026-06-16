@@ -1,8 +1,14 @@
-import { BadRequestException, ConflictException, NotFoundException } from "@nestjs/common";
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  NotFoundException,
+} from "@nestjs/common";
 import { Test, type TestingModule } from "@nestjs/testing";
-import { TripStatus, type Vehicle, type Driver } from "@prisma/client";
+import { TripStatus, UserRole, type Vehicle, type Driver } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 
+import { DriverScopeService, type Actor } from "../src/modules/auth/driver-scope.service";
 import { DriversService } from "../src/modules/drivers/drivers.service";
 import { PrismaService } from "../src/modules/prisma/prisma.service";
 import { TripsService, LIST_TAKE_MAX } from "../src/modules/trips/trips.service";
@@ -26,6 +32,12 @@ import { seedDriver, seedTrip, seedUser, seedVehicle } from "./fixtures/trip";
 // beforeEach truncates the affected tables, the seed helpers in
 // test/fixtures/trip.ts wire the FK parents (User, Vehicle, Driver).
 
+// A non-DRIVER acting principal for the existing (ADMIN/OFFICE_STAFF) cases: the
+// own-record predicate is a no-op for it (resolveOwnDriverId → null), so these
+// tests assert the unchanged fleet-wide behavior. The DRIVER own-record describe
+// block below builds its own DRIVER actor.
+const STAFF_ACTOR: Actor = { userId: "staff-actor", role: UserRole.OFFICE_STAFF };
+
 describe("TripsService (integration, real Postgres)", () => {
   let module: TestingModule;
   let prisma: PrismaService;
@@ -46,7 +58,7 @@ describe("TripsService (integration, real Postgres)", () => {
 
   beforeAll(async () => {
     module = await Test.createTestingModule({
-      providers: [TripsService, VehiclesService, DriversService, PrismaService],
+      providers: [TripsService, VehiclesService, DriversService, DriverScopeService, PrismaService],
     }).compile();
     await module.init();
 
@@ -67,6 +79,147 @@ describe("TripsService (integration, real Postgres)", () => {
     driver = await seedDriver(prisma, adminId);
   });
 
+  // D2 (ADR-0034 c4/c5): the service-layer own-record predicate that activates
+  // the DRIVER role. A driver may read/start/stop ONLY their own trips, and may
+  // not create or delete any. `driver` (the outer seed, unlinked) stands in as
+  // "another driver"; `ownDriver` is linked to a DRIVER login.
+  describe("DRIVER own-record scope (ADR-0034 c4)", () => {
+    let driverUserId: string;
+    let ownDriver: Driver;
+    let driverActor: Actor;
+    const startedAt = new Date("2026-06-16T06:00:00Z");
+    const endedAt = new Date("2026-06-16T14:00:00Z");
+
+    beforeEach(async () => {
+      driverUserId = await seedUser(prisma, UserRole.DRIVER);
+      ownDriver = await seedDriver(prisma, adminId, { userId: driverUserId });
+      driverActor = { userId: driverUserId, role: UserRole.DRIVER };
+    });
+
+    test("list() returns only the driver's own trips, even when a foreign driverId is passed", async () => {
+      const ownTrip = await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: ownDriver.id,
+        createdById: adminId,
+      });
+      await seedTrip(prisma, { vehicleId: vehicle.id, driverId: driver.id, createdById: adminId });
+
+      // The driver passes another driver's id as a filter; the own-record scope
+      // overrides it, so only their own trip comes back.
+      const result = await service.list({ driverId: driver.id }, driverActor);
+      expect(result.total).toBe(1);
+      expect(result.items.map((t) => t.id)).toEqual([ownTrip.id]);
+    });
+
+    test("findById() returns the driver's own trip", async () => {
+      const ownTrip = await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: ownDriver.id,
+        createdById: adminId,
+      });
+      const fetched = await service.findById(ownTrip.id, driverActor);
+      expect(fetched?.id).toBe(ownTrip.id);
+    });
+
+    test("findById() returns null (→ 404) for another driver's trip", async () => {
+      const foreignTrip = await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+      });
+      expect(await service.findById(foreignTrip.id, driverActor)).toBeNull();
+    });
+
+    test("update() starts the driver's own trip (PLANNED → IN_PROGRESS)", async () => {
+      const ownTrip = await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: ownDriver.id,
+        createdById: adminId,
+        status: TripStatus.PLANNED,
+      });
+      const updated = await service.update(
+        ownTrip.id,
+        { status: TripStatus.IN_PROGRESS, startedAt, startOdometerKm: 80000 },
+        driverActor,
+      );
+      expect(updated.status).toBe(TripStatus.IN_PROGRESS);
+    });
+
+    test("update() rejects starting another driver's trip with 404, leaving it unchanged", async () => {
+      const foreignTrip = await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.PLANNED,
+      });
+      await expect(
+        service.update(
+          foreignTrip.id,
+          { status: TripStatus.IN_PROGRESS, startedAt, startOdometerKm: 80000 },
+          driverActor,
+        ),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      // The gate fired before the transaction: the foreign trip is untouched.
+      const after = await prisma.trip.findUniqueOrThrow({ where: { id: foreignTrip.id } });
+      expect(after.status).toBe(TripStatus.PLANNED);
+      expect(after.startedAt).toBeNull();
+    });
+
+    test("update() stops the driver's own trip (IN_PROGRESS → COMPLETED) and bumps the vehicle odometer", async () => {
+      const ownTrip = await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: ownDriver.id,
+        createdById: adminId,
+        status: TripStatus.IN_PROGRESS,
+        startedAt,
+        startOdometerKm: 80000,
+      });
+      const updated = await service.update(
+        ownTrip.id,
+        { status: TripStatus.COMPLETED, endedAt, endOdometerKm: 80250 },
+        driverActor,
+      );
+      expect(updated.status).toBe(TripStatus.COMPLETED);
+      const veh = await prisma.vehicle.findUniqueOrThrow({ where: { id: vehicle.id } });
+      expect(veh.odometerCurrentKm).toBe(80250);
+    });
+
+    test("create() is forbidden for a DRIVER (403)", async () => {
+      await expect(
+        service.create(
+          { vehicleId: vehicle.id, driverId: ownDriver.id, status: TripStatus.PLANNED },
+          driverUserId,
+          driverActor,
+        ),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    test("delete() is forbidden for a DRIVER (403)", async () => {
+      const ownTrip = await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: ownDriver.id,
+        createdById: adminId,
+      });
+      await expect(service.delete(ownTrip.id, driverActor)).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+    });
+
+    test("a DRIVER session with no linked Driver row is denied (403, fail-closed)", async () => {
+      const unlinkedUserId = await seedUser(prisma, UserRole.DRIVER);
+      const unlinkedActor: Actor = { userId: unlinkedUserId, role: UserRole.DRIVER };
+      await expect(service.list({}, unlinkedActor)).rejects.toBeInstanceOf(ForbiddenException);
+      const someTrip = await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: ownDriver.id,
+        createdById: adminId,
+      });
+      await expect(service.findById(someTrip.id, unlinkedActor)).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+    });
+  });
+
   describe("findById()", () => {
     test("returns the trip with eager-loaded Vehicle and Driver", async () => {
       // The detail page expects both relations on the response. Pinning
@@ -78,7 +231,7 @@ describe("TripsService (integration, real Postgres)", () => {
         createdById: adminId,
       });
 
-      const fetched = await service.findById(created.id);
+      const fetched = await service.findById(created.id, STAFF_ACTOR);
       expect(fetched).not.toBeNull();
       expect(fetched?.id).toBe(created.id);
       // Full nested objects: every Vehicle and Driver column should be
@@ -94,7 +247,7 @@ describe("TripsService (integration, real Postgres)", () => {
     });
 
     test("returns null when not present (controller maps to 404)", async () => {
-      const fetched = await service.findById("nonexistent-id");
+      const fetched = await service.findById("nonexistent-id", STAFF_ACTOR);
       expect(fetched).toBeNull();
     });
   });
@@ -187,7 +340,7 @@ describe("TripsService (integration, real Postgres)", () => {
 
     test("no filters → returns all rows with correct total", async () => {
       await seedScenario();
-      const result = await service.list({});
+      const result = await service.list({}, STAFF_ACTOR);
       expect(result.total).toBe(5);
       expect(result.items).toHaveLength(5);
     });
@@ -199,7 +352,7 @@ describe("TripsService (integration, real Postgres)", () => {
       // (they're on the detail endpoint, not the list). This is a
       // bytes-over-the-wire concern as the fleet grows.
       await seedScenario();
-      const result = await service.list({ take: 5 });
+      const result = await service.list({ take: 5 }, STAFF_ACTOR);
       for (const item of result.items) {
         expect(item.vehicle.registrationNumber).toBeTruthy();
         expect(item.driver.fullName).toBeTruthy();
@@ -211,16 +364,19 @@ describe("TripsService (integration, real Postgres)", () => {
 
     test("status filter narrows to matching statuses", async () => {
       await seedScenario();
-      const result = await service.list({ status: [TripStatus.COMPLETED] });
+      const result = await service.list({ status: [TripStatus.COMPLETED] }, STAFF_ACTOR);
       expect(result.total).toBe(2);
       expect(result.items.every((t) => t.status === TripStatus.COMPLETED)).toBe(true);
     });
 
     test("multi-status filter is OR within the dimension", async () => {
       await seedScenario();
-      const result = await service.list({
-        status: [TripStatus.PLANNED, TripStatus.IN_PROGRESS],
-      });
+      const result = await service.list(
+        {
+          status: [TripStatus.PLANNED, TripStatus.IN_PROGRESS],
+        },
+        STAFF_ACTOR,
+      );
       expect(result.total).toBe(2);
     });
 
@@ -228,7 +384,7 @@ describe("TripsService (integration, real Postgres)", () => {
       await seedScenario();
       // The seed vehicle has 3 trips (t1, t2, t3); the otherVehicle
       // has 2 (t4, t5).
-      const result = await service.list({ vehicleId: vehicle.id });
+      const result = await service.list({ vehicleId: vehicle.id }, STAFF_ACTOR);
       expect(result.total).toBe(3);
       expect(result.items.every((t) => t.vehicleId === vehicle.id)).toBe(true);
     });
@@ -236,7 +392,7 @@ describe("TripsService (integration, real Postgres)", () => {
     test("driverId filter narrows to trips for that driver", async () => {
       const { otherDriver } = await seedScenario();
       // otherDriver appears on t3 and t5.
-      const result = await service.list({ driverId: otherDriver.id });
+      const result = await service.list({ driverId: otherDriver.id }, STAFF_ACTOR);
       expect(result.total).toBe(2);
       expect(result.items.every((t) => t.driverId === otherDriver.id)).toBe(true);
     });
@@ -245,10 +401,13 @@ describe("TripsService (integration, real Postgres)", () => {
       await seedScenario();
       // Vehicle's 3 trips are PLANNED, IN_PROGRESS, COMPLETED — exactly
       // one matches COMPLETED.
-      const result = await service.list({
-        vehicleId: vehicle.id,
-        status: [TripStatus.COMPLETED],
-      });
+      const result = await service.list(
+        {
+          vehicleId: vehicle.id,
+          status: [TripStatus.COMPLETED],
+        },
+        STAFF_ACTOR,
+      );
       expect(result.total).toBe(1);
     });
 
@@ -258,14 +417,14 @@ describe("TripsService (integration, real Postgres)", () => {
       // contract so a future refactor that tightens to a cuid format
       // would surface as an obvious behavior change.
       await seedScenario();
-      const result = await service.list({ vehicleId: "no-such-vehicle" });
+      const result = await service.list({ vehicleId: "no-such-vehicle" }, STAFF_ACTOR);
       expect(result.total).toBe(0);
       expect(result.items).toHaveLength(0);
     });
 
     test("sortBy=startedAt asc respects the whitelist column", async () => {
       await seedScenario();
-      const result = await service.list({ sortBy: "startedAt", sortDir: "asc" });
+      const result = await service.list({ sortBy: "startedAt", sortDir: "asc" }, STAFF_ACTOR);
       // Prisma asc puts nulls last by default. Sorted started times:
       //   t3: 2026-01-05, t2: 2026-01-10, t5: 2026-01-12, then the
       //   two with null startedAt (t1, t4) in createdAt-desc order.
@@ -279,7 +438,7 @@ describe("TripsService (integration, real Postgres)", () => {
 
     test("sortBy=endedAt desc respects the whitelist column", async () => {
       await seedScenario();
-      const result = await service.list({ sortBy: "endedAt", sortDir: "desc" });
+      const result = await service.list({ sortBy: "endedAt", sortDir: "desc" }, STAFF_ACTOR);
       // Prisma desc puts nulls first by default. So the three nulls
       // come first (in createdAt-desc), then the two COMPLETED trips
       // by endedAt desc.
@@ -302,7 +461,7 @@ describe("TripsService (integration, real Postgres)", () => {
       // be t5 (most recently created). We assert this via the
       // distinguishing properties of t5: otherVehicle, otherDriver,
       // COMPLETED.
-      const result = await service.list({});
+      const result = await service.list({}, STAFF_ACTOR);
       const first = result.items[0];
       expect(first?.status).toBe(TripStatus.COMPLETED);
       expect(first?.endOdometerKm).toBe(50420);
@@ -310,12 +469,15 @@ describe("TripsService (integration, real Postgres)", () => {
 
     test("pagination: skip + take returns the right window; total reflects the full match", async () => {
       await seedScenario();
-      const page = await service.list({
-        sortBy: "startedAt",
-        sortDir: "asc",
-        skip: 1,
-        take: 2,
-      });
+      const page = await service.list(
+        {
+          sortBy: "startedAt",
+          sortDir: "asc",
+          skip: 1,
+          take: 2,
+        },
+        STAFF_ACTOR,
+      );
       // Window is rows 1..2 (zero-based) of the asc-started sort:
       // t2 (2026-01-10) and t5 (2026-01-12).
       const startedAtSeq = page.items.map((t) => t.startedAt?.toISOString() ?? null);
@@ -331,14 +493,14 @@ describe("TripsService (integration, real Postgres)", () => {
       // this test pins it so a refactor that removed the clamp without
       // removing the comment would fail.
       await seedScenario();
-      const result = await service.list({ take: 10_000 });
+      const result = await service.list({ take: 10_000 }, STAFF_ACTOR);
       expect(result.items.length).toBeLessThanOrEqual(LIST_TAKE_MAX);
       expect(result.total).toBe(5);
     });
 
     test("negative skip is clamped to 0 (defense-in-depth)", async () => {
       await seedScenario();
-      const result = await service.list({ skip: -5, take: 5 });
+      const result = await service.list({ skip: -5, take: 5 }, STAFF_ACTOR);
       expect(result.items).toHaveLength(5);
     });
   });
@@ -419,6 +581,7 @@ describe("TripsService (integration, real Postgres)", () => {
           status: TripStatus.PLANNED,
         },
         adminId,
+        STAFF_ACTOR,
       );
       expect(result.id).toBeTruthy();
       expect(result.status).toBe(TripStatus.PLANNED);
@@ -447,6 +610,7 @@ describe("TripsService (integration, real Postgres)", () => {
           notes: "Pokhara run",
         },
         adminId,
+        STAFF_ACTOR,
       );
       expect(result.startedAt?.toISOString()).toBe("2026-01-10T08:00:00.000Z");
       expect(result.endedAt?.toISOString()).toBe("2026-01-10T17:00:00.000Z");
@@ -460,12 +624,14 @@ describe("TripsService (integration, real Postgres)", () => {
         service.create(
           { vehicleId: "vehicle-does-not-exist", driverId: driver.id, status: TripStatus.PLANNED },
           adminId,
+          STAFF_ACTOR,
         ),
       ).rejects.toBeInstanceOf(BadRequestException);
       try {
         await service.create(
           { vehicleId: "vehicle-does-not-exist", driverId: driver.id, status: TripStatus.PLANNED },
           adminId,
+          STAFF_ACTOR,
         );
       } catch (error) {
         expect(error).toBeInstanceOf(BadRequestException);
@@ -478,12 +644,14 @@ describe("TripsService (integration, real Postgres)", () => {
         service.create(
           { vehicleId: vehicle.id, driverId: "driver-does-not-exist", status: TripStatus.PLANNED },
           adminId,
+          STAFF_ACTOR,
         ),
       ).rejects.toBeInstanceOf(BadRequestException);
       try {
         await service.create(
           { vehicleId: vehicle.id, driverId: "driver-does-not-exist", status: TripStatus.PLANNED },
           adminId,
+          STAFF_ACTOR,
         );
       } catch (error) {
         expect(error).toBeInstanceOf(BadRequestException);
@@ -500,7 +668,7 @@ describe("TripsService (integration, real Postgres)", () => {
         createdById: adminId,
         notes: "before",
       });
-      const result = await service.update(created.id, {});
+      const result = await service.update(created.id, {}, STAFF_ACTOR);
       expect(result.id).toBe(created.id);
       expect(result.notes).toBe("before");
       // The merged-shape check must still pass on a no-op — a PLANNED
@@ -515,11 +683,15 @@ describe("TripsService (integration, real Postgres)", () => {
         createdById: adminId,
         status: TripStatus.PLANNED,
       });
-      const result = await service.update(created.id, {
-        status: TripStatus.IN_PROGRESS,
-        startedAt: "2026-01-10T08:00:00Z",
-        startOdometerKm: 80000,
-      });
+      const result = await service.update(
+        created.id,
+        {
+          status: TripStatus.IN_PROGRESS,
+          startedAt: "2026-01-10T08:00:00Z",
+          startOdometerKm: 80000,
+        },
+        STAFF_ACTOR,
+      );
       expect(result.status).toBe(TripStatus.IN_PROGRESS);
       expect(result.startedAt?.toISOString()).toBe("2026-01-10T08:00:00.000Z");
       expect(result.startOdometerKm).toBe(80000);
@@ -536,11 +708,15 @@ describe("TripsService (integration, real Postgres)", () => {
         startedAt: new Date("2026-01-10T08:00:00Z"),
         startOdometerKm: 80000,
       });
-      const result = await service.update(created.id, {
-        status: TripStatus.COMPLETED,
-        endedAt: "2026-01-10T17:00:00Z",
-        endOdometerKm: 80250,
-      });
+      const result = await service.update(
+        created.id,
+        {
+          status: TripStatus.COMPLETED,
+          endedAt: "2026-01-10T17:00:00Z",
+          endOdometerKm: 80250,
+        },
+        STAFF_ACTOR,
+      );
       expect(result.status).toBe(TripStatus.COMPLETED);
       expect(result.endedAt?.toISOString()).toBe("2026-01-10T17:00:00.000Z");
     });
@@ -552,7 +728,11 @@ describe("TripsService (integration, real Postgres)", () => {
         createdById: adminId,
         status: TripStatus.PLANNED,
       });
-      const result = await service.update(created.id, { status: TripStatus.CANCELLED });
+      const result = await service.update(
+        created.id,
+        { status: TripStatus.CANCELLED },
+        STAFF_ACTOR,
+      );
       expect(result.status).toBe(TripStatus.CANCELLED);
     });
 
@@ -568,13 +748,17 @@ describe("TripsService (integration, real Postgres)", () => {
         status: TripStatus.PLANNED,
       });
       await expect(
-        service.update(created.id, {
-          status: TripStatus.COMPLETED,
-          startedAt: "2026-01-10T08:00:00Z",
-          endedAt: "2026-01-10T17:00:00Z",
-          startOdometerKm: 80000,
-          endOdometerKm: 80250,
-        }),
+        service.update(
+          created.id,
+          {
+            status: TripStatus.COMPLETED,
+            startedAt: "2026-01-10T08:00:00Z",
+            endedAt: "2026-01-10T17:00:00Z",
+            startOdometerKm: 80000,
+            endOdometerKm: 80250,
+          },
+          STAFF_ACTOR,
+        ),
       ).rejects.toBeInstanceOf(BadRequestException);
     });
 
@@ -593,7 +777,7 @@ describe("TripsService (integration, real Postgres)", () => {
         endOdometerKm: 80250,
       });
       await expect(
-        service.update(created.id, { status: TripStatus.PLANNED }),
+        service.update(created.id, { status: TripStatus.PLANNED }, STAFF_ACTOR),
       ).rejects.toBeInstanceOf(BadRequestException);
     });
 
@@ -613,7 +797,7 @@ describe("TripsService (integration, real Postgres)", () => {
         startOdometerKm: 80000,
       });
       await expect(
-        service.update(created.id, { status: TripStatus.COMPLETED }),
+        service.update(created.id, { status: TripStatus.COMPLETED }, STAFF_ACTOR),
       ).rejects.toBeInstanceOf(BadRequestException);
     });
 
@@ -627,18 +811,22 @@ describe("TripsService (integration, real Postgres)", () => {
         startOdometerKm: 80000,
       });
       await expect(
-        service.update(created.id, {
-          status: TripStatus.COMPLETED,
-          endedAt: "2026-01-10T17:00:00Z",
-          // End odometer is less than start — physically nonsensical.
-          endOdometerKm: 79500,
-        }),
+        service.update(
+          created.id,
+          {
+            status: TripStatus.COMPLETED,
+            endedAt: "2026-01-10T17:00:00Z",
+            // End odometer is less than start — physically nonsensical.
+            endOdometerKm: 79500,
+          },
+          STAFF_ACTOR,
+        ),
       ).rejects.toBeInstanceOf(BadRequestException);
     });
 
     test("update on non-existent trip → NotFoundException", async () => {
       await expect(
-        service.update("trip-does-not-exist", { status: TripStatus.CANCELLED }),
+        service.update("trip-does-not-exist", { status: TripStatus.CANCELLED }, STAFF_ACTOR),
       ).rejects.toBeInstanceOf(NotFoundException);
     });
 
@@ -653,7 +841,11 @@ describe("TripsService (integration, real Postgres)", () => {
         createdById: adminId,
         notes: "to be cleared",
       });
-      const result = await service.update(created.id, { notes: null as unknown as string });
+      const result = await service.update(
+        created.id,
+        { notes: null as unknown as string },
+        STAFF_ACTOR,
+      );
       expect(result.notes).toBeNull();
     });
   });
@@ -685,11 +877,15 @@ describe("TripsService (integration, real Postgres)", () => {
         startOdometerKm: 80000,
       });
 
-      const result = await service.update(created.id, {
-        status: TripStatus.COMPLETED,
-        endedAt: "2026-01-10T17:00:00Z",
-        endOdometerKm: 80250,
-      });
+      const result = await service.update(
+        created.id,
+        {
+          status: TripStatus.COMPLETED,
+          endedAt: "2026-01-10T17:00:00Z",
+          endOdometerKm: 80250,
+        },
+        STAFF_ACTOR,
+      );
 
       // The returned DETAIL_INCLUDE shape reflects the bumped value
       // (the service refreshes the eager-included Vehicle so the
@@ -725,11 +921,15 @@ describe("TripsService (integration, real Postgres)", () => {
         startOdometerKm: 79000,
       });
 
-      const result = await service.update(created.id, {
-        status: TripStatus.COMPLETED,
-        endedAt: "2026-01-10T17:00:00Z",
-        endOdometerKm: 79500,
-      });
+      const result = await service.update(
+        created.id,
+        {
+          status: TripStatus.COMPLETED,
+          endedAt: "2026-01-10T17:00:00Z",
+          endOdometerKm: 79500,
+        },
+        STAFF_ACTOR,
+      );
 
       expect(result.status).toBe(TripStatus.COMPLETED);
       // The returned eager Vehicle still shows the un-bumped value
@@ -759,11 +959,15 @@ describe("TripsService (integration, real Postgres)", () => {
         startOdometerKm: 79500,
       });
 
-      await service.update(created.id, {
-        status: TripStatus.COMPLETED,
-        endedAt: "2026-01-10T17:00:00Z",
-        endOdometerKm: 80000,
-      });
+      await service.update(
+        created.id,
+        {
+          status: TripStatus.COMPLETED,
+          endedAt: "2026-01-10T17:00:00Z",
+          endOdometerKm: 80000,
+        },
+        STAFF_ACTOR,
+      );
 
       const persisted = await prisma.vehicle.findUniqueOrThrow({
         where: { id: vehicle.id },
@@ -807,7 +1011,7 @@ describe("TripsService (integration, real Postgres)", () => {
 
       // Self-transition: legal per the matrix, idempotent per the
       // iter-11 contract.
-      await service.update(created.id, { status: TripStatus.COMPLETED });
+      await service.update(created.id, { status: TripStatus.COMPLETED }, STAFF_ACTOR);
 
       const persisted = await prisma.vehicle.findUniqueOrThrow({
         where: { id: vehicle.id },
@@ -830,11 +1034,15 @@ describe("TripsService (integration, real Postgres)", () => {
         startedAt: new Date("2026-01-10T08:00:00Z"),
         startOdometerKm: 80000,
       });
-      await service.update(created.id, {
-        status: TripStatus.COMPLETED,
-        endedAt: "2026-01-10T17:00:00Z",
-        endOdometerKm: 80250,
-      });
+      await service.update(
+        created.id,
+        {
+          status: TripStatus.COMPLETED,
+          endedAt: "2026-01-10T17:00:00Z",
+          endOdometerKm: 80250,
+        },
+        STAFF_ACTOR,
+      );
 
       // Sanity: vehicle is now at 80250.
       const afterFirstBump = await prisma.vehicle.findUniqueOrThrow({
@@ -850,7 +1058,7 @@ describe("TripsService (integration, real Postgres)", () => {
         where: { id: vehicle.id },
         data: { odometerCurrentKm: 81000 },
       });
-      await service.update(created.id, { notes: "added a correction note" });
+      await service.update(created.id, { notes: "added a correction note" }, STAFF_ACTOR);
 
       const afterNotesPatch = await prisma.vehicle.findUniqueOrThrow({
         where: { id: vehicle.id },
@@ -874,13 +1082,17 @@ describe("TripsService (integration, real Postgres)", () => {
         status: TripStatus.PLANNED,
       });
       await expect(
-        service.update(created.id, {
-          status: TripStatus.COMPLETED,
-          startedAt: "2026-01-10T08:00:00Z",
-          endedAt: "2026-01-10T17:00:00Z",
-          startOdometerKm: 80000,
-          endOdometerKm: 80250,
-        }),
+        service.update(
+          created.id,
+          {
+            status: TripStatus.COMPLETED,
+            startedAt: "2026-01-10T08:00:00Z",
+            endedAt: "2026-01-10T17:00:00Z",
+            startOdometerKm: 80000,
+            endOdometerKm: 80250,
+          },
+          STAFF_ACTOR,
+        ),
       ).rejects.toBeInstanceOf(BadRequestException);
 
       const persisted = await prisma.vehicle.findUniqueOrThrow({
@@ -956,11 +1168,15 @@ describe("TripsService (integration, real Postgres)", () => {
       // $transaction wrapper itself is the load-bearing
       // construct — any failure inside it rolls everything back.
       await expect(
-        service.update(created.id, {
-          status: TripStatus.COMPLETED,
-          endedAt: "2026-01-10T17:00:00Z",
-          endOdometerKm: 2_147_483_648,
-        }),
+        service.update(
+          created.id,
+          {
+            status: TripStatus.COMPLETED,
+            endedAt: "2026-01-10T17:00:00Z",
+            endOdometerKm: 2_147_483_648,
+          },
+          STAFF_ACTOR,
+        ),
       ).rejects.toThrow();
 
       // Trip is still IN_PROGRESS — its row was never committed.
@@ -981,13 +1197,15 @@ describe("TripsService (integration, real Postgres)", () => {
         driverId: driver.id,
         createdById: adminId,
       });
-      await service.delete(created.id);
+      await service.delete(created.id, STAFF_ACTOR);
       const fetched = await prisma.trip.findUnique({ where: { id: created.id } });
       expect(fetched).toBeNull();
     });
 
     test("delete on non-existent trip → NotFoundException", async () => {
-      await expect(service.delete("trip-does-not-exist")).rejects.toBeInstanceOf(NotFoundException);
+      await expect(service.delete("trip-does-not-exist", STAFF_ACTOR)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
     });
 
     // ADR-0029 T2 (commitment 7): GpsPing.tripId (onDelete: Restrict)
@@ -1013,7 +1231,7 @@ describe("TripsService (integration, real Postgres)", () => {
 
       let thrown: unknown;
       try {
-        await service.delete(trip.id);
+        await service.delete(trip.id, STAFF_ACTOR);
       } catch (error) {
         thrown = error;
       }

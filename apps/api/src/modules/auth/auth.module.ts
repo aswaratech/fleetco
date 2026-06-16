@@ -5,6 +5,7 @@ import { createAuth, type AuthInstance } from "./auth";
 import { AuthController } from "./auth.controller";
 import { AuthGuard } from "./auth.guard";
 import { AUTH } from "./auth.tokens";
+import { DriverScopeService } from "./driver-scope.service";
 import { RolesGuard } from "./roles.guard";
 
 // RolesGuard is provided AND exported alongside AuthGuard so domain modules
@@ -21,12 +22,18 @@ import { RolesGuard } from "./roles.guard";
   providers: [
     AuthGuard,
     RolesGuard,
+    // DriverScopeService is the service-layer own-record resolver the Trips and
+    // Fuel-logs services inject for DRIVER row-scoping (ADR-0034 c4). Exported so
+    // those domain modules consume it the same way they consume AuthGuard —
+    // import AuthModule, inject the service. Its only dependency is the @Global
+    // PrismaService, so it needs no `inject` wiring here.
+    DriverScopeService,
     {
       provide: AUTH,
       inject: [PrismaService],
       useFactory: (prisma: PrismaService): AuthInstance => createAuth(prisma),
     },
   ],
-  exports: [AUTH, AuthGuard, RolesGuard],
+  exports: [AUTH, AuthGuard, RolesGuard, DriverScopeService],
 })
 export class AuthModule {}

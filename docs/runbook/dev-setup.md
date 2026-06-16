@@ -170,6 +170,21 @@ inert until D2 adds own-record-scoped permissions, ADR-0034 c5), so the login pr
 auth end-to-end without exposing any fleet data. Linking the login to a `Driver` row
 (`Driver.userId`) is the D2 row-scope step.
 
+**D2 — trip start/stop.** The signed-in screen now lists the driver's **own** trips
+and starts/stops them — the API auto-scopes a DRIVER session to their own rows, so the
+app sends no `driverId` filter. To see actionable trips:
+
+1. In the web admin (or via the API), create a `Driver`, a `Vehicle`, and a `Trip`
+   (status `PLANNED`) assigning that driver + vehicle.
+2. **Link the DRIVER login to the Driver row** — set `Driver.userId` to the login's
+   `User.id` (operator-driven, ADR-0034 c8; there is no self-serve linking UI yet).
+   Easiest locally: `pnpm --filter @fleetco/api exec prisma studio`, open the `driver`
+   table, and set `userId` to the DRIVER user's id.
+3. Sign in on the phone → the screen lists that driver's PLANNED / IN_PROGRESS trips.
+   Enter an odometer reading and tap **Start trip** (→ IN_PROGRESS) / **End trip**
+   (→ COMPLETED). A trip that is not the driver's 404s; an unlinked DRIVER session is
+   denied (403). The fuel / odometer **entry** screen is D3.
+
 ## What can go wrong
 
 ### Port 5432 (Postgres) is already in use

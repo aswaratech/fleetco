@@ -8,6 +8,7 @@ import { ZodValidationPipe } from "../src/common/zod-validation.pipe";
 import { AuthGuard } from "../src/modules/auth/auth.guard";
 import { AUTH } from "../src/modules/auth/auth.tokens";
 import type { AuthenticatedRequest } from "../src/modules/auth/auth.types";
+import { DriverScopeService } from "../src/modules/auth/driver-scope.service";
 import { DriversController } from "../src/modules/drivers/drivers.controller";
 import { DriversService, type CreateDriverInput } from "../src/modules/drivers/drivers.service";
 import {
@@ -192,6 +193,7 @@ describe("DriversController.list (integration, real Prisma)", () => {
         // iter-12 vehicles.controller.test.ts and tolerates a future
         // refactor that pulled VehiclesService into the controller.
         TripsService,
+        DriverScopeService,
         VehiclesService,
         PrismaService,
         // AUTH is required by AuthGuard's constructor. The override
@@ -478,6 +480,7 @@ describe("DriversController.create / update / remove (integration, real Prisma)"
         // this write-path block does not exercise that route, Nest
         // still resolves all controller deps at module init.
         TripsService,
+        DriverScopeService,
         VehiclesService,
         PrismaService,
         { provide: AUTH, useValue: { api: { getSession: () => null } } },
@@ -642,6 +645,7 @@ describe("DriversController.getStats (iter-13 cross-slice read)", () => {
       providers: [
         DriversService,
         TripsService,
+        DriverScopeService,
         VehiclesService,
         PrismaService,
         { provide: AUTH, useValue: { api: { getSession: () => null } } },

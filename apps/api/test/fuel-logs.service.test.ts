@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { BadRequestException, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ForbiddenException, NotFoundException } from "@nestjs/common";
 import { Test, type TestingModule } from "@nestjs/testing";
-import { type Driver, type Trip, type Vehicle } from "@prisma/client";
+import { UserRole, type Driver, type Trip, type Vehicle } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 
+import { DriverScopeService, type Actor } from "../src/modules/auth/driver-scope.service";
 import {
   FuelLogsService,
   LIST_TAKE_MAX,
@@ -43,6 +44,12 @@ interface SeedFuelLogInput {
   notes?: string | null;
 }
 
+// A non-DRIVER acting principal for the existing (ADMIN/OFFICE_STAFF) cases: the
+// own-record predicate is a no-op for it (a DRIVER-only branch), so these tests
+// assert the unchanged fleet-wide behavior. The DRIVER own-record describe block
+// below builds its own DRIVER actor.
+const STAFF_ACTOR: Actor = { userId: "staff-actor", role: UserRole.OFFICE_STAFF };
+
 describe("FuelLogsService (integration, real Postgres)", () => {
   let module: TestingModule;
   let prisma: PrismaService;
@@ -52,10 +59,13 @@ describe("FuelLogsService (integration, real Postgres)", () => {
   let vehicleB: Vehicle;
   let driver: Driver;
   let trip: Trip;
+  // A DRIVER login linked to `driver` (ADR-0034 c4), so the DRIVER own-record
+  // describe can act as that driver against their own `trip` / fuel logs.
+  let driverUserId: string;
 
   beforeAll(async () => {
     module = await Test.createTestingModule({
-      providers: [FuelLogsService, PrismaService],
+      providers: [FuelLogsService, DriverScopeService, PrismaService],
     }).compile();
     await module.init();
 
@@ -108,6 +118,16 @@ describe("FuelLogsService (integration, real Postgres)", () => {
       },
     });
 
+    driverUserId = `user_${randomUUID()}`;
+    await prisma.user.create({
+      data: {
+        id: driverUserId,
+        email: `driver-${driverUserId}@fleetco.test`,
+        name: "Test Driver",
+        role: "DRIVER",
+      },
+    });
+
     driver = await prisma.driver.create({
       data: {
         fullName: "Ram Bahadur",
@@ -116,6 +136,7 @@ describe("FuelLogsService (integration, real Postgres)", () => {
         phone: "+977-9800000000",
         hiredAt: new Date("2022-01-15T00:00:00Z"),
         licenseExpiresAt: new Date("2030-01-01T00:00:00Z"),
+        userId: driverUserId,
         createdById: adminId,
       },
     });
@@ -158,13 +179,123 @@ describe("FuelLogsService (integration, real Postgres)", () => {
     });
   }
 
+  // D2 (ADR-0034 c4/c5): the own-record predicate for fuel logs. A driver may log
+  // fuel ONLY against their own trip, sees ONLY the entries they created, and may
+  // not delete. `driver` is linked to `driverUserId`; `trip` is its own trip.
+  describe("DRIVER own-record scope (ADR-0034 c4)", () => {
+    let driverActor: Actor;
+
+    beforeEach(() => {
+      driverActor = { userId: driverUserId, role: UserRole.DRIVER };
+    });
+
+    const fuelInput = (vehicleId: string, tripId?: string) => ({
+      vehicleId,
+      tripId,
+      date: new Date("2026-06-16T08:00:00Z"),
+      litersMl: 10_000,
+      pricePerLiterPaisa: 11_000,
+    });
+
+    test("create() succeeds against the driver's own trip, stamping createdById from the session", async () => {
+      const created = await service.create(
+        fuelInput(vehicleA.id, trip.id),
+        driverUserId,
+        driverActor,
+      );
+      expect(created.createdById).toBe(driverUserId);
+      expect(created.trip?.id).toBe(trip.id);
+    });
+
+    test("create() without a tripId is rejected (400 — a driver must pair to their own trip)", async () => {
+      await expect(
+        service.create(fuelInput(vehicleA.id), driverUserId, driverActor),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    test("create() against another driver's trip is rejected (404, existence-hiding)", async () => {
+      const foreignDriver = await prisma.driver.create({
+        data: {
+          fullName: "Other Driver",
+          licenseNumber: `LIC-${randomUUID().slice(0, 8)}`,
+          licenseClass: "HTV",
+          phone: "+977-9811111111",
+          hiredAt: new Date("2022-01-15T00:00:00Z"),
+          licenseExpiresAt: new Date("2030-01-01T00:00:00Z"),
+          createdById: adminId,
+        },
+      });
+      const foreignTrip = await prisma.trip.create({
+        data: {
+          vehicleId: vehicleB.id,
+          driverId: foreignDriver.id,
+          status: "COMPLETED",
+          createdById: adminId,
+        },
+      });
+      await expect(
+        service.create(fuelInput(vehicleB.id, foreignTrip.id), driverUserId, driverActor),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    test("list() returns only the fuel logs the driver created", async () => {
+      const own = await service.create(fuelInput(vehicleA.id, trip.id), driverUserId, driverActor);
+      await seedFuelLog({ tripId: trip.id }); // created by adminId
+      const result = await service.list({}, driverActor);
+      expect(result.total).toBe(1);
+      expect(result.items.map((f) => f.id)).toEqual([own.id]);
+    });
+
+    test("getById() returns the driver's own entry and 404s another's", async () => {
+      const own = await service.create(fuelInput(vehicleA.id, trip.id), driverUserId, driverActor);
+      expect((await service.getById(own.id, driverActor)).id).toBe(own.id);
+
+      const adminLog = await seedFuelLog({ tripId: trip.id });
+      await expect(service.getById(adminLog.id, driverActor)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+    });
+
+    test("update() edits the driver's own entry and 404s another's", async () => {
+      const own = await service.create(fuelInput(vehicleA.id, trip.id), driverUserId, driverActor);
+      const updated = await service.update(own.id, { litersMl: 12_000 }, driverActor);
+      expect(updated.litersMl).toBe(12_000);
+
+      const adminLog = await seedFuelLog({ tripId: trip.id });
+      await expect(
+        service.update(adminLog.id, { litersMl: 1 }, driverActor),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    test("delete() is forbidden for a DRIVER (403)", async () => {
+      const own = await service.create(fuelInput(vehicleA.id, trip.id), driverUserId, driverActor);
+      await expect(service.delete(own.id, driverActor)).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    test("a DRIVER session with no linked Driver row cannot create (403, fail-closed)", async () => {
+      const unlinkedUserId = `user_${randomUUID()}`;
+      await prisma.user.create({
+        data: {
+          id: unlinkedUserId,
+          email: `unlinked-${unlinkedUserId}@fleetco.test`,
+          name: "Unlinked Driver",
+          role: "DRIVER",
+        },
+      });
+      const unlinkedActor: Actor = { userId: unlinkedUserId, role: UserRole.DRIVER };
+      await expect(
+        service.create(fuelInput(vehicleA.id, trip.id), unlinkedUserId, unlinkedActor),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+  });
+
   describe("findById() / getById()", () => {
     test("findById() returns the row with nested vehicle and trip when present", async () => {
       const created = await seedFuelLog({
         tripId: trip.id,
         station: "NOC Naxal",
       });
-      const fetched = await service.findById(created.id);
+      const fetched = await service.findById(created.id, STAFF_ACTOR);
       expect(fetched?.id).toBe(created.id);
       expect(fetched?.station).toBe("NOC Naxal");
       expect(fetched?.litersMl).toBe(12_345);
@@ -181,20 +312,20 @@ describe("FuelLogsService (integration, real Postgres)", () => {
       // The canonical "depot top-up between jobs" case from the
       // glossary entry. Trip should be null in the nested include.
       const created = await seedFuelLog({ tripId: null });
-      const fetched = await service.findById(created.id);
+      const fetched = await service.findById(created.id, STAFF_ACTOR);
       expect(fetched?.id).toBe(created.id);
       expect(fetched?.trip).toBeNull();
       expect(fetched?.vehicle.id).toBe(vehicleA.id);
     });
 
     test("findById() returns null when not present", async () => {
-      const fetched = await service.findById("nonexistent-id");
+      const fetched = await service.findById("nonexistent-id", STAFF_ACTOR);
       expect(fetched).toBeNull();
     });
 
     test("getById() throws NotFoundException with the id in the message when missing", async () => {
       try {
-        await service.getById("nonexistent-id");
+        await service.getById("nonexistent-id", STAFF_ACTOR);
         throw new Error("expected NotFoundException");
       } catch (error) {
         expect(error).toBeInstanceOf(NotFoundException);
@@ -204,7 +335,7 @@ describe("FuelLogsService (integration, real Postgres)", () => {
 
     test("getById() returns the row with nested relations on the happy path", async () => {
       const created = await seedFuelLog({ tripId: trip.id });
-      const fetched = await service.getById(created.id);
+      const fetched = await service.getById(created.id, STAFF_ACTOR);
       expect(fetched.id).toBe(created.id);
       expect(fetched.vehicle.id).toBe(vehicleA.id);
       expect(fetched.trip?.id).toBe(trip.id);
@@ -280,7 +411,7 @@ describe("FuelLogsService (integration, real Postgres)", () => {
 
     test("returns total + items with default sort = date desc", async () => {
       await seedSix();
-      const { items, total } = await service.list({});
+      const { items, total } = await service.list({}, STAFF_ACTOR);
       expect(total).toBe(6);
       expect(items).toHaveLength(6);
       // Default sort is `date desc` — newest fill first. The first
@@ -295,14 +426,14 @@ describe("FuelLogsService (integration, real Postgres)", () => {
     });
 
     test("returns empty items + total=0 on an empty table", async () => {
-      const { items, total } = await service.list({});
+      const { items, total } = await service.list({}, STAFF_ACTOR);
       expect(total).toBe(0);
       expect(items).toHaveLength(0);
     });
 
     test("{ vehicleId } narrows results to one vehicle only", async () => {
       await seedSix();
-      const { items, total } = await service.list({ vehicleId: vehicleA.id });
+      const { items, total } = await service.list({ vehicleId: vehicleA.id }, STAFF_ACTOR);
       // Four of the six rows are vehicleA; the count and the items
       // should agree.
       expect(total).toBe(4);
@@ -314,7 +445,7 @@ describe("FuelLogsService (integration, real Postgres)", () => {
 
     test("{ tripId } narrows results to one trip only", async () => {
       await seedSix();
-      const { items, total } = await service.list({ tripId: trip.id });
+      const { items, total } = await service.list({ tripId: trip.id }, STAFF_ACTOR);
       // Two of the six rows are tied to the trip.
       expect(total).toBe(2);
       expect(items).toHaveLength(2);
@@ -330,7 +461,7 @@ describe("FuelLogsService (integration, real Postgres)", () => {
       // inclusive at both ends.
       const startDate = new Date("2026-01-15T00:00:00Z");
       const endDate = new Date("2026-01-25T23:59:59Z");
-      const { items, total } = await service.list({ startDate, endDate });
+      const { items, total } = await service.list({ startDate, endDate }, STAFF_ACTOR);
       expect(total).toBe(2);
       expect(items).toHaveLength(2);
       for (const item of items) {
@@ -343,11 +474,14 @@ describe("FuelLogsService (integration, real Postgres)", () => {
       await seedSix();
       // vehicleA has two rows in Jan (the 2026-01-05 and 2026-01-15
       // rows) and two in Feb. Bound to Jan and the count should be 2.
-      const { items, total } = await service.list({
-        vehicleId: vehicleA.id,
-        startDate: new Date("2026-01-01T00:00:00Z"),
-        endDate: new Date("2026-01-31T23:59:59Z"),
-      });
+      const { items, total } = await service.list(
+        {
+          vehicleId: vehicleA.id,
+          startDate: new Date("2026-01-01T00:00:00Z"),
+          endDate: new Date("2026-01-31T23:59:59Z"),
+        },
+        STAFF_ACTOR,
+      );
       expect(total).toBe(2);
       expect(items).toHaveLength(2);
       for (const item of items) {
@@ -361,7 +495,7 @@ describe("FuelLogsService (integration, real Postgres)", () => {
       // call the service directly with an over-large take. The
       // service clamps so the underlying Prisma query never receives
       // an unbounded ceiling.
-      const { items, total } = await service.list({ take: LIST_TAKE_MAX + 5000 });
+      const { items, total } = await service.list({ take: LIST_TAKE_MAX + 5000 }, STAFF_ACTOR);
       expect(total).toBe(6);
       // Six rows fit within the clamped ceiling, so we get all six
       // back — the assertion is that the clamp did not error and did
@@ -371,14 +505,17 @@ describe("FuelLogsService (integration, real Postgres)", () => {
 
     test("skip past the end returns empty items but the correct total", async () => {
       await seedSix();
-      const { items, total } = await service.list({ skip: 100, take: 10 });
+      const { items, total } = await service.list({ skip: 100, take: 10 }, STAFF_ACTOR);
       expect(total).toBe(6);
       expect(items).toHaveLength(0);
     });
 
     test("sortBy='createdAt' + sortDir='asc' returns oldest-created first", async () => {
       await seedSix();
-      const { items, total } = await service.list({ sortBy: "createdAt", sortDir: "asc" });
+      const { items, total } = await service.list(
+        { sortBy: "createdAt", sortDir: "asc" },
+        STAFF_ACTOR,
+      );
       expect(total).toBe(6);
       // Sequential await in seedSix() guarantees monotonic
       // createdAt. The first item under asc is the first inserted
@@ -391,7 +528,7 @@ describe("FuelLogsService (integration, real Postgres)", () => {
 
     test("sortBy='date' + sortDir='asc' returns oldest-date first", async () => {
       await seedSix();
-      const { items } = await service.list({ sortBy: "date", sortDir: "asc" });
+      const { items } = await service.list({ sortBy: "date", sortDir: "asc" }, STAFF_ACTOR);
       expect(items[0].date.toISOString()).toBe("2026-01-05T08:00:00.000Z");
       expect(items[items.length - 1].date.toISOString()).toBe("2026-02-25T08:00:00.000Z");
     });
@@ -399,10 +536,10 @@ describe("FuelLogsService (integration, real Postgres)", () => {
     test("skip + take produce stable pagination across requests", async () => {
       await seedSix();
       // Page 1: rows 0..1 (the two most recent under date desc)
-      const page1 = await service.list({ skip: 0, take: 2 });
+      const page1 = await service.list({ skip: 0, take: 2 }, STAFF_ACTOR);
       expect(page1.items).toHaveLength(2);
       // Page 2: rows 2..3
-      const page2 = await service.list({ skip: 2, take: 2 });
+      const page2 = await service.list({ skip: 2, take: 2 }, STAFF_ACTOR);
       expect(page2.items).toHaveLength(2);
       // The 4 items across the two pages should be 4 distinct ids
       // (no duplicates, no skips). The id-tiebreaker in orderBy is
@@ -440,6 +577,7 @@ describe("FuelLogsService (integration, real Postgres)", () => {
           notes: "iter-20 happy path",
         },
         adminId,
+        STAFF_ACTOR,
       );
       expect(created.id).toBeTruthy();
       expect(created.vehicleId).toBe(vehicleA.id);
@@ -472,6 +610,7 @@ describe("FuelLogsService (integration, real Postgres)", () => {
           pricePerLiterPaisa: 10_000,
         },
         adminId,
+        STAFF_ACTOR,
       );
       expect(created.tripId).toBe(trip.id);
       expect(created.trip?.id).toBe(trip.id);
@@ -488,6 +627,7 @@ describe("FuelLogsService (integration, real Postgres)", () => {
           pricePerLiterPaisa: 11_000,
         },
         adminId,
+        STAFF_ACTOR,
       );
       expect(created.tripId).toBeNull();
       expect(created.odometerReadingKm).toBeNull();
@@ -510,6 +650,7 @@ describe("FuelLogsService (integration, real Postgres)", () => {
             pricePerLiterPaisa: 10_000,
           },
           adminId,
+          STAFF_ACTOR,
         );
         throw new Error("expected BadRequestException");
       } catch (error) {
@@ -534,6 +675,7 @@ describe("FuelLogsService (integration, real Postgres)", () => {
             pricePerLiterPaisa: 10_000,
           },
           adminId,
+          STAFF_ACTOR,
         );
         throw new Error("expected BadRequestException");
       } catch (error) {
@@ -556,6 +698,7 @@ describe("FuelLogsService (integration, real Postgres)", () => {
             pricePerLiterPaisa: 10_000,
           },
           adminId,
+          STAFF_ACTOR,
         );
         throw new Error("expected BadRequestException");
       } catch (error) {
@@ -569,7 +712,7 @@ describe("FuelLogsService (integration, real Postgres)", () => {
   describe("update()", () => {
     test("happy path: PATCH that only changes station updates only that column", async () => {
       const created = await seedFuelLog({ station: "NOC Naxal" });
-      const updated = await service.update(created.id, { station: "NOC Thapathali" });
+      const updated = await service.update(created.id, { station: "NOC Thapathali" }, STAFF_ACTOR);
       expect(updated.id).toBe(created.id);
       expect(updated.station).toBe("NOC Thapathali");
       // Other fields untouched.
@@ -585,7 +728,7 @@ describe("FuelLogsService (integration, real Postgres)", () => {
         pricePerLiterPaisa: 11_050,
         totalCostPaisa: 136_412,
       });
-      const updated = await service.update(created.id, { litersMl: 20_000 });
+      const updated = await service.update(created.id, { litersMl: 20_000 }, STAFF_ACTOR);
       // Re-derivation: round((20000 * 11050) / 1000) = 221_000.
       expect(updated.litersMl).toBe(20_000);
       expect(updated.pricePerLiterPaisa).toBe(11_050);
@@ -598,7 +741,7 @@ describe("FuelLogsService (integration, real Postgres)", () => {
         pricePerLiterPaisa: 11_050,
         totalCostPaisa: 136_412,
       });
-      const updated = await service.update(created.id, { pricePerLiterPaisa: 15_025 });
+      const updated = await service.update(created.id, { pricePerLiterPaisa: 15_025 }, STAFF_ACTOR);
       // Re-derivation: round((12345 * 15025) / 1000) = round(185_483.625)
       // = 185_484.
       expect(updated.pricePerLiterPaisa).toBe(15_025);
@@ -608,14 +751,14 @@ describe("FuelLogsService (integration, real Postgres)", () => {
 
     test("PATCH allows tripId to flip from null → set", async () => {
       const created = await seedFuelLog({ tripId: null });
-      const updated = await service.update(created.id, { tripId: trip.id });
+      const updated = await service.update(created.id, { tripId: trip.id }, STAFF_ACTOR);
       expect(updated.tripId).toBe(trip.id);
       expect(updated.trip?.id).toBe(trip.id);
     });
 
     test("PATCH allows tripId to flip from set → null (unpair)", async () => {
       const created = await seedFuelLog({ tripId: trip.id });
-      const updated = await service.update(created.id, { tripId: null });
+      const updated = await service.update(created.id, { tripId: null }, STAFF_ACTOR);
       expect(updated.tripId).toBeNull();
       expect(updated.trip).toBeNull();
     });
@@ -627,7 +770,7 @@ describe("FuelLogsService (integration, real Postgres)", () => {
       // trip-for-A is a mismatch).
       const created = await seedFuelLog({ vehicleId: vehicleB.id, tripId: null });
       try {
-        await service.update(created.id, { tripId: trip.id });
+        await service.update(created.id, { tripId: trip.id }, STAFF_ACTOR);
         throw new Error("expected BadRequestException");
       } catch (error) {
         expect(error).toBeInstanceOf(BadRequestException);
@@ -646,13 +789,17 @@ describe("FuelLogsService (integration, real Postgres)", () => {
         receiptNumber: "R-1234",
         notes: "before",
       });
-      const updated = await service.update(created.id, {
-        tripId: null,
-        odometerReadingKm: null,
-        station: null,
-        receiptNumber: null,
-        notes: null,
-      });
+      const updated = await service.update(
+        created.id,
+        {
+          tripId: null,
+          odometerReadingKm: null,
+          station: null,
+          receiptNumber: null,
+          notes: null,
+        },
+        STAFF_ACTOR,
+      );
       expect(updated.tripId).toBeNull();
       expect(updated.odometerReadingKm).toBeNull();
       expect(updated.station).toBeNull();
@@ -662,7 +809,7 @@ describe("FuelLogsService (integration, real Postgres)", () => {
 
     test("PATCH on a missing fuel log throws NotFoundException with the id in the message", async () => {
       try {
-        await service.update("ckmissingfuellog12345678", { station: "anything" });
+        await service.update("ckmissingfuellog12345678", { station: "anything" }, STAFF_ACTOR);
         throw new Error("expected NotFoundException");
       } catch (error) {
         expect(error).toBeInstanceOf(NotFoundException);
@@ -674,14 +821,14 @@ describe("FuelLogsService (integration, real Postgres)", () => {
   describe("delete()", () => {
     test("happy path: removes the row", async () => {
       const created = await seedFuelLog();
-      await service.delete(created.id);
-      const fetched = await service.findById(created.id);
+      await service.delete(created.id, STAFF_ACTOR);
+      const fetched = await service.findById(created.id, STAFF_ACTOR);
       expect(fetched).toBeNull();
     });
 
     test("on a missing fuel log throws NotFoundException with the id in the message", async () => {
       try {
-        await service.delete("ckmissingfuellog12345678");
+        await service.delete("ckmissingfuellog12345678", STAFF_ACTOR);
         throw new Error("expected NotFoundException");
       } catch (error) {
         expect(error).toBeInstanceOf(NotFoundException);

@@ -1,10 +1,11 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
-import { Prisma, type Trip, type TripStatus } from "@prisma/client";
+import { Prisma, UserRole, type Trip, type TripStatus } from "@prisma/client";
 
 import type {
   CreateTripInput,
@@ -25,6 +26,13 @@ export type { CreateTripInput, UpdateTripInput };
 // override as the Vehicles and Drivers services.
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports
 import { PrismaService } from "../prisma/prisma.service";
+
+// DriverScopeService is injected (value import, same eslint override). It is the
+// auth module's own-record resolver; `Actor` is the {userId, role} principal the
+// controller threads in so the service can scope a DRIVER to their own trips
+// (ADR-0034 c4). A non-DRIVER actor resolves to null = no restriction.
+// eslint-disable-next-line @typescript-eslint/consistent-type-imports
+import { DriverScopeService, type Actor } from "../auth/driver-scope.service";
 
 // Pagination defaults and bounds. Same `LIST_TAKE_` prefix as the
 // Drivers service (the iter-6 kickoff named the convention explicitly).
@@ -98,7 +106,10 @@ export interface ListResult {
 
 @Injectable()
 export class TripsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly driverScope: DriverScopeService,
+  ) {}
 
   /**
    * List trips with optional filter / sort / pagination. The list
@@ -127,23 +138,26 @@ export class TripsService {
    * page), and a clamp here ensures the database is never asked for
    * an unbounded result.
    */
-  async list({
-    skip = 0,
-    take = LIST_TAKE_DEFAULT,
-    status,
-    vehicleId,
-    driverId,
-    sortBy = "createdAt",
-    sortDir = "desc",
-  }: {
-    skip?: number;
-    take?: number;
-    status?: TripStatus[];
-    vehicleId?: string;
-    driverId?: string;
-    sortBy?: TripSortColumn;
-    sortDir?: TripSortDir;
-  }): Promise<ListResult> {
+  async list(
+    {
+      skip = 0,
+      take = LIST_TAKE_DEFAULT,
+      status,
+      vehicleId,
+      driverId,
+      sortBy = "createdAt",
+      sortDir = "desc",
+    }: {
+      skip?: number;
+      take?: number;
+      status?: TripStatus[];
+      vehicleId?: string;
+      driverId?: string;
+      sortBy?: TripSortColumn;
+      sortDir?: TripSortDir;
+    },
+    actor: Actor,
+  ): Promise<ListResult> {
     const safeSkip = Number.isFinite(skip) && skip >= 0 ? Math.floor(skip) : 0;
     const safeTakeRaw = Number.isFinite(take) ? Math.floor(take) : LIST_TAKE_DEFAULT;
     const safeTake = Math.min(Math.max(safeTakeRaw, LIST_TAKE_MIN), LIST_TAKE_MAX);
@@ -159,10 +173,18 @@ export class TripsService {
     // right UX for "trips for this vehicle" URLs that survive a
     // deleted vehicle (when soft-delete or block-when-referenced lands
     // per the tech-debt entry on cross-aggregate deletes).
+    // DRIVER own-record scope (ADR-0034 c4): resolve the acting driver's own
+    // Driver.id (null for ADMIN/OFFICE_STAFF; throws 403 for an unlinked driver).
+    const ownDriverId = await this.driverScope.resolveOwnDriverId(actor);
+
     const where: Prisma.TripWhereInput = {
       ...(status && status.length > 0 ? { status: { in: status } } : {}),
       ...(vehicleId ? { vehicleId } : {}),
       ...(driverId ? { driverId } : {}),
+      // A DRIVER sees ONLY their own trips. This spread is LAST so it overrides
+      // any client-supplied driverId — `?driverId=<someone-else>` cannot widen
+      // the view. For a non-DRIVER, ownDriverId is null → no restriction added.
+      ...(ownDriverId !== null ? { driverId: ownDriverId } : {}),
     };
 
     // Primary sort by the requested column + direction; secondary tie-
@@ -203,11 +225,22 @@ export class TripsService {
    * need to update both the service-level test and the controller-
    * level response type in the same commit.
    */
-  async findById(id: string): Promise<TripDetail | null> {
-    return this.prisma.trip.findUnique({
+  async findById(id: string, actor: Actor): Promise<TripDetail | null> {
+    const ownDriverId = await this.driverScope.resolveOwnDriverId(actor);
+    const trip = await this.prisma.trip.findUnique({
       where: { id },
       include: DETAIL_INCLUDE,
     });
+    if (!trip) {
+      return null;
+    }
+    // DRIVER own-record gate (ADR-0034 c4): a driver may read ONLY their own
+    // trip. Return null for a foreign trip so the controller renders 404 —
+    // existence of other drivers' trips is not disclosed (no 403-vs-404 oracle).
+    if (ownDriverId !== null && trip.driverId !== ownDriverId) {
+      return null;
+    }
+    return trip;
   }
 
   /**
@@ -245,7 +278,14 @@ export class TripsService {
    * vehicle was deleted between page load and submit gets a clear
    * error about the body shape, not a phantom conflict.
    */
-  async create(input: CreateTripInput, createdById: string): Promise<TripDetail> {
+  async create(input: CreateTripInput, createdById: string, actor: Actor): Promise<TripDetail> {
+    // DRIVER may not create trips (ADR-0034): the office assigns a driver +
+    // vehicle to a trip; a driver only transitions status via PATCH. 403 (a
+    // capability denial), not 404.
+    if (actor.role === UserRole.DRIVER) {
+      throw new ForbiddenException();
+    }
+
     const data: Prisma.TripUncheckedCreateInput = {
       vehicleId: input.vehicleId,
       driverId: input.driverId,
@@ -322,9 +362,19 @@ export class TripsService {
    * Returns the trip's DETAIL_INCLUDE shape so the controller can
    * respond with the same shape that GET /api/v1/trips/:id returns.
    */
-  async update(id: string, input: UpdateTripInput): Promise<TripDetail> {
+  async update(id: string, input: UpdateTripInput, actor: Actor): Promise<TripDetail> {
     const existing = await this.prisma.trip.findUnique({ where: { id } });
     if (!existing) {
+      throw new NotFoundException(`Trip "${id}" not found.`);
+    }
+
+    // DRIVER own-record gate (ADR-0034 c4): a driver may mutate ONLY their own
+    // trip. Resolved here — before the merged-shape build, the transition guard,
+    // and the $transaction + odometer bump below — so an owned start/stop runs
+    // the existing rules unchanged, and a foreign trip is rejected as 404
+    // (existence-hiding) before any write. Reuses the row fetched above.
+    const ownDriverId = await this.driverScope.resolveOwnDriverId(actor);
+    if (ownDriverId !== null && existing.driverId !== ownDriverId) {
       throw new NotFoundException(`Trip "${id}" not found.`);
     }
 
@@ -505,7 +555,13 @@ export class TripsService {
    *
    * Returns void on success; the controller responds 204 No Content.
    */
-  async delete(id: string): Promise<void> {
+  async delete(id: string, actor: Actor): Promise<void> {
+    // DRIVER may not delete trips (ADR-0034): hard delete of a trip is an
+    // operational action reserved for office/admin; a driver only starts/stops.
+    // 403 (a capability denial), not 404.
+    if (actor.role === UserRole.DRIVER) {
+      throw new ForbiddenException();
+    }
     try {
       await this.prisma.trip.delete({ where: { id } });
     } catch (error) {

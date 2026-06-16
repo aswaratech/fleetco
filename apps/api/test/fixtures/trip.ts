@@ -5,6 +5,7 @@ import {
   type Vehicle,
   type Driver,
   TripStatus,
+  type UserRole,
   VehicleKind,
   VehicleStatus,
   DriverStatus,
@@ -29,13 +30,16 @@ import {
  * parallel against a shared row by happenstance without colliding on
  * `user_email_key`.
  */
-export async function seedUser(prisma: PrismaClient): Promise<string> {
+export async function seedUser(prisma: PrismaClient, role?: UserRole): Promise<string> {
   const id = `user_${randomUUID()}`;
   await prisma.user.create({
     data: {
       id,
       email: `admin-${id}@fleetco.test`,
       name: "Test Admin",
+      // Default role (OFFICE_STAFF) unless a test needs a DRIVER / ADMIN user;
+      // the D2 own-record tests seed a DRIVER user linked to a Driver row.
+      ...(role ? { role } : {}),
     },
   });
   return id;
@@ -95,6 +99,10 @@ export async function seedDriver(
       licenseExpiresAt: overrides.licenseExpiresAt ?? new Date("2028-04-01"),
       status: overrides.status ?? DriverStatus.ACTIVE,
       terminatedAt: overrides.terminatedAt ?? null,
+      // The User↔Driver login link (ADR-0034 c4). Null by default; the D2
+      // own-record tests pass a DRIVER user's id here to link the two so a
+      // DRIVER actor resolves to this Driver row.
+      userId: overrides.userId ?? null,
       createdById,
     },
   });
