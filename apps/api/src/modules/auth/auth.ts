@@ -1,5 +1,6 @@
 import { betterAuth } from "better-auth";
 import { prismaAdapter } from "better-auth/adapters/prisma";
+import { bearer } from "better-auth/plugins";
 import type { PrismaClient } from "@prisma/client";
 
 import { env } from "../../config/env";
@@ -36,6 +37,15 @@ export function createAuth(prisma: PrismaClient) {
         },
       },
     },
+    // Bearer-token auth for the native driver client (ADR-0034 c1). ADDITIVE:
+    // the web's cookie/session flow is unchanged. The plugin returns the signed
+    // session token via the `set-auth-token` response header; the Expo client
+    // stores it (expo-secure-store) and sends `Authorization: Bearer <token>`.
+    // AuthGuard already resolves both cookie and bearer via
+    // getSession({ headers: fromNodeHeaders(...) }) — so no guard change. The
+    // `fleetco://` app scheme lives on the Expo CLIENT, not here in
+    // trustedOrigins (a pure-bearer request is not origin-checked, ADR-0034 c2).
+    plugins: [bearer()],
     secret: env.BETTER_AUTH_SECRET,
     baseURL: env.BETTER_AUTH_URL,
     basePath: "/auth",

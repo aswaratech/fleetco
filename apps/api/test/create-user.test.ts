@@ -13,8 +13,8 @@ import { resetDb } from "./db";
 //
 //   1. parseRoleArg — the PURE arg-parsing policy (no DB): an omitted role
 //      argument defaults to the least-privilege OFFICE_STAFF (c8); ADMIN is
-//      granted only when requested explicitly; DRIVER is reserved (c1) and
-//      rejected.
+//      granted only when requested explicitly; DRIVER is the driver-app login
+//      role (ADR-0034), also requested explicitly.
 //   2. createUser — the real create path against a real Postgres AND the real
 //      better-auth instance: the role is set by the privileged Prisma write
 //      AFTER signUpEmail (because `input: false` blocks role through the public
@@ -39,8 +39,8 @@ describe("parseRoleArg (pure role-argument policy)", () => {
     expect(parseRoleArg("OFFICE_STAFF")).toBe(UserRole.OFFICE_STAFF);
   });
 
-  test("DRIVER is rejected — reserved per ADR-0028 c1, assigned by the driver-app slice", () => {
-    expect(() => parseRoleArg("DRIVER")).toThrow(/reserved/);
+  test("DRIVER is accepted — the driver-app login role (ADR-0034)", () => {
+    expect(parseRoleArg("DRIVER")).toBe(UserRole.DRIVER);
   });
 
   test("an unknown role string is rejected", () => {
@@ -127,5 +127,20 @@ describe("createUser (integration, real Postgres + better-auth)", () => {
     expect(second.role).toBe(UserRole.ADMIN);
 
     expect(await prisma.user.count()).toBe(1);
+  });
+
+  test("creates a DRIVER login via the privileged write (the driver-app role, ADR-0034)", async () => {
+    const email = `driver-${randomUUID()}@fleetco.test`;
+    const result = await createUser(prisma, {
+      email,
+      password: "test-password-123",
+      role: UserRole.DRIVER,
+    });
+
+    expect(result.created).toBe(true);
+    expect(result.role).toBe(UserRole.DRIVER);
+
+    const user = await prisma.user.findUniqueOrThrow({ where: { email } });
+    expect(user.role).toBe(UserRole.DRIVER);
   });
 });

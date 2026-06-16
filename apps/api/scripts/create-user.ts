@@ -1,4 +1,4 @@
-// Idempotent office-staff / admin account creator (ADR-0028 commitment 8).
+// Idempotent office-staff / admin / driver account creator (ADR-0028 c8, ADR-0034).
 //
 // ADR-0028 makes `role` a better-auth `additionalFields` field with
 // `input: false`, so a role can NEVER be set through the public sign-up /
@@ -20,12 +20,15 @@
 //
 //   Usage (pass the password inline so it is not persisted to .env):
 //     CREATE_USER_PASSWORD='<temp password>' \
-//       pnpm --filter @fleetco/api exec tsx scripts/create-user.ts <email> [ADMIN|OFFICE_STAFF]
+//       pnpm --filter @fleetco/api exec tsx scripts/create-user.ts <email> [ADMIN|OFFICE_STAFF|DRIVER]
 //
 //   The role argument is OPTIONAL and defaults to OFFICE_STAFF — least
 //   privilege by default (c8). ADMIN is granted only by passing it explicitly.
-//   DRIVER is reserved (c1) and assigned by the driver-app slice, not here, so
-//   it is rejected.
+//   DRIVER is now accepted (ADR-0034, the driver-app auth slice): it creates the
+//   login identity a driver signs in with on the mobile app. DRIVER carries NO
+//   gated capabilities yet — it is inert until D2 grants its own-record-scoped
+//   permissions; linking the login to a Driver row (Driver.userId) is a separate
+//   step the row-scoping slice needs, not this script.
 //
 // Tier 1 (CREATE_USER_PASSWORD, BETTER_AUTH_SECRET) is never written to any log
 // channel. The created account's email (Tier 2) is echoed to stdout only so the
@@ -93,17 +96,22 @@ export async function createUser(
 }
 
 // Parse the optional positional role argument into a UserRole. Omitted -> the
-// least-privilege OFFICE_STAFF default (c8); ADMIN must be requested explicitly.
-// DRIVER is reserved (c1) and rejected here. Pure (no I/O) so the policy is
-// unit-testable without a database; main() lets a thrown error surface as a
-// usage message.
+// least-privilege OFFICE_STAFF default (c8); ADMIN and DRIVER must be requested
+// explicitly (DRIVER is the driver-app login role, ADR-0034). Pure (no I/O) so
+// the policy is unit-testable without a database; main() lets a thrown error
+// surface as a usage message.
 export function parseRoleArg(roleArg: string | undefined): UserRole {
   if (roleArg === undefined) return UserRole.OFFICE_STAFF;
-  if (roleArg === UserRole.ADMIN || roleArg === UserRole.OFFICE_STAFF) return roleArg;
+  if (
+    roleArg === UserRole.ADMIN ||
+    roleArg === UserRole.OFFICE_STAFF ||
+    roleArg === UserRole.DRIVER
+  ) {
+    return roleArg;
+  }
   throw new Error(
-    `Invalid role "${roleArg}". This script creates ADMIN or OFFICE_STAFF accounts; ` +
-      `omit the role argument for the least-privilege OFFICE_STAFF default. DRIVER is ` +
-      `reserved (ADR-0028 c1) and assigned by the driver-app slice, not here.`,
+    `Invalid role "${roleArg}". This script creates ADMIN, OFFICE_STAFF, or DRIVER ` +
+      `accounts; omit the role argument for the least-privilege OFFICE_STAFF default.`,
   );
 }
 
@@ -111,7 +119,7 @@ async function main(): Promise<void> {
   const email = process.argv[2];
   if (!email) {
     throw new Error(
-      "Usage: CREATE_USER_PASSWORD='<password>' tsx scripts/create-user.ts <email> [ADMIN|OFFICE_STAFF]",
+      "Usage: CREATE_USER_PASSWORD='<password>' tsx scripts/create-user.ts <email> [ADMIN|OFFICE_STAFF|DRIVER]",
     );
   }
   if (!env.CREATE_USER_PASSWORD) {
