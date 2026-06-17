@@ -1,0 +1,163 @@
+# FleetCo production app + data plane (ADR-0014).
+#
+# The five-service Compose project the production VPS runs behind Caddy: the
+# api + web app images (built and pushed to GHCR by CI — T3), Postgres (with
+# PostGIS), Redis, and the Caddy reverse proxy that terminates TLS and serves
+# everything same-origin (ADR-0014 §1–§3). It is driven by the deploy /
+# rollback / restore runbooks under docs/runbook/.
+#
+# Usage (on the box, from /opt/fleetco — see docs/runbook/deploy.md):
+#   export IMAGE_TAG=<sha>                                          # the version to run
+#   docker compose -f docker-compose.prod.yml pull                  # fetch images from GHCR
+#   docker compose -f docker-compose.prod.yml up -d postgres redis  # datastores first
+#   docker compose -f docker-compose.prod.yml run --rm api \
+#     pnpm --filter @fleetco/api exec prisma migrate deploy         # one-off: migrate
+#   docker compose -f docker-compose.prod.yml run --rm api \
+#     pnpm --filter @fleetco/api db:seed                            # one-off: seed admin
+#   docker compose -f docker-compose.prod.yml up -d                 # api, web, caddy
+#
+# The migrate + seed are one-off `run --rm api ...` tasks (the api image carries
+# the Prisma CLI + tsx + the seed sources — ADR-0014 §7 / §9, T1), NOT
+# long-running services, so they are intentionally absent below.
+#
+# Secrets come from a single root-owned, chmod 600, gitignored `.env` on the box
+# (ADR-0014 §4); see .env.production.example for the full required set and the
+# ADR-0013 data-tier annotations. Nothing secret is inlined here.
+
+name: fleetco
+
+services:
+  # --- API (NestJS) — reached only through Caddy; no host port. ---------------
+  api:
+    image: "ghcr.io/addressanup/fleetco-api:${IMAGE_TAG:?set IMAGE_TAG to the GHCR image tag (the commit SHA), e.g. export IMAGE_TAG=<sha>}"
+    restart: unless-stopped
+    # The on-box secret file (ADR-0014 §4). The api reads DATABASE_URL,
+    # REDIS_URL, BETTER_AUTH_SECRET/URL, CORS_ORIGIN, ADMIN_*, and the optional
+    # SENTRY_DSN / OTEL_EXPORTER_OTLP_ENDPOINT from it (apps/api/src/config/env.ts).
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # Readiness probe = the real /health/ready endpoint (DB + Redis up). Uses
+    # node's global fetch (Node 24) rather than curl/wget, which the slim base
+    # image does not carry. The api listens on PORT=3001 (baked into the image
+    # and the Caddyfile — do not override).
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3001/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # --- Web admin (Next.js standalone) — reached only through Caddy. -----------
+  web:
+    image: "ghcr.io/addressanup/fleetco-web:${IMAGE_TAG:?set IMAGE_TAG to the GHCR image tag (the commit SHA), e.g. export IMAGE_TAG=<sha>}"
+    restart: unless-stopped
+    # The web standalone server reads NEXT_PUBLIC_API_URL at runtime for its
+    # server-side fetches (apps/web/src/lib/api.ts, session.ts, auth-client.ts);
+    # the browser bundle's copy is inlined at image BUILD time (T3 build-arg).
+    # Both must equal the public origin (ADR-0014 §2 same-origin).
+    env_file:
+      - .env
+    depends_on:
+      api:
+        condition: service_healthy
+    # Liveness probe: any HTTP response from the standalone server means the
+    # process is up. The Next.js web image serves no /health/ready (that is an
+    # api route), so this hits its own /login. Port 3000 is baked into the image.
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/login').then(()=>process.exit(0)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # --- PostgreSQL + PostGIS ---------------------------------------------------
+  postgres:
+    # ADR-0014 §1: the production image is postgis/postgis:16-3.5 — the SAME
+    # image CI uses, published amd64-only. If the VPS is ARM/Ampere this image
+    # will not run and the baseline migration's CREATE EXTENSION postgis fails;
+    # pick an amd64/x86 instance, or substitute the multi-arch imresamu/postgis
+    # mirror the local docker-compose.yml uses (see docs/runbook/deploy.md
+    # Bootstrap step 1 + the PostGIS note in .github/workflows/ci.yml).
+    image: postgis/postgis:16-3.5
+    restart: unless-stopped
+    # Discrete credentials for the postgres entrypoint's first-run init. They
+    # must agree with the user/password/database embedded in the api's
+    # DATABASE_URL (see .env.production.example). Postgres gets only these — not
+    # the whole secret file — so app secrets never enter this container.
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:?set POSTGRES_USER (must match DATABASE_URL)}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD (must match DATABASE_URL)}"
+      POSTGRES_DB: "${POSTGRES_DB:?set POSTGRES_DB (must match DATABASE_URL)}"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # $$ escapes interpolation so the shell inside the container expands the
+    # container's own POSTGRES_USER/DB (mirrors the dev compose pg_isready check).
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- Redis ------------------------------------------------------------------
+  redis:
+    # ADR-0014 §1: plain Redis 7, matching dev. Used by /health/ready and the
+    # BullMQ queues (GPS ingest + retention). Default RDB persistence to the
+    # named volume; AOF is the durability hardening path if queue loss on
+    # restart becomes a concern.
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- Caddy reverse proxy + automatic TLS ------------------------------------
+  caddy:
+    # ADR-0014 §2–§3: terminates Let's Encrypt TLS for $PUBLIC_DOMAIN, serves
+    # the web app, and reverse-proxies /api/* /auth/* /health* to the api. The
+    # routing split lives in ./Caddyfile; PUBLIC_DOMAIN is read there via Caddy's
+    # {$PUBLIC_DOMAIN} env substitution, so it must be present in this container.
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - api
+      - web
+    environment:
+      PUBLIC_DOMAIN: "${PUBLIC_DOMAIN:?set PUBLIC_DOMAIN to the public hostname, e.g. app.fleetco.example}"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # caddy_data persists the ACME account + issued certificates across
+      # restarts — without it Caddy re-requests certs every boot and hits
+      # Let's Encrypt rate limits (ADR-0014 §3 "zero manual certificate management").
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  postgres_data:
+  redis_data:
+  caddy_data:
+  caddy_config:
