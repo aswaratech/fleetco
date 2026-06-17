@@ -24,7 +24,7 @@
 # On-box fallback (per docs/runbook/deploy.md) when /health* is NOT publicly
 # proxied — probe the api container directly instead of running this script:
 #   docker compose -f docker-compose.prod.yml exec api \
-#     node -e "fetch('http://localhost:3001/health/ready').then(r=>r.text()).then(console.log)"
+#     node -e "fetch('http://127.0.0.1:3001/health/ready').then(r=>r.text()).then(console.log)"
 # (the runbook shows a curl/wget form; the slim api image ships neither, so
 # node's global fetch is the on-box tool — the same probe the compose
 # healthcheck uses in docker-compose.prod.yml.)
