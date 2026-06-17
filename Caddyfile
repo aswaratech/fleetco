@@ -1,0 +1,33 @@
+# FleetCo production reverse proxy (ADR-0014 §2–§3).
+#
+# Mounted read-only into the caddy service (see docker-compose.prod.yml).
+# Caddy terminates TLS for the single public hostname and serves FleetCo
+# same-origin: the API owns /api/*, /auth/*, and /health*; the Next.js web
+# admin serves everything else. Serving both under one origin is what makes
+# the session cookie first-party and CORS trivial (ADR-0014 §2).
+#
+# $PUBLIC_DOMAIN is supplied by the container environment (compose passes it
+# from the on-box .env). It is intentionally not defaulted, so a missing value
+# fails loudly at boot rather than silently serving on the wrong host.
+
+{$PUBLIC_DOMAIN} {
+	# Automatic HTTPS via Let's Encrypt (ADR-0014 §3): Caddy provisions and
+	# renews the certificate for $PUBLIC_DOMAIN with no manual steps. The ACME
+	# account + certs persist in the caddy_data volume. The box must be
+	# reachable on ports 80 + 443 for the ACME challenge to succeed.
+
+	encode zstd gzip
+
+	# Same-origin split (ADR-0014 §2). better-auth is mounted at /auth/{*splat}
+	# and the health probes live at the root (/health, /health/ready), both
+	# outside the Next.js app — so all three prefixes route to the api.
+	@api path /api/* /auth/* /health*
+	handle @api {
+		reverse_proxy api:3001
+	}
+
+	# Everything else is the Next.js web admin.
+	handle {
+		reverse_proxy web:3000
+	}
+}
