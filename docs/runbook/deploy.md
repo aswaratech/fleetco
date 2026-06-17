@@ -83,7 +83,7 @@ bash deploy/smoke.sh https://<domain>
 
 - **Preferred (one shot):** `bash deploy/smoke.sh https://<domain>` — the committed script curls `/health` + `/health/ready` through Caddy and exits non-zero the moment either fails (the same check the `deploy` workflow runs automatically after `up -d`). The manual breakdown:
 - Liveness: `curl -fsS https://<domain>/health` → `{"ok":true}`.
-- Readiness: `curl -fsS https://<domain>/health/ready` → `{"ok":true,"db":"up","redis":"up"}` (503 if DB or Redis is down). On-box alternative if `/health*` is not publicly proxied — the slim `api` image ships neither curl nor wget, so use node's global fetch (the same probe the compose healthcheck uses): `docker compose -f docker-compose.prod.yml exec api node -e "fetch('http://localhost:3001/health/ready').then(r=>r.text()).then(console.log)"`.
+- Readiness: `curl -fsS https://<domain>/health/ready` → `{"ok":true,"db":"up","redis":"up"}` (503 if DB or Redis is down). On-box alternative if `/health*` is not publicly proxied — the slim `api` image ships neither curl nor wget, so use node's global fetch (the same probe the compose healthcheck uses): `docker compose -f docker-compose.prod.yml exec api node -e "fetch('http://127.0.0.1:3001/health/ready').then(r=>r.text()).then(console.log)"`.
 - Log in as the admin and load one list page (e.g. Vehicles) — exercises web → API → DB end-to-end.
 - Record the deploy in `docs/operations/dora-metrics.md` (deployment frequency + lead time).
 
