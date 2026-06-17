@@ -28,7 +28,7 @@ Pin these versions to match `package.json` `engines` and the CI image (Ticket 11
 
 ```bash
 # 1. Clone the repository.
-git clone git@github.com:addressanup/fleetco.git
+git clone git@github.com:aswaratech/fleetco.git
 cd fleetco
 
 # 2. Install dependencies.

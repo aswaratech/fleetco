@@ -199,7 +199,7 @@ jobs:
     # tagged by the commit SHA. This makes docs/runbook/deploy.md's routine-deploy
     # step 1 ("Confirm CI built the target <sha> images to GHCR") real and gives
     # the T2 docker-compose.prod.yml something to pull
-    # (ghcr.io/addressanup/fleetco-{api,web}:${IMAGE_TAG}). It also lands the one
+    # (ghcr.io/<owner>/fleetco-{api,web}:${IMAGE_TAG}). It also lands the one
     # ADR-0012 security-baseline item still deferred — component 5, the CycloneDX
     # SBOM (see the now-updated note in .github/workflows/security.yml).
     #
@@ -231,7 +231,7 @@ jobs:
     env:
       DOCKER_BUILDKIT: "1"
       APP: ${{ matrix.app }}
-      IMAGE: ghcr.io/addressanup/fleetco-${{ matrix.app }}
+      IMAGE: ghcr.io/${{ github.repository_owner }}/fleetco-${{ matrix.app }}
       TAG: ${{ github.sha }}
     steps:
       - name: Checkout
@@ -270,7 +270,7 @@ jobs:
         # the SBOM is uploaded via the SHA-pinned actions/upload-artifact step.
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
-          image: ghcr.io/addressanup/fleetco-${{ matrix.app }}:${{ github.sha }}
+          image: ghcr.io/${{ github.repository_owner }}/fleetco-${{ matrix.app }}:${{ github.sha }}
           format: cyclonedx-json
           output-file: sbom-${{ matrix.app }}.cdx.json
           upload-artifact: false

@@ -29,7 +29,7 @@ name: fleetco
 services:
   # --- API (NestJS) — reached only through Caddy; no host port. ---------------
   api:
-    image: "ghcr.io/addressanup/fleetco-api:${IMAGE_TAG:?set IMAGE_TAG to the GHCR image tag (the commit SHA), e.g. export IMAGE_TAG=<sha>}"
+    image: "ghcr.io/aswaratech/fleetco-api:${IMAGE_TAG:?set IMAGE_TAG to the GHCR image tag (the commit SHA), e.g. export IMAGE_TAG=<sha>}"
     restart: unless-stopped
     # The on-box secret file (ADR-0014 §4). The api reads DATABASE_URL,
     # REDIS_URL, BETTER_AUTH_SECRET/URL, CORS_ORIGIN, ADMIN_*, and the optional
@@ -60,7 +60,7 @@ services:
 
   # --- Web admin (Next.js standalone) — reached only through Caddy. -----------
   web:
-    image: "ghcr.io/addressanup/fleetco-web:${IMAGE_TAG:?set IMAGE_TAG to the GHCR image tag (the commit SHA), e.g. export IMAGE_TAG=<sha>}"
+    image: "ghcr.io/aswaratech/fleetco-web:${IMAGE_TAG:?set IMAGE_TAG to the GHCR image tag (the commit SHA), e.g. export IMAGE_TAG=<sha>}"
     restart: unless-stopped
     # The web standalone server reads NEXT_PUBLIC_API_URL at runtime for its
     # server-side fetches (apps/web/src/lib/api.ts, session.ts, auth-client.ts);

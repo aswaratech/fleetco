@@ -4,7 +4,7 @@
 
 ## When this procedure applies
 
-A deploy made production worse — a Sentry error spike, `/health/ready` failing, a core operation (trip creation, fuel/expense logging) broken or producing wrong data, or any SEV1/SEV2 (ADR-0011) traced to the latest deploy. Use this to return to the last-known-good version fast and diagnose afterward. Because images are SHA-tagged in GHCR (CI's `push-images` job publishes `ghcr.io/addressanup/fleetco-api:<sha>` + `…-web:<sha>` on every merge to `main`), rollback is **redeploying the previous tag — no rebuild**: point `docker-compose.prod.yml`'s `${IMAGE_TAG}` at the prior good SHA and `pull` + `up -d` (ADR-0014 §8).
+A deploy made production worse — a Sentry error spike, `/health/ready` failing, a core operation (trip creation, fuel/expense logging) broken or producing wrong data, or any SEV1/SEV2 (ADR-0011) traced to the latest deploy. Use this to return to the last-known-good version fast and diagnose afterward. Because images are SHA-tagged in GHCR (CI's `push-images` job publishes `ghcr.io/aswaratech/fleetco-api:<sha>` + `…-web:<sha>` on every merge to `main`), rollback is **redeploying the previous tag — no rebuild**: point `docker-compose.prod.yml`'s `${IMAGE_TAG}` at the prior good SHA and `pull` + `up -d` (ADR-0014 §8).
 
 Placeholders: `<vps-host>`, `<domain>`, `<good-sha>` (previous known-good image tag), `<bad-sha>` (the tag being backed out).
 
