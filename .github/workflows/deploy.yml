@@ -1,0 +1,136 @@
+name: deploy
+
+# Operator-dispatched production deploy (ADR-0014 §7–§8; docs/runbook/deploy.md
+# "Routine deploy"). This is workflow_dispatch ONLY — it never runs on push or
+# pull_request, so it cannot auto-run, cannot break main-green, and cannot block
+# any PR check. A real run is operator-initiated and needs the operator-
+# provisioned secrets + a live VPS referenced below (OUT of scope for the
+# deploy-prep program — this workflow references those secrets, never invents
+# them, and the loop never runs it).
+#
+# It consumes the :<sha> images CI pushes to GHCR on merge to main (ci.yml's
+# push-images job, ADR-0014 §7) and runs the exact routine-deploy sequence
+# docs/runbook/deploy.md + docker-compose.prod.yml document:
+#   export IMAGE_TAG=<sha>
+#   docker compose -f docker-compose.prod.yml pull
+#   docker compose -f docker-compose.prod.yml run --rm api \
+#     pnpm --filter @fleetco/api exec prisma migrate deploy
+#   docker compose -f docker-compose.prod.yml up -d
+# then smoke-checks the public origin (deploy/smoke.sh).
+#
+# Rollback is the SAME workflow re-dispatched with the previous good <sha>
+# (ADR-0014 §8 — rollback by previous image tag), which is why the input is a
+# commit SHA. Migrations are forward-only: a schema-breaking bad deploy escalates
+# to docs/runbook/restore-from-backup.md, not a tag rollback (deploy.md "What can
+# go wrong").
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Commit SHA to deploy — the GHCR image tag from a green main build. Re-dispatch with a previous good SHA to roll back (ADR-0014 §8)."
+        required: true
+        type: string
+
+# Minimum scope: this workflow only reads the repo (for deploy/smoke.sh and the
+# compose-file paths it references). It pushes nothing and needs no packages
+# scope — that lives in ci.yml's push-images job.
+permissions:
+  contents: read
+
+# Never let two production deploys overlap (e.g. a double-dispatch): a second run
+# queues behind the first rather than racing it. cancel-in-progress is false so an
+# in-flight `prisma migrate deploy` is never interrupted mid-apply.
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: deploy <sha> to the production VPS
+    runs-on: ubuntu-latest
+    # The `production` GitHub Environment is where the operator stores the
+    # DEPLOY_* secrets + PUBLIC_DOMAIN variable and can attach a required-reviewer
+    # protection rule so a production deploy needs an approval click. The names
+    # below are referenced, never invented — the operator provisions them
+    # (ADR-0014 §4, §7). GitHub creates the environment on first use.
+    environment: production
+    steps:
+      - name: Checkout
+        # SHA-pinned per ADR-0012 component 4 (same pin as ci.yml). Needed so
+        # deploy/smoke.sh is on the runner for the final step.
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Validate the sha input
+        env:
+          INPUT_SHA: ${{ inputs.sha }}
+        run: |
+          # The sha becomes the GHCR image tag AND is interpolated into the remote
+          # command, so pin it to a hex commit SHA (7-40 lowercase hex). This both
+          # enforces the ADR-0014 §8 "deploy a built commit" contract and removes
+          # any shell-injection surface from the dispatch input.
+          if ! printf '%s' "${INPUT_SHA}" | grep -Eq '^[0-9a-f]{7,40}$'; then
+            echo "::error::sha input '${INPUT_SHA}' is not a hex commit SHA (7-40 lowercase hex chars)."
+            exit 1
+          fi
+          echo "Deploying commit ${INPUT_SHA}."
+
+      - name: Deploy to the production VPS over SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          IMAGE_TAG: ${{ inputs.sha }}
+        run: |
+          # All of these are operator-provisioned (ADR-0014 §4). Fail loudly if any
+          # is missing rather than attempting a half-configured SSH.
+          : "${DEPLOY_HOST:?DEPLOY_HOST secret is not set}"
+          : "${DEPLOY_USER:?DEPLOY_USER secret is not set}"
+          : "${DEPLOY_SSH_KEY:?DEPLOY_SSH_KEY secret is not set}"
+          : "${IMAGE_TAG:?IMAGE_TAG (the sha input) is empty}"
+
+          # Write the deploy key to a locked-down temp file and shred it on exit
+          # (success or failure) so it never lingers on the runner. Action-light:
+          # raw ssh + a key file, no third-party SSH action (matches T1-T3 and the
+          # ticket's "raw ssh ... is equally acceptable and more action-light").
+          key_file="$(mktemp)"
+          chmod 600 "${key_file}"
+          cleanup() { shred -u "${key_file}" 2>/dev/null || rm -f "${key_file}"; }
+          trap cleanup EXIT
+          printf '%s\n' "${DEPLOY_SSH_KEY}" > "${key_file}"
+
+          # Run the routine-deploy sequence on the box, in /opt/fleetco, exactly as
+          # docs/runbook/deploy.md "Routine deploy" + docker-compose.prod.yml's
+          # header document it. The heredoc is single-quoted (sent verbatim); the
+          # validated IMAGE_TAG is exported into the remote shell via the command
+          # prefix, so docker compose interpolates it. `-T` + </dev/null keep
+          # `docker compose run` from grabbing the heredoc stdin or trying to
+          # allocate a TTY in this non-interactive session.
+          ssh \
+            -i "${key_file}" \
+            -o StrictHostKeyChecking=accept-new \
+            -o ConnectTimeout=20 \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "IMAGE_TAG='${IMAGE_TAG}' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd /opt/fleetco
+          echo "deploy: IMAGE_TAG=${IMAGE_TAG} — pulling images from GHCR ..."
+          docker compose -f docker-compose.prod.yml pull </dev/null
+          echo "deploy: applying migrations (idempotent; no-op when none are new) ..."
+          docker compose -f docker-compose.prod.yml run --rm -T api \
+            pnpm --filter @fleetco/api exec prisma migrate deploy </dev/null
+          echo "deploy: recreating api + web at IMAGE_TAG=${IMAGE_TAG} ..."
+          docker compose -f docker-compose.prod.yml up -d </dev/null
+          echo "deploy: compose up complete."
+          REMOTE
+
+      - name: Smoke-check the public origin
+        env:
+          PUBLIC_DOMAIN: ${{ vars.PUBLIC_DOMAIN }}
+        run: |
+          : "${PUBLIC_DOMAIN:?PUBLIC_DOMAIN repo/environment variable is not set}"
+          # deploy/smoke.sh curls /health + /health/ready through Caddy and exits
+          # non-zero on any failure (a 503 readiness fails the deploy) — the same
+          # check the runbook has the operator run by hand. A failure here means
+          # the new version is up but unhealthy: see docs/runbook/rollback.md.
+          bash deploy/smoke.sh "https://${PUBLIC_DOMAIN}"

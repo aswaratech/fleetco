@@ -349,3 +349,14 @@ jobs:
             -e PUBLIC_DOMAIN=app.fleetco.example \
             caddy:2-alpine \
             caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
+      - name: Shellcheck deploy scripts
+        # ADR-0014 §7 (T4): the committed deploy/*.sh helpers (smoke.sh today) are
+        # shell, never exercised by the TypeScript suites, so a broken one must red
+        # the PR — this is what makes the green-before-merge gate meaningful for
+        # them. shellcheck is preinstalled on ubuntu-latest; no third-party action,
+        # no secret. The deploy workflow itself (.github/workflows/deploy.yml) is
+        # workflow_dispatch-only and needs a live VPS + operator-provisioned secrets
+        # to run, so it is validated to actionlint/lint level (a real deploy cannot
+        # be exercised in CI — that is expected and documented in docs/runbook/deploy.md).
+        run: shellcheck deploy/*.sh
