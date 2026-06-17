@@ -9,6 +9,51 @@
 
 Placeholders below — replace with real values, never commit them: `<vps-host>` (IP or DNS of the box), `<domain>` (the single public origin, e.g. `app.fleetco.example`), `<sha>` (image tag), `<r2-bucket>` (backup bucket). The production artifacts this procedure drives are now committed on `main`: the image Dockerfiles `apps/api/Dockerfile` + `apps/web/Dockerfile` (the latter built on Next.js `output: 'standalone'`), `docker-compose.prod.yml` + `Caddyfile` + `.env.production.example` at the repo root, the operator-dispatched `deploy` workflow at `.github/workflows/deploy.yml`, and the `deploy/smoke.sh` health check. CI (`.github/workflows/ci.yml`) builds both images on every PR (the `build-images` job) and, on merge to `main`, pushes `ghcr.io/addressanup/fleetco-api:<sha>` + `ghcr.io/addressanup/fleetco-web:<sha>` to GHCR with a CycloneDX SBOM per image (the `push-images` job). This procedure describes how they are used; it stays `DRAFT` because no real deploy has executed it end-to-end yet, not because any artifact is missing.
 
+## First production deploy — operator checklist
+
+> The one-time bootstrap sequence for standing production up for the first time, in the order ADR-0014 implies. This is **`STATUS: DRAFT`** like the rest of this file — no one has run it end-to-end yet. Work top to bottom. Every step marked **(operator-only)** needs a real secret, key, or piece of infrastructure that is deliberately **out of scope** for the agent-driven deploy-prep program: provision it yourself, reference (never invent) every value, and never commit any secret it produces (CLAUDE.md, ADR-0013). The committed artifacts referenced here (`apps/api/Dockerfile`, `apps/web/Dockerfile`, `docker-compose.prod.yml`, `Caddyfile`, `.env.production.example`, `deploy/*.sh`, and the CI + deploy workflows) all exist on `main`; this checklist wires them together on the box. The detailed reference for each step is in §Procedure below.
+
+- [ ] **1. Provision the VPS** **(operator-only)** — a 2–4 GB instance (Hetzner/DigitalOcean/Linode) with provider disk encryption on. Pick an **amd64/x86** instance: ADR-0014's `postgis/postgis:16-3.5` image is published amd64-only (see §Bootstrap step 1 and the PostGIS note in `.github/workflows/ci.yml`).
+- [ ] **2. Point DNS at the box** **(operator-only)** — an A/AAAA record for `<domain>` (the `PUBLIC_DOMAIN` value) → `<vps-host>`. Caddy needs the box reachable on ports 80 + 443 for the Let's-Encrypt ACME challenge.
+- [ ] **3. Install Docker Engine + the Compose plugin** on the box.
+- [ ] **4. Create `/opt/fleetco/` and place the deploy artifacts there** — copy the repo's `docker-compose.prod.yml`, `Caddyfile`, and the whole `deploy/` directory (`smoke.sh`, `backup.sh`, `restore.sh`) into `/opt/fleetco/`, so `/opt/fleetco/deploy/backup.sh` exists for the cron in step 14.
+- [ ] **5. Create and fill `/opt/fleetco/.env` from the template** **(operator-only — secrets)** — `cp .env.production.example /opt/fleetco/.env`, then `chown root:root` + `chmod 600` it and replace **every** placeholder: the strong `POSTGRES_PASSWORD` (kept in sync inside `DATABASE_URL`), `BETTER_AUTH_SECRET` (`openssl rand -hex 32`), the `ADMIN_EMAIL` / `ADMIN_PASSWORD` seed pair, `PUBLIC_DOMAIN`, and the `https://<domain>` URLs (`BETTER_AUTH_URL` / `CORS_ORIGIN` / `NEXT_PUBLIC_API_URL`). `.env` is never committed (ADR-0014 §4). See §Bootstrap step 4.
+- [ ] **6. Generate the `age` backup keypair + create `/opt/fleetco/deploy/backup.env`** **(operator-only — secrets)** — `age-keygen` produces the recipient public key + the identity private key; store the identity per `business-continuity.md` (it is the single most catastrophic thing to lose — without it every backup is unrecoverable). Create the root-owned, `chmod 600`, gitignored `/opt/fleetco/deploy/backup.env` with `DB_USER` / `DB_NAME` / `AGE_RECIPIENT` / `R2_REMOTE` / `R2_BUCKET` (and `AGE_KEY` for restore), and configure the rclone R2 remote, per `restore-from-backup.md` → "Backup (the create side)".
+- [ ] **7. Confirm the target `<sha>` images are in GHCR** — CI's `push-images` job published `ghcr.io/addressanup/fleetco-api:<sha>` + `…-web:<sha>` on the merge-to-`main` run (check the GHCR package tag list). If the packages are private, `docker login ghcr.io` on the box first (§Bootstrap step 2) **(operator-only — PAT)**.
+
+Then run the bring-up on the box (`cd /opt/fleetco`):
+
+```
+# 8. Pin the version to deploy (the SHA confirmed in step 7).
+export IMAGE_TAG=<sha>
+
+# 9. Start the datastores first; wait for postgres healthy.
+docker compose -f docker-compose.prod.yml up -d postgres redis
+docker compose -f docker-compose.prod.yml ps          # postgres should read (healthy)
+
+# 10. Apply migrations (idempotent; no-op when none are new).
+docker compose -f docker-compose.prod.yml run --rm api \
+  pnpm --filter @fleetco/api exec prisma migrate deploy
+
+# 11. Seed the first admin once (reads ADMIN_EMAIL / ADMIN_PASSWORD from .env).
+docker compose -f docker-compose.prod.yml run --rm api \
+  pnpm --filter @fleetco/api db:seed
+
+# 12. Bring up api, web, caddy.
+docker compose -f docker-compose.prod.yml up -d
+
+# 13. Smoke-check the public origin (curls /health + /health/ready through Caddy).
+bash deploy/smoke.sh https://<domain>
+```
+
+- [ ] **14. Install the nightly backup cron** — add the committed cron line (NPT ≈ 00:00) so `deploy/backup.sh` runs nightly, then run it by hand once and confirm a non-empty `<backup-object>` lands in `<r2-bucket>` (an untested backup does not exist — `restore-from-backup.md`):
+  ```
+  15 18 * * * /opt/fleetco/deploy/backup.sh >> /opt/fleetco/backup.log 2>&1
+  ```
+- [ ] **15. Schedule the restore-from-backup drill within two weeks** **(operator-only)** — the roadmap requires the first restore test within two weeks of this deploy. Run `deploy/restore.sh --list` then `deploy/restore.sh <backup-object>` per `restore-from-backup.md`, measure the actual RPO/RTO, and only then promote the three deploy runbooks from `STATUS: DRAFT` to `STATUS: ACTIVE`.
+
+**After this checklist passes end-to-end:** record the deploy in `docs/operations/dora-metrics.md` (deployment frequency + lead time), and flip the `STATUS` + "Last verified" lines in `deploy.md`, `rollback.md`, and `restore-from-backup.md` to `ACTIVE` with the real date. Until then all three stay `DRAFT`.
+
 ## Procedure
 
 ### Bootstrap (one-time, by hand on the box)
