@@ -161,3 +161,32 @@ jobs:
       - name: Test (jest-expo)
         working-directory: apps-mobile/driver
         run: pnpm test
+
+  build-images:
+    name: docker build — ${{ matrix.app }} (no push)
+    runs-on: ubuntu-latest
+    # ADR-0014 §7: build the production api + web images on every PR so a broken
+    # Dockerfile reds the PR. The existing ci/mobile jobs run the TypeScript
+    # suites and never exercise the Dockerfiles, compose, or shell — this job is
+    # what makes the green-before-merge gate meaningful for those non-TS
+    # artifacts (the api Dockerfile in particular carries the migrate + seed
+    # tooling the deploy runbook assumes).
+    #
+    # T1 builds ONLY — no registry push. The GHCR push + CycloneDX SBOM
+    # (ADR-0012 component 5) land in T3. Plain `docker build` with BuildKit
+    # (preinstalled on the runner) keeps this job free of any unpinned
+    # third-party action (ADR-0012 component 4 — action SHA pinning); only the
+    # already-SHA-pinned actions/checkout runs here. Each image builds with the
+    # repo root as context (the apps are pnpm-workspace members).
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [api, web]
+    env:
+      DOCKER_BUILDKIT: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Build ${{ matrix.app }} image
+        run: docker build -f apps/${{ matrix.app }}/Dockerfile -t fleetco-${{ matrix.app }}:${{ github.sha }} .

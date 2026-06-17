@@ -1,0 +1,51 @@
+# Docker build-context excludes for the production api + web images
+# (ADR-0014 §7). Both Dockerfiles build with the repo root as context, so this
+# single file governs both. The goal: ship only source + manifests into the
+# build, never host-side installs, build outputs, or secrets.
+
+# Git metadata
+.git
+.gitignore
+.gitattributes
+
+# Dependencies — reinstalled inside the image from the committed lockfile
+**/node_modules
+
+# Build outputs — rebuilt inside the image
+**/dist
+**/build
+**/out
+**/.next
+**/.turbo
+**/*.tsbuildinfo
+
+# Secrets / environment files — NEVER copy into an image (ADR-0013 Tier 1/2).
+# The committed `*.example` templates are safe and re-included below.
+**/.env
+**/.env.*
+!**/*.example
+
+# Test / coverage / logs / caches
+**/coverage
+**/*.log
+**/.DS_Store
+**/.vscode
+**/.idea
+
+# The driver mobile app is a standalone Expo project (ADR-0033), not part of
+# the api/web server images.
+apps-mobile
+
+# Operator orchestration-loop runtime (scripts/orchestration/) — not shipped.
+scripts/orchestration/state.json
+scripts/orchestration/logs
+scripts/orchestration/decisions.log
+scripts/orchestration/.stop
+scripts/orchestration/.env
+scripts/orchestration/dist
+scripts/orchestration/node_modules
+
+# Docker + CI files themselves do not belong inside the image
+**/Dockerfile
+.dockerignore
+.github
