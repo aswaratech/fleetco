@@ -183,7 +183,21 @@ app sends no `driverId` filter. To see actionable trips:
 3. Sign in on the phone → the screen lists that driver's PLANNED / IN_PROGRESS trips.
    Enter an odometer reading and tap **Start trip** (→ IN_PROGRESS) / **End trip**
    (→ COMPLETED). A trip that is not the driver's 404s; an unlinked DRIVER session is
-   denied (403). The fuel / odometer **entry** screen is D3.
+   denied (403).
+
+**D3 — fuel / odometer entry.** The signed-in screen now carries a **Trips / Log fuel**
+toggle. On **Log fuel** the driver picks one of their own trips (the same own-scoped
+list), enters **liters** + **price per liter** (and an optional **odometer** reading),
+sees the **total** preview, and taps **Log fuel** → `POST /api/v1/fuel-logs` against
+that trip (the vehicle is derived from the trip, so it always matches). To exercise it,
+reuse the D2 setup (a linked DRIVER with an own trip):
+
+1. Sign in on the phone, tap **Log fuel**, and pick the trip.
+2. Enter e.g. `12.5` liters @ `145.50` NPR/L (odometer optional) → the preview shows
+   **NPR 1818.75** → tap **Log fuel**.
+3. Confirm the row appears in the web admin **/fuel-logs** list with `Total` =
+   NPR 1818.75 (= liters × price, derived server-side). A driver fuel log must carry one
+   of their own trips — a tripless driver log is rejected (400), a foreign trip 404s.
 
 ## What can go wrong
 
