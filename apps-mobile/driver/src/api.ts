@@ -1,4 +1,5 @@
 import { authClient } from "./auth";
+import type { FuelLogPayload } from "./fuel";
 import type { DriverTrip, TripStartPayload, TripStopPayload } from "./trips";
 
 // The FleetCo API base URL — the same env the auth client reads (auth.ts), so a
@@ -63,4 +64,12 @@ export async function patchTrip(
   body: TripStartPayload | TripStopPayload,
 ): Promise<DriverTrip> {
   return apiFetch<DriverTrip>(`/api/v1/trips/${id}`, { method: "PATCH", body });
+}
+
+// Log a fuel fill against one of the driver's own trips (ADR-0034 D2 own-record
+// scope). The server derives totalCostPaisa + createdById and enforces that the
+// trip is the driver's own (tripless → 400, foreign trip → 404). We only need the
+// new row's id back. Reuses apiFetch, so the session cookie is attached as usual.
+export async function createFuelLog(body: FuelLogPayload): Promise<{ id: string }> {
+  return apiFetch<{ id: string }>("/api/v1/fuel-logs", { method: "POST", body });
 }

@@ -4,14 +4,17 @@ import {
   ActivityIndicator,
   Button,
   FlatList,
+  Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from "react-native";
 
-import { listMyTrips, patchTrip } from "./src/api";
+import { createFuelLog, listMyTrips, patchTrip } from "./src/api";
 import { authClient } from "./src/auth";
+import { fuelLogPayload, previewTotalCostPaisa } from "./src/fuel";
 import {
   isStartable,
   isStoppable,
@@ -20,11 +23,11 @@ import {
   type DriverTrip,
 } from "./src/trips";
 
-// D2 (ADR-0034): a driver authenticates, then starts/stops their OWN trips. When
-// unauthenticated, show the login form (D1); once signed in, show the trip
-// screen. The trip list is auto-scoped to the signed-in driver server-side, and
-// start/stop reuse PATCH /trips/:id with the own-record predicate. Fuel/odometer
-// entry and GPS arrive in D3+.
+// D3 (ADR-0034): a signed-in driver works across two screens — start/stop their
+// OWN trips (D2) and log a fuel fill + odometer reading against one of those trips
+// (D3). A lightweight in-app toggle switches between them (no navigation library
+// yet — the app stays a single conditional tree). When unauthenticated, show the
+// login form (D1). Fuel/odometer entry lands here; GPS arrives in D4+.
 export default function App() {
   const { data: session, isPending } = authClient.useSession();
 
@@ -32,7 +35,7 @@ export default function App() {
   if (isPending) {
     body = <ActivityIndicator accessibilityLabel="Loading" />;
   } else if (session) {
-    body = <TripScreen email={session.user.email} role={session.user.role} />;
+    body = <HomeScreen email={session.user.email} role={session.user.role} />;
   } else {
     body = <LoginForm />;
   }
@@ -45,7 +48,41 @@ export default function App() {
   );
 }
 
-function TripScreen({ email, role }: { email: string; role?: string | null }) {
+// The signed-in shell: a shared header, a Trips / Log fuel toggle, the active
+// screen, and sign-out. The toggle is a two-button segmented control; there is no
+// navigation library yet, so the app stays a single conditional tree.
+function HomeScreen({ email, role }: { email: string; role?: string | null }) {
+  const [screen, setScreen] = useState<"trips" | "fuel">("trips");
+
+  return (
+    <View style={styles.screen}>
+      <Text style={styles.title}>FleetCo Driver</Text>
+      <Text style={styles.email}>{email}</Text>
+      <Text style={styles.role}>{role ?? "—"}</Text>
+
+      <View style={styles.tabs}>
+        <Pressable
+          style={[styles.tab, screen === "trips" && styles.tabActive]}
+          onPress={() => setScreen("trips")}
+        >
+          <Text style={[styles.tabText, screen === "trips" && styles.tabTextActive]}>Trips</Text>
+        </Pressable>
+        <Pressable
+          style={[styles.tab, screen === "fuel" && styles.tabActive]}
+          onPress={() => setScreen("fuel")}
+        >
+          <Text style={[styles.tabText, screen === "fuel" && styles.tabTextActive]}>Log fuel</Text>
+        </Pressable>
+      </View>
+
+      {screen === "trips" ? <TripScreen /> : <FuelScreen />}
+
+      <Button title="Sign out" onPress={() => void authClient.signOut()} />
+    </View>
+  );
+}
+
+function TripScreen() {
   const [trips, setTrips] = useState<DriverTrip[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -94,10 +131,7 @@ function TripScreen({ email, role }: { email: string; role?: string | null }) {
   );
 
   return (
-    <View style={styles.screen}>
-      <Text style={styles.title}>FleetCo Driver</Text>
-      <Text style={styles.email}>{email}</Text>
-      <Text style={styles.role}>{role ?? "—"}</Text>
+    <View style={styles.subScreen}>
       {error ? <Text style={styles.error}>{error}</Text> : null}
 
       {trips === null ? (
@@ -119,8 +153,6 @@ function TripScreen({ email, role }: { email: string; role?: string | null }) {
           )}
         />
       )}
-
-      <Button title="Sign out" onPress={() => void authClient.signOut()} />
     </View>
   );
 }
@@ -166,6 +198,178 @@ function TripRow({
         </View>
       ) : null}
     </View>
+  );
+}
+
+// Log a fuel fill against one of the driver's own trips (ADR-0034 D2 own-record
+// scope). The driver picks a trip and the vehicle is DERIVED from it, so the
+// server's trip-vehicle consistency check always passes. Liters + price are typed
+// as decimals and converted to the integer mL / paisa the wire stores; the
+// odometer reading is optional. The total preview mirrors the server's derived
+// totalCostPaisa (same Math.round rule), so what the driver sees is what persists.
+function FuelScreen() {
+  const [trips, setTrips] = useState<DriverTrip[] | null>(null);
+  const [selectedTripId, setSelectedTripId] = useState<string | null>(null);
+  const [liters, setLiters] = useState("");
+  const [price, setPrice] = useState("");
+  const [odometer, setOdometer] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+
+  // Mount load — same pattern as TripScreen (setState in the promise continuation,
+  // `active` flag drops a late response). Pre-select when there is exactly one trip.
+  useEffect(() => {
+    let active = true;
+    listMyTrips()
+      .then((items) => {
+        if (active) {
+          setTrips(items);
+          if (items.length === 1) setSelectedTripId(items[0].id);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setTrips([]);
+          setError("Could not load your trips.");
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const selectedTrip = trips?.find((trip) => trip.id === selectedTripId) ?? null;
+
+  // Inline parse + bounds checks (mirroring TripRow). Bounds match the API's
+  // LITERS_ML / PRICE_PAISA / ODOMETER limits after the human-units conversion.
+  const litersNum = Number(liters);
+  const litersValid =
+    liters.trim() !== "" &&
+    Number.isFinite(litersNum) &&
+    litersNum >= 0.001 &&
+    litersNum <= 1_000_000;
+  const priceNum = Number(price);
+  const priceValid =
+    price.trim() !== "" && Number.isFinite(priceNum) && priceNum >= 0.01 && priceNum <= 100_000;
+  const odometerEntered = odometer.trim() !== "";
+  const odometerNum = Number(odometer);
+  const odometerValid =
+    !odometerEntered ||
+    (Number.isInteger(odometerNum) && odometerNum >= 0 && odometerNum <= 100_000_000);
+
+  const totalPaisa = previewTotalCostPaisa(
+    litersValid ? litersNum : null,
+    priceValid ? priceNum : null,
+  );
+  const canSubmit = selectedTrip !== null && litersValid && priceValid && odometerValid && !busy;
+
+  async function submit() {
+    if (!selectedTrip) return;
+    setBusy(true);
+    setError(null);
+    setDone(false);
+    try {
+      await createFuelLog(
+        fuelLogPayload(
+          {
+            vehicleId: selectedTrip.vehicle.id,
+            tripId: selectedTrip.id,
+            liters: litersNum,
+            pricePerLiter: priceNum,
+            odometerKm: odometerEntered ? odometerNum : undefined,
+          },
+          new Date().toISOString(),
+        ),
+      );
+      setLiters("");
+      setPrice("");
+      setOdometer("");
+      setDone(true);
+    } catch {
+      setError("Could not log fuel.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <ScrollView style={styles.subScreen} contentContainerStyle={styles.fuelContent}>
+      {error ? <Text style={styles.error}>{error}</Text> : null}
+      {done ? <Text style={styles.success}>Fuel logged.</Text> : null}
+
+      {trips === null ? (
+        <ActivityIndicator accessibilityLabel="Loading trips" style={styles.loading} />
+      ) : trips.length === 0 ? (
+        <Text style={styles.empty}>No trips assigned.</Text>
+      ) : (
+        <>
+          <Text style={styles.label}>Trip</Text>
+          {trips.map((trip) => (
+            <Pressable
+              key={trip.id}
+              style={[styles.selectRow, selectedTripId === trip.id && styles.selectRowActive]}
+              onPress={() => setSelectedTripId(trip.id)}
+            >
+              <Text style={styles.tripReg}>{trip.vehicle.registrationNumber}</Text>
+              <Text style={styles.tripStatus}>{trip.status}</Text>
+            </Pressable>
+          ))}
+
+          <Text style={styles.label}>Liters</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="0.000"
+            keyboardType="decimal-pad"
+            value={liters}
+            onChangeText={(t) => {
+              setLiters(t);
+              setDone(false);
+            }}
+            editable={!busy}
+          />
+
+          <Text style={styles.label}>Price per liter (NPR)</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="0.00"
+            keyboardType="decimal-pad"
+            value={price}
+            onChangeText={(t) => {
+              setPrice(t);
+              setDone(false);
+            }}
+            editable={!busy}
+          />
+
+          <Text style={styles.label}>Odometer (km, optional)</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="Odometer (km)"
+            keyboardType="number-pad"
+            value={odometer}
+            onChangeText={(t) => {
+              setOdometer(t);
+              setDone(false);
+            }}
+            editable={!busy}
+          />
+
+          <View style={styles.totalRow}>
+            <Text style={styles.totalLabel}>Total</Text>
+            <Text style={styles.totalValue}>
+              {totalPaisa === null ? "—" : `NPR ${(totalPaisa / 100).toFixed(2)}`}
+            </Text>
+          </View>
+
+          <Button
+            title={busy ? "Logging…" : "Log fuel"}
+            onPress={() => void submit()}
+            disabled={!canSubmit}
+          />
+        </>
+      )}
+    </ScrollView>
   );
 }
 
@@ -229,6 +433,14 @@ const styles = StyleSheet.create({
     paddingTop: 48,
     gap: 8,
   },
+  subScreen: {
+    flex: 1,
+    width: "100%",
+  },
+  fuelContent: {
+    gap: 8,
+    paddingBottom: 16,
+  },
   panel: {
     width: "100%",
     maxWidth: 360,
@@ -248,6 +460,31 @@ const styles = StyleSheet.create({
     color: "#666",
     textAlign: "center",
   },
+  tabs: {
+    flexDirection: "row",
+    gap: 8,
+    marginVertical: 8,
+  },
+  tab: {
+    flex: 1,
+    paddingVertical: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#ccc",
+    alignItems: "center",
+  },
+  tabActive: {
+    backgroundColor: "#1f6feb",
+    borderColor: "#1f6feb",
+  },
+  tabText: {
+    fontSize: 15,
+    color: "#1f6feb",
+  },
+  tabTextActive: {
+    color: "#fff",
+    fontWeight: "600",
+  },
   loading: {
     marginTop: 24,
   },
@@ -259,6 +496,25 @@ const styles = StyleSheet.create({
   list: {
     flex: 1,
     marginVertical: 12,
+  },
+  label: {
+    fontSize: 13,
+    color: "#666",
+    marginTop: 4,
+  },
+  selectRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "#e2e2e2",
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+  },
+  selectRowActive: {
+    borderColor: "#1f6feb",
+    backgroundColor: "#eef4ff",
   },
   tripRow: {
     borderWidth: 1,
@@ -302,6 +558,24 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 10,
     fontSize: 16,
+  },
+  totalRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginTop: 8,
+  },
+  totalLabel: {
+    fontSize: 15,
+    color: "#666",
+  },
+  totalValue: {
+    fontSize: 18,
+    fontWeight: "600",
+  },
+  success: {
+    color: "#0a7d33",
+    textAlign: "center",
   },
   error: {
     color: "#b00020",
