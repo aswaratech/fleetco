@@ -23,16 +23,18 @@
 
 ARG NODE_IMAGE=node:24-bookworm-slim
 
-# --- base: Node + pnpm (pinned via package.json packageManager) --------------
+# --- base: Node + pnpm -------------------------------------------------------
 FROM ${NODE_IMAGE} AS base
-ENV PNPM_HOME=/pnpm
-ENV PATH=$PNPM_HOME:$PATH
 # openssl is required by the Prisma query engine on debian-slim. ca-certificates
 # lets prisma generate fetch engines and the app reach TLS endpoints.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends openssl ca-certificates \
   && rm -rf /var/lib/apt/lists/*
-RUN corepack enable && corepack prepare pnpm@10.33.3 --activate
+# pnpm is installed globally (not via corepack) so the migrate + seed commands
+# work when the runtime stage drops to the non-root `node` user — a global pnpm
+# needs no per-user corepack download cache. Version matches the root
+# package.json `packageManager` field.
+RUN npm install -g pnpm@10.33.3
 WORKDIR /app
 
 # --- deps: install the api + its workspace deps (incl. dev: prisma, tsx, nest)
@@ -66,8 +68,15 @@ ENV PORT=3001
 # intact: this is what lets `pnpm --filter @fleetco/api ...` resolve at runtime
 # for the migrate + seed commands, and keeps node_modules/.bin/{prisma,tsx}
 # working. The build context excluded node_modules/dist/.env via .dockerignore.
-COPY --from=build /app /app
+# --chown hands the tree to the non-root `node` user (uid 1000, already present
+# in the base image) so it can run + the pnpm/tsx commands can write their
+# caches; the chown happens during COPY (no extra layer).
+COPY --from=build --chown=node:node /app /app
 WORKDIR /app/apps/api
+# Run as non-root (the long-lived API process, and by default the one-off
+# migrate/seed Compose tasks too). Satisfies the security baseline's
+# dockerfile.security.missing-user rule (ADR-0012 Semgrep).
+USER node
 EXPOSE 3001
 # Default command: the API server. The deploy runbook overrides the command for
 # the one-off migrate + seed Compose tasks (see docs/runbook/deploy.md).
