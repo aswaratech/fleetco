@@ -15,9 +15,15 @@ on:
 #   - Component 4 (Action SHA pinning): all third-party actions are SHA-pinned
 #     in this repo's workflow files; Dependabot's github-actions ecosystem
 #     proposes SHA updates weekly.
-#   - Component 5 (CycloneDX SBOM): deferred until production deployment ticket
-#     ships, per ADR-0012 ("uploaded to the GitHub Actions release artifacts");
-#     no SBOM on PR-time CI.
+#   - Component 5 (CycloneDX SBOM): SHIPPED in ci.yml's `push-images` job
+#     (deploy-prep T3). On every push to `main` a CycloneDX SBOM is generated per
+#     production image (api, web) with anchore/sbom-action and uploaded as a
+#     workflow artifact. ADR-0014 §7 resolved the original ADR-0012 deferral here
+#     and refined the SBOM from the npm-workspace sketch to a per-image scan
+#     (broader coverage: OS packages + the bundled node deps). Intentionally NOT
+#     on PR-time CI — the SBOM scans the built+published image, which only happens
+#     on the push-to-main path; PRs build the images (ci.yml `build-images`) but
+#     do not publish, so there is nothing to SBOM there.
 
 permissions:
   contents: read
