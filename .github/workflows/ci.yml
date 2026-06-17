@@ -191,6 +191,129 @@ jobs:
       - name: Build ${{ matrix.app }} image
         run: docker build -f apps/${{ matrix.app }}/Dockerfile -t fleetco-${{ matrix.app }}:${{ github.sha }} .
 
+  push-images:
+    name: push image to GHCR + CycloneDX SBOM — ${{ matrix.app }}
+    runs-on: ubuntu-latest
+    # ADR-0014 §7 (deploy-prep T3): on a merge to `main` ONLY, build each
+    # production image, generate a CycloneDX SBOM for it, and push it to GHCR
+    # tagged by the commit SHA. This makes docs/runbook/deploy.md's routine-deploy
+    # step 1 ("Confirm CI built the target <sha> images to GHCR") real and gives
+    # the T2 docker-compose.prod.yml something to pull
+    # (ghcr.io/addressanup/fleetco-{api,web}:${IMAGE_TAG}). It also lands the one
+    # ADR-0012 security-baseline item still deferred — component 5, the CycloneDX
+    # SBOM (see the now-updated note in .github/workflows/security.yml).
+    #
+    # PUSH-ON-MAIN ONLY, by design. The `if: github.event_name == 'push'` guard
+    # means this job never runs on a pull_request, so a GHCR/registry hiccup can
+    # never red a required PR check or block the merge gate. The PR-time
+    # `build-images` job above stays build-only and is the required Dockerfile
+    # gate; this job is the publish step that runs AFTER merge, consistent with
+    # the loop's merge-then-CI-on-main flow. The two jobs build independently (no
+    # built image is shared between GitHub Actions jobs) — a deliberate, accepted
+    # redundant build on `main`, the price of keeping the required PR gate free of
+    # any registry dependency. A genuinely failed push (vs. a transient hiccup the
+    # retry below absorbs) surfaces as a red `main` check so the operator learns
+    # the <sha> image never reached GHCR; it cannot affect any PR's required
+    # checks (push-images never runs on PRs, and nothing `needs` it).
+    #
+    # Auth is the automatic GITHUB_TOKEN (no operator secret) with a job-scoped
+    # packages:write; the default contents:read is kept. Third-party actions are
+    # SHA-pinned with a `# vX` comment (ADR-0012 component 4); docker
+    # login/build/push stay action-light (raw docker), as T1/T2 did.
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [api, web]
+    env:
+      DOCKER_BUILDKIT: "1"
+      APP: ${{ matrix.app }}
+      IMAGE: ghcr.io/addressanup/fleetco-${{ matrix.app }}
+      TAG: ${{ github.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Build ${{ matrix.app }} image
+        # The web image inlines NEXT_PUBLIC_* into its browser bundle at BUILD
+        # time (apps/web/Dockerfile), so the public origin must be passed as a
+        # build-arg now (the T1 Dockerfile anticipated this). The operator sets the
+        # repository variable NEXT_PUBLIC_API_URL to the public origin (ADR-0014 §2
+        # same-origin, e.g. https://app.fleetco.example); the API URL is public by
+        # design (it ships in the client bundle) so it is a repo *variable*, not a
+        # secret. When unset the expression falls back to the Dockerfile's own
+        # default so the build still succeeds. The api Dockerfile has no such arg,
+        # so the arg is passed for `web` only (avoids an unconsumed-build-arg
+        # warning on the api build).
+        env:
+          NEXT_PUBLIC_API_URL: ${{ vars.NEXT_PUBLIC_API_URL || 'http://localhost:3001' }}
+        run: |
+          build_args=()
+          if [ "${APP}" = "web" ]; then
+            build_args+=(--build-arg "NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}")
+          fi
+          docker build \
+            -f "apps/${APP}/Dockerfile" \
+            "${build_args[@]}" \
+            -t "${IMAGE}:${TAG}" \
+            -t "${IMAGE}:latest" \
+            .
+
+      - name: Generate CycloneDX SBOM (${{ matrix.app }})
+        # ADR-0012 component 5: a CycloneDX SBOM per production image. Syft scans
+        # the image just built in the local docker daemon (no push needed yet), so
+        # the SBOM is captured even if the push below fails. anchore/sbom-action is
+        # SHA-pinned (ADR-0012 c4); its own bundled artifact upload is disabled so
+        # the SBOM is uploaded via the SHA-pinned actions/upload-artifact step.
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: ghcr.io/addressanup/fleetco-${{ matrix.app }}:${{ github.sha }}
+          format: cyclonedx-json
+          output-file: sbom-${{ matrix.app }}.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Verify SBOM is CycloneDX
+        # ADR-0012 mandates CycloneDX specifically (not SPDX). Fail loudly if the
+        # generator emitted the wrong format or an empty file.
+        run: |
+          test -s "sbom-${APP}.cdx.json"
+          grep -q '"bomFormat"[[:space:]]*:[[:space:]]*"CycloneDX"' "sbom-${APP}.cdx.json"
+
+      - name: Upload SBOM artifact (${{ matrix.app }})
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-${{ matrix.app }}-${{ github.sha }}
+          path: sbom-${{ matrix.app }}.cdx.json
+          if-no-files-found: error
+
+      - name: Log in to GHCR
+        # Automatic GITHUB_TOKEN + job-scoped packages:write — no operator secret.
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USER}" --password-stdin
+
+      - name: Push ${{ matrix.app }} image to GHCR
+        # Retry so a transient registry hiccup self-heals rather than reding
+        # `main`. A persistent failure still surfaces (deploy.md step 1 depends on
+        # the <sha> image being in GHCR). This never runs on PRs, so a push failure
+        # can never block a merge.
+        run: |
+          for attempt in 1 2 3; do
+            if docker push "${IMAGE}:${TAG}" && docker push "${IMAGE}:latest"; then
+              echo "push succeeded on attempt ${attempt}"
+              exit 0
+            fi
+            echo "push attempt ${attempt} failed; retrying in $((attempt * 10))s"
+            sleep "$((attempt * 10))"
+          done
+          echo "::error::docker push to ${IMAGE} failed after 3 attempts"
+          exit 1
+
   deploy-config:
     name: validate prod compose + Caddyfile
     runs-on: ubuntu-latest
