@@ -190,3 +190,39 @@ jobs:
 
       - name: Build ${{ matrix.app }} image
         run: docker build -f apps/${{ matrix.app }}/Dockerfile -t fleetco-${{ matrix.app }}:${{ github.sha }} .
+
+  deploy-config:
+    name: validate prod compose + Caddyfile
+    runs-on: ubuntu-latest
+    # ADR-0014 §1–§4 (T2): the production Compose project + Caddyfile + env
+    # template (docker-compose.prod.yml, Caddyfile, .env.production.example) are
+    # never exercised by the TypeScript suites, so this job is what makes the
+    # green-before-merge gate meaningful for them — a broken compose file or
+    # Caddyfile reds the PR. Like build-images it relies only on the official
+    # docker tooling preinstalled on the runner and the already-SHA-pinned
+    # actions/checkout (ADR-0012 component 4); `caddy` runs from its official
+    # image (an image, not an unpinned third-party action).
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Validate docker-compose.prod.yml
+        # `config` parses + interpolates the file. A throwaway .env supplies the
+        # ${IMAGE_TAG} / ${POSTGRES_*} / ${PUBLIC_DOMAIN} interpolation vars (and
+        # is the env_file the services reference); the placeholder values need
+        # not be real for a parse-only check.
+        run: |
+          cp .env.production.example .env
+          docker compose -f docker-compose.prod.yml config --quiet
+
+      - name: Validate Caddyfile
+        # caddy validate via the official image. Its ENTRYPOINT is null (caddy is
+        # the first CMD arg), so the `caddy` argv0 is passed explicitly.
+        # PUBLIC_DOMAIN is required for the {$PUBLIC_DOMAIN} site-address
+        # substitution to resolve.
+        run: |
+          docker run --rm \
+            -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            -e PUBLIC_DOMAIN=app.fleetco.example \
+            caddy:2-alpine \
+            caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
