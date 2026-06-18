@@ -77,6 +77,19 @@ export async function seedVehicle(
       acquiredAt: overrides.acquiredAt ?? new Date("2018-06-01"),
       retiredAt: overrides.retiredAt ?? null,
       status: overrides.status ?? VehicleStatus.ACTIVE,
+      // Nepal compliance metadata (iter 14). All nullable, defaulting to null so
+      // existing km-only seeds are unchanged; the `overrides` type already
+      // promised these fields, so wiring them here lets a test seed an expiring /
+      // expired document (e.g. the ADR-0038 reminder-scan tests) without a
+      // follow-up prisma.update.
+      bluebookNumber: overrides.bluebookNumber ?? null,
+      bluebookExpiresAt: overrides.bluebookExpiresAt ?? null,
+      insurer: overrides.insurer ?? null,
+      insurancePolicyNumber: overrides.insurancePolicyNumber ?? null,
+      insuranceType: overrides.insuranceType ?? null,
+      insuranceExpiresAt: overrides.insuranceExpiresAt ?? null,
+      routePermitNumber: overrides.routePermitNumber ?? null,
+      routePermitExpiresAt: overrides.routePermitExpiresAt ?? null,
       createdById,
     },
   });

@@ -15,6 +15,7 @@ import { GeofencesModule } from "./modules/geofences/geofences.module";
 import { HealthModule } from "./modules/health/health.module";
 import { JobsModule } from "./modules/jobs/jobs.module";
 import { MaintenanceModule } from "./modules/maintenance/maintenance.module";
+import { NotificationModule } from "./modules/notifications/notification.module";
 import { PrismaModule } from "./modules/prisma/prisma.module";
 import { QueueModule } from "./modules/queue/queue.module";
 import { RedisModule } from "./modules/redis/redis.module";
@@ -132,6 +133,7 @@ import { VehiclesModule } from "./modules/vehicles/vehicles.module";
     RetentionModule,
     GeofencesModule,
     MaintenanceModule,
+    NotificationModule,
   ],
 })
 export class AppModule {}

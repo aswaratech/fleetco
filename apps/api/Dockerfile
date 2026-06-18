@@ -49,12 +49,25 @@ COPY pnpm-workspace.yaml pnpm-lock.yaml package.json .npmrc tsconfig.base.json .
 COPY apps/api/package.json apps/api/
 COPY apps/web/package.json apps/web/
 COPY packages/shared/package.json packages/shared/
-RUN pnpm install --frozen-lockfile --filter "@fleetco/api..."
+# `@fleetco/api...` installs api + its dependency graph (incl. the
+# @fleetco/shared workspace package's runtime deps). The extra explicit
+# `--filter @fleetco/shared` adds shared's OWN devDeps (typescript) so the build
+# stage below can compile shared to its CommonJS `dist/` — the artifact the
+# `require` export condition serves the production `node dist/main.js` process.
+# The API imports @fleetco/shared for the ADR-0038 reminder scan, and Node
+# cannot load the ESM-syntax `.ts` source directly (it is consumed as source
+# only by transpiling tools: vitest+SWC, Next, tsc).
+RUN pnpm install --frozen-lockfile --filter "@fleetco/api..." --filter "@fleetco/shared"
 
 # --- build: generate the Prisma client + compile NestJS to dist/ -------------
 FROM deps AS build
 COPY packages/shared packages/shared
 COPY apps/api apps/api
+# Compile @fleetco/shared to its CommonJS dist/ FIRST so the runtime stage
+# (which COPYs the whole /app tree) carries it. The api build below typechecks
+# against shared's TS SOURCE (the `types` export condition), but the running
+# `node dist/main.js` resolves `require("@fleetco/shared")` to this dist/.
+RUN pnpm --filter @fleetco/shared build
 RUN pnpm --filter @fleetco/api exec prisma generate
 RUN pnpm --filter @fleetco/api build
 

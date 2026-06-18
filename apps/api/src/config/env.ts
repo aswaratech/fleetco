@@ -76,6 +76,14 @@ const envSchema = z.object({
   // is attempted (so a misconfigured prod surfaces loudly, while dev/test/CI
   // never reach the network). Empty-string -> undefined, like SENTRY_DSN.
   RESEND_API_KEY: z.preprocess(emptyStringAsUndefined, z.string().optional()),
+
+  // Optional comma-separated recipient override for the reminder digest
+  // (ADR-0038 commitment 7). When set, these addresses are added to the v1
+  // recipients (the ADMIN users' emails) — the escape hatch for a shared inbox
+  // or a non-user address. Parsed (split/trim/dedup) in NotificationService;
+  // empty-string -> undefined, like CORS_ORIGIN's sibling optional vars. The
+  // addresses are Tier-2 PII (ADR-0013) but, like ADMIN_EMAIL, never logged.
+  NOTIFICATION_RECIPIENTS: z.preprocess(emptyStringAsUndefined, z.string().optional()),
 });
 
 export type Env = z.infer<typeof envSchema>;

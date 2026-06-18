@@ -221,7 +221,15 @@ importers:
         specifier: ^3.0.0
         version: 3.2.4(@types/node@24.12.4)(jiti@2.6.1)(lightningcss@1.32.0)(terser@5.47.1)(tsx@4.22.3)
 
-  packages/shared: {}
+  packages/shared:
+    dependencies:
+      nepali-date-converter:
+        specifier: 3.4.0
+        version: 3.4.0
+    devDependencies:
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
 
 packages:
 
