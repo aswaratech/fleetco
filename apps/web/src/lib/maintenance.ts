@@ -244,3 +244,65 @@ export function nextDueForSchedule(schedule: ServiceScheduleAnchor): {
       };
   }
 }
+
+// Worst-of precedence across several service-schedule states (ADR-0037 c7) — the
+// rotation of `worstComplianceState`'s COMPLIANCE_RANK. Higher rank = more
+// urgent = "worse": `overdue` outranks `due-soon` outranks `ok` outranks
+// `none`. This is the single source of truth for "which service state is
+// worse"; the due-list's per-vehicle roll-up badge reaches it through
+// `worstServiceState` rather than re-declaring the ordering, exactly as the
+// vehicles-list / dashboard reach compliance through `worstComplianceState`.
+const SERVICE_RANK: Record<ServiceScheduleState, number> = {
+  none: 0,
+  ok: 1,
+  "due-soon": 2,
+  overdue: 3,
+};
+
+/**
+ * One (schedule, vehicle-reading) pair — the raw input `serviceScheduleState`
+ * classifies. `worstServiceState` takes an array of these because, unlike a
+ * vehicle's three compliance documents (which share one date axis), schedules
+ * are each measured against their OWN vehicle's reading, so the worst-of helper
+ * must carry the reading alongside every schedule (a fleet-wide roll-up spans
+ * many vehicles). For a single-vehicle roll-up the same `vehicle` is repeated.
+ */
+export interface ScheduleWithReading {
+  schedule: ServiceScheduleAnchor;
+  vehicle: VehicleMeterReading;
+}
+
+/**
+ * The worst (most urgent) service state across several schedules — the
+ * array-shaped sibling of `serviceScheduleState`, and the maintenance rotation
+ * of `worstComplianceState`.
+ *
+ * It classifies EACH pair with the shipped `serviceScheduleState` (the state
+ * machine, the per-dimension windows, and the UTC-calendar-day rule all live
+ * there and are NEVER re-derived here — `windows` is forwarded verbatim) and
+ * returns the worst result by the precedence `overdue` > `due-soon` > `ok` >
+ * `none`. An empty list — or one whose every schedule classifies to `none`
+ * (a null reading / anchor) — is `none` (the reduce floor), exactly as an empty
+ * compliance list is `none`.
+ *
+ * The due-list groups the fleet's due/overdue schedules by vehicle and paints
+ * one worst-of `<Badge>` per vehicle from this helper, the rotation of the
+ * vehicles-list per-vehicle worst-compliance badge.
+ *
+ * @param items   the (schedule, vehicle-reading) pairs to roll up
+ * @param now     the reference instant (callers pass `new Date()`); the calendar
+ *                dimension compares by UTC calendar day, not by instant
+ * @param windows the per-dimension due-soon windows (default
+ *                DEFAULT_SERVICE_DUE_SOON_WINDOWS), forwarded to
+ *                `serviceScheduleState` for every pair
+ */
+export function worstServiceState(
+  items: readonly ScheduleWithReading[],
+  now: Date,
+  windows: ServiceDueSoonWindows = DEFAULT_SERVICE_DUE_SOON_WINDOWS,
+): ServiceScheduleState {
+  return items.reduce<ServiceScheduleState>((worst, item) => {
+    const state = serviceScheduleState(item.schedule, item.vehicle, now, windows);
+    return SERVICE_RANK[state] > SERVICE_RANK[worst] ? state : worst;
+  }, "none");
+}

@@ -5,6 +5,8 @@ import {
   DEFAULT_SERVICE_DUE_SOON_WINDOWS,
   nextDueForSchedule,
   serviceScheduleState,
+  worstServiceState,
+  type ScheduleWithReading,
   type ServiceDueSoonWindows,
   type ServiceScheduleAnchor,
   type VehicleMeterReading,
@@ -346,5 +348,84 @@ describe("nextDueForSchedule — the derived next-due value", () => {
       lastServiceEngineHours: null,
     };
     expect(nextDueForSchedule(bad).dateIso).toBeNull();
+  });
+});
+
+describe("worstServiceState — the most-urgent-of-N roll-up (rotation of worstComplianceState)", () => {
+  // (schedule, vehicle-reading) pairs against the default windows. kmSchedule(0)
+  // has nextDue 5000 (anchor 0 + interval 5000); the 500 km due-soon window puts
+  // the boundaries at current 4500 (due-soon edge) and 5001 (overdue).
+  const okPair: ScheduleWithReading = {
+    schedule: kmSchedule(0),
+    vehicle: { ...READING_BOTH, odometerCurrentKm: 0 }, // remaining 5000 → ok
+  };
+  const dueSoonPair: ScheduleWithReading = {
+    schedule: kmSchedule(0),
+    vehicle: { ...READING_BOTH, odometerCurrentKm: 4600 }, // remaining 400 → due-soon
+  };
+  const overduePair: ScheduleWithReading = {
+    schedule: kmSchedule(0),
+    vehicle: { ...READING_BOTH, odometerCurrentKm: 5001 }, // remaining -1 → overdue
+  };
+  const nonePair: ScheduleWithReading = {
+    schedule: kmSchedule(null), // null anchor → next-due cannot be derived → none
+    vehicle: { ...READING_BOTH, odometerCurrentKm: 9999 },
+  };
+
+  test("an empty list → 'none' (the reduce floor)", () => {
+    expect(worstServiceState([], NOW)).toBe("none");
+  });
+
+  test("all schedules 'ok' → 'ok'", () => {
+    expect(worstServiceState([okPair, okPair], NOW)).toBe("ok");
+  });
+
+  test("a single overdue schedule → 'overdue'", () => {
+    expect(worstServiceState([overduePair], NOW)).toBe("overdue");
+  });
+
+  test("'due-soon' outranks 'ok'", () => {
+    expect(worstServiceState([okPair, dueSoonPair, okPair], NOW)).toBe("due-soon");
+  });
+
+  test("'overdue' outranks 'due-soon' and 'ok' regardless of order", () => {
+    expect(worstServiceState([okPair, dueSoonPair, overduePair], NOW)).toBe("overdue");
+    expect(worstServiceState([overduePair, okPair, dueSoonPair], NOW)).toBe("overdue");
+  });
+
+  test("'none' never wins: a none-classifying schedule beside an 'ok' → 'ok'", () => {
+    // "tracks but has no reading/anchor" must not mask a real on-track signal.
+    expect(worstServiceState([nonePair, okPair], NOW)).toBe("ok");
+    // …and a list of only none-classifying schedules → 'none'.
+    expect(worstServiceState([nonePair, nonePair], NOW)).toBe("none");
+  });
+
+  test("the full precedence overdue > due-soon > ok > none in one mixed list", () => {
+    expect(worstServiceState([nonePair, okPair, dueSoonPair, overduePair], NOW)).toBe("overdue");
+  });
+
+  test("forwards custom windows to serviceScheduleState (the do-not-re-derive guarantee)", () => {
+    // current 4200 → remaining 800: 'ok' under the default 500 window, 'due-soon'
+    // under a 1000 window — so the roll-up must be reading the forwarded window,
+    // not a hard-coded one.
+    const pair: ScheduleWithReading = {
+      schedule: kmSchedule(0),
+      vehicle: { ...READING_BOTH, odometerCurrentKm: 4200 },
+    };
+    const WIDE: ServiceDueSoonWindows = {
+      distanceKm: 1000,
+      engineHoursTenths: 500,
+      calendarDays: 60,
+    };
+    expect(worstServiceState([pair], NOW)).toBe("ok");
+    expect(worstServiceState([pair], NOW, WIDE)).toBe("due-soon");
+  });
+
+  test("mixed dimensions roll up together (a calendar overdue dominates a km ok)", () => {
+    const calendarOverdue: ScheduleWithReading = {
+      schedule: calendarSchedule(-1), // next-due yesterday → overdue
+      vehicle: READING_BOTH,
+    };
+    expect(worstServiceState([okPair, calendarOverdue], NOW)).toBe("overdue");
   });
 });
