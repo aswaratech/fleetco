@@ -10,11 +10,18 @@ import { ReportsQuerySchema, type ReportsQuery } from "./reports.schemas";
 // container can resolve it. Same convention every other vertical-
 // slice controller uses for its service.
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports
-import { ReportsService, type PerVehicleCostReport } from "./reports.service";
+import {
+  ReportsService,
+  type PerVehicleCostReport,
+  type PerVehicleEfficiencyReport,
+} from "./reports.service";
 
-// ReportsController — read-only aggregation routes. Iter 23 ships one
-// route (per-vehicle cost report); future report slices add siblings
-// here rather than spawning a parallel controller.
+// ReportsController — read-only aggregation routes. Iter 23 shipped the
+// per-vehicle cost route; the A2 slice (Reports v2) adds the per-vehicle
+// fuel-efficiency sibling here rather than spawning a parallel
+// controller — exactly the "future report slices add siblings" the
+// original comment anticipated. Further report slices follow the same
+// pattern.
 //
 // Route prefix `api/v1/reports`. Same versioning convention as every
 // other Phase-1 controller (controller-level prefix rather than a
@@ -61,6 +68,35 @@ export class ReportsController {
     @Query(new ZodValidationPipe(ReportsQuerySchema)) query: ReportsQuery,
   ): Promise<PerVehicleCostReport> {
     return this.reports.getPerVehicleCost({
+      from: query.from,
+      to: query.to,
+      vehicleId: query.vehicleId,
+    });
+  }
+
+  /**
+   * GET /api/v1/reports/per-vehicle-efficiency?from=YYYY-MM-DD&to=YYYY-MM-DD&vehicleId=...
+   *
+   * Returns the per-vehicle fuel-efficiency report (Reports v2) over the
+   * supplied date range, optionally narrowed to a single vehicle's row.
+   * Reuses `ReportsQuerySchema` VERBATIM — the same `from` / `to` /
+   * optional `vehicleId` contract, the same `.strict()` + YYYY-MM-DD +
+   * `from ≤ to` defenses — because the efficiency report takes exactly
+   * the cost report's query (a date window + an optional vehicle). No new
+   * capability and no RolesGuard: the class-level `AuthGuard` is the gate,
+   * matching the cost report (ADR-0021 §6).
+   *
+   * Response shape mirrors the cost report's envelope minus companyLevel
+   * (both inputs — completed trips and fuel logs — are always
+   * vehicle-bound, so there is nothing company-level to surface): see
+   * ReportsService.PerVehicleEfficiencyReport for the per-field docs.
+   * `from` / `to` are echoed back as YYYY-MM-DD strings.
+   */
+  @Get("per-vehicle-efficiency")
+  async getPerVehicleEfficiency(
+    @Query(new ZodValidationPipe(ReportsQuerySchema)) query: ReportsQuery,
+  ): Promise<PerVehicleEfficiencyReport> {
+    return this.reports.getPerVehicleEfficiency({
       from: query.from,
       to: query.to,
       vehicleId: query.vehicleId,

@@ -1,4 +1,5 @@
 import { Injectable } from "@nestjs/common";
+import { TripStatus } from "@prisma/client";
 
 // PrismaService is injected by NestJS via emitDecoratorMetadata; the
 // class reference must remain a value import at runtime so the DI
@@ -157,6 +158,228 @@ export function formatDateUtc(date: Date): string {
   const d = String(date.getUTCDate()).padStart(2, "0");
   return `${y}-${m}-${d}`;
 }
+
+// ───────────────────────────────────────────────────────────────────
+// Per-vehicle fuel-efficiency report (Reports v2, A2).
+//
+// This completes the "fuel efficiency" deliverable named for Reports
+// v1 in docs/product/roadmap.md (§"Phase 1 — The Spine") that iter-23
+// left unshipped: iter-23 shipped the cost half only (getPerVehicleCost
+// above); this is the efficiency half, landing as Reports v2 in the
+// Phase-2 window — deferred Phase-1 daily-use polish, the same category
+// as the Home dashboard and the BS-date work. The design contract is
+// DESIGN.md §"Surfaces" → "Per-vehicle fuel-efficiency report" (A1).
+//
+// It extends THIS service along the seam the file's top docstring
+// anticipates ("future report slices will extend this service rather
+// than spawning a parallel module"). No new ADR, dependency, schema /
+// migration, capability, or ReportsModule change: every input already
+// exists.
+//
+// Modeling decisions the rest of the slice relies on:
+//
+//   1. DISTANCE is the system-of-record figure — Σ(endOdometerKm −
+//      startOdometerKm) over COMPLETED trips (ADR-0003: the Trip
+//      aggregate owns distance; the Trip → Vehicle odometer auto-update
+//      already maintains it). It is NOT the fuel log's
+//      `odometerReadingKm`, which is nullable and non-monotonic by
+//      recorded decision (docs/tech-debt.md, Paid-off) and would inject
+//      noise. A COMPLETED trip is GUARANTEED (trips.schemas.ts
+//      validateTripStatusFields, enforced on create AND patch) to carry
+//      all four start/end fields with endOdometerKm ≥ startOdometerKm,
+//      so every per-trip delta is a non-negative integer and
+//      Σ(end − start) = Σend − Σstart. We compute it with a single
+//      `groupBy` `_sum` over both odometer columns — the same
+//      database-side aggregation getPerVehicleCost uses for money,
+//      staying entirely in integer space.
+//
+//   2. A completed trip's distance is attributed to the window by its
+//      `endedAt` — the instant the trip completes, the end odometer is
+//      read, and the Vehicle.odometerCurrentKm auto-update fires. This
+//      mirrors the cost report's use of the operator's reporting `date`
+//      (not `createdAt`): the report window is "when the work
+//      happened", and a completed trip's distance is realized at
+//      `endedAt`. A multi-day trip straddling the boundary lands in the
+//      window of its completion. (`endedAt` is non-null for every
+//      COMPLETED trip, so it is always a safe filter column.)
+//
+//   3. CONSUMPTION is Σ litersMl and Σ totalCostPaisa over FuelLog rows
+//      whose reporting `date` is in-window — the same `date` column
+//      (not `createdAt`) and the same inclusive-through-end-of-day
+//      buildDateRange the cost report uses. FuelLog.vehicleId is always
+//      non-null, so (unlike the cost report's ExpenseLog) there is NO
+//      companyLevel block: both inputs (Trip, FuelLog) are always
+//      vehicle-bound, so every figure belongs to a vehicle.
+//
+//   4. km/L and NPR/km are DISPLAY RATIOS, computed at the edge and
+//      NEVER stored: km/L = distanceKm × 1000 / litresMl (litres =
+//      mL / 1000 folded in), NPR/km = fuelPaisa / distanceKm. Integers
+//      stay integers in storage and in the flag math (below); only
+//      these two ratios are non-integer, and only at the response edge.
+//      km/L is null on `insufficient-data`; NPR/km is null only when
+//      distanceKm is 0 (no divide-by-zero).
+//
+//   5. The FLAG compares this window's km/L against the SAME vehicle's
+//      prior equal-length window (priorEqualWindow). The comparison is
+//      exact integer cross-multiplication (classifyEfficiency) so the
+//      ±15% boundary is deterministic regardless of floating-point
+//      representation — a "trend, not forensic meter" report still
+//      deserves a boundary that does not flicker.
+//
+//   6. HONEST FRAMING (carried in the PR and lightly in the UI per the
+//      DESIGN.md coverage note): with a nullable / non-monotonic fuel
+//      odometer and ~15–20% dashboard drift, this is a reliable fleet /
+//      period-level km/L TREND + exception flag, not a forensic
+//      per-fill meter. A `degraded` flag means "investigate", not
+//      "proven theft". It self-sharpens once the driver app makes
+//      odometer-at-fill routine.
+
+/** The efficiency flag for a per-vehicle row. See classifyEfficiency. */
+export type EfficiencyFlag = "degraded" | "improved" | "normal" | "insufficient-data";
+
+/**
+ * Deviation threshold (percent) for the degraded / improved flags: a
+ * window whose km/L differs from its prior-equal-window baseline by MORE
+ * than this fraction is flagged. Named (not inlined) per the A2 ticket;
+ * DESIGN.md states the exact threshold is "the report service's
+ * constants, not design law".
+ */
+export const EFFICIENCY_DEVIATION_PERCENT = 15;
+
+/**
+ * Insufficient-data distance floor (kilometres): a window with less
+ * completed-trip distance than this cannot produce a km/L worth
+ * trusting, so the row flags `insufficient-data` and its km/L cell
+ * em-dashes. Paired with the 0-litre guard in classifyEfficiency (which
+ * also prevents divide-by-zero). Named per the A2 ticket.
+ */
+export const INSUFFICIENT_DATA_MIN_DISTANCE_KM = 50;
+
+export interface PerVehicleEfficiencyRow {
+  vehicleId: string;
+  registrationNumber: string;
+  /** Σ(endOdometerKm − startOdometerKm) over COMPLETED trips in-window. */
+  distanceKm: number;
+  /** Σ litersMl over in-window FuelLogs (integer mL; display ÷ 1000). */
+  litresMl: number;
+  /** distanceKm × 1000 / litresMl; null on `insufficient-data`. */
+  kmPerLitre: number | null;
+  /** fuelPaisa / distanceKm (paisa per km); null when distanceKm is 0. */
+  nprPerKm: number | null;
+  /** Σ totalCostPaisa over in-window FuelLogs (integer paisa). */
+  fuelPaisa: number;
+  flag: EfficiencyFlag;
+}
+
+export interface PerVehicleEfficiencyTotals {
+  distanceKm: number;
+  litresMl: number;
+  fuelPaisa: number;
+  /** Fleet km/L (display ratio at the edge); null when litresMl is 0. */
+  kmPerLitre: number | null;
+  /** Fleet NPR/km (display ratio at the edge); null when distanceKm is 0. */
+  nprPerKm: number | null;
+}
+
+export interface PerVehicleEfficiencyReport {
+  // Echo the query's `from` / `to` as YYYY-MM-DD strings, exactly as
+  // PerVehicleCostReport does, so the web page can re-render its date
+  // inputs from the response without re-parsing the URL. There is no
+  // companyLevel block here (see modeling note 3).
+  from: string;
+  to: string;
+  rows: PerVehicleEfficiencyRow[];
+  totals: PerVehicleEfficiencyTotals;
+}
+
+/**
+ * The window of equal length immediately preceding [from, to] — the
+ * per-vehicle efficiency baseline. Both inputs are UTC-midnight Date
+ * objects (as the schema parses them); the returned bounds are the same
+ * shape, so buildDateRange turns them into the inclusive-through-end-of-
+ * day Prisma filter exactly as for the current window.
+ *
+ * For a 28-day window [Feb 1, Feb 28] the prior window is [Jan 4, Jan
+ * 31] (28 days ending the day before `from`). Exported for the test
+ * suite — the baseline math is pinned directly.
+ */
+export function priorEqualWindow(from: Date, to: Date): { from: Date; to: Date } {
+  const MILLIS_PER_DAY = 24 * 60 * 60 * 1000;
+  // [from, to] is inclusive on both ends; its length in whole days is
+  // the midnight-to-midnight gap plus one. UTC math has no DST, so the
+  // gap is an exact multiple of a day; Math.round is belt-and-braces.
+  const spanDays = Math.round((to.getTime() - from.getTime()) / MILLIS_PER_DAY) + 1;
+  return {
+    from: new Date(from.getTime() - spanDays * MILLIS_PER_DAY),
+    to: new Date(from.getTime() - MILLIS_PER_DAY),
+  };
+}
+
+/** A window's efficiency inputs: distance travelled and fuel burned. */
+interface EfficiencyBasis {
+  distanceKm: number;
+  litresMl: number;
+}
+
+/**
+ * Classify a vehicle's current-window efficiency against its baseline.
+ *
+ *   - `insufficient-data` when the CURRENT window has too little
+ *     distance (< INSUFFICIENT_DATA_MIN_DISTANCE_KM) or no fuel
+ *     (litresMl ≤ 0) — no trustworthy ratio, and the 0-litre case also
+ *     guards the divide. Checked first: a vehicle we cannot measure is
+ *     reported as such regardless of any baseline.
+ *   - `normal` when the current window is measurable but the BASELINE
+ *     is not (a new vehicle, or a quiet prior period) — we have a km/L
+ *     to show but nothing to compare it against, so we stay quiet (no
+ *     badge). DESIGN.md: "the absence of a badge is itself the signal".
+ *   - else compare current km/L against baseline km/L:
+ *       degraded  current < baseline × (100 − DEV)/100   (worse by > DEV%)
+ *       improved  current > baseline × (100 + DEV)/100   (better by > DEV%)
+ *       normal    within ±DEV%.
+ *
+ * km/L = distanceKm × 1000 / litresMl. Rather than divide (and inherit
+ * floating-point fuzz at exactly ±DEV%), we cross-multiply into a pure
+ * integer comparison — the common ×1000 cancels:
+ *     current km/L  <  baseline km/L × f/100
+ *  ⟺  Cd/Cl  <  (Bd/Bl) × f/100
+ *  ⟺  Cd × Bl × 100  <  Bd × Cl × f          (all terms ≥ 0)
+ * with f = 100 − DEV for degraded and 100 + DEV for improved. Every term
+ * is a non-negative integer (distances km, litres mL, percents), so the
+ * boundary is exact. Phase-1/2 per-vehicle windows keep the products
+ * near 1e12 — comfortably inside Number.MAX_SAFE_INTEGER (~9.007e15); a
+ * pathological multi-year single-vehicle window would switch to BigInt,
+ * the same escape hatch getPerVehicleCost documents.
+ */
+function classifyEfficiency(current: EfficiencyBasis, baseline: EfficiencyBasis): EfficiencyFlag {
+  if (current.distanceKm < INSUFFICIENT_DATA_MIN_DISTANCE_KM || current.litresMl <= 0) {
+    return "insufficient-data";
+  }
+  if (baseline.distanceKm < INSUFFICIENT_DATA_MIN_DISTANCE_KM || baseline.litresMl <= 0) {
+    return "normal";
+  }
+  const currentScaled = current.distanceKm * baseline.litresMl * 100;
+  const degradedBound =
+    baseline.distanceKm * current.litresMl * (100 - EFFICIENCY_DEVIATION_PERCENT);
+  const improvedBound =
+    baseline.distanceKm * current.litresMl * (100 + EFFICIENCY_DEVIATION_PERCENT);
+  if (currentScaled < degradedBound) return "degraded";
+  if (currentScaled > improvedBound) return "improved";
+  return "normal";
+}
+
+/**
+ * Deterministic row order: the exception flag first (degraded →
+ * improved → normal → insufficient-data) so the vehicles that need a
+ * look sit at the top, then registrationNumber ascending so ties do not
+ * shuffle between refreshes. Pinned by a test.
+ */
+const FLAG_SORT_ORDER: Record<EfficiencyFlag, number> = {
+  degraded: 0,
+  improved: 1,
+  normal: 2,
+  "insufficient-data": 3,
+};
 
 @Injectable()
 export class ReportsService {
@@ -380,6 +603,204 @@ export class ReportsService {
       companyLevel: {
         expensePaisa: companyAggregate._sum.amountPaisa ?? 0,
         expenseLogCount: companyAggregate._count._all,
+      },
+    };
+  }
+
+  /**
+   * Build the per-vehicle fuel-efficiency report for the supplied date
+   * range (and optional vehicle filter). See the block comment above
+   * EfficiencyFlag for the modeling decisions; the shape mirrors
+   * getPerVehicleCost (echoed from / to, per-vehicle rows, fleet totals)
+   * minus the companyLevel block (both inputs are always vehicle-bound).
+   *
+   * Plan:
+   *   1. Four `groupBy` aggregations in parallel — completed-trip
+   *      distance and fuel consumption, each for the CURRENT window and
+   *      the prior-equal-length BASELINE window. Distance sums both
+   *      odometer columns (distance = Σend − Σstart); consumption sums
+   *      litersMl + totalCostPaisa.
+   *   2. Merge the current trip + fuel views into one map keyed by
+   *      vehicleId (a vehicle appears if it has EITHER distance or fuel
+   *      in the window); merge the baseline views into a second map used
+   *      only for the flag comparison.
+   *   3. Join to Vehicle for the registration number (one batched
+   *      findMany, same as the cost report).
+   *   4. Per row: compute the display ratios at the edge and the flag
+   *      against the baseline; drop a vehicle that vanished between the
+   *      groupBy and the join (no registration to show).
+   *   5. Sort (flag, then registration) and roll up fleet totals.
+   */
+  async getPerVehicleEfficiency(query: {
+    from: Date;
+    to: Date;
+    vehicleId?: string;
+  }): Promise<PerVehicleEfficiencyReport> {
+    const { from, to, vehicleId } = query;
+    const currentRange = buildDateRange(from, to);
+    const baselineWindow = priorEqualWindow(from, to);
+    const baselineRange = buildDateRange(baselineWindow.from, baselineWindow.to);
+
+    // Trip distance is taken over COMPLETED trips only, attributed to the
+    // window by `endedAt` (modeling note 2). A COMPLETED trip is
+    // guaranteed to carry both odometer readings, so summing the two
+    // columns and subtracting yields Σ(end − start) (note 1).
+    const tripWhere = (range: { gte: Date; lte: Date }) => ({
+      status: TripStatus.COMPLETED,
+      endedAt: range,
+      ...(vehicleId ? { vehicleId } : {}),
+    });
+    // Fuel consumption uses the operator's reporting `date`, exactly as
+    // the cost report (note 3). FuelLog.vehicleId is always non-null.
+    const fuelWhere = (range: { gte: Date; lte: Date }) => ({
+      date: range,
+      ...(vehicleId ? { vehicleId } : {}),
+    });
+
+    const [currentTrips, currentFuel, baselineTrips, baselineFuel] = await Promise.all([
+      this.prisma.trip.groupBy({
+        by: ["vehicleId"],
+        where: tripWhere(currentRange),
+        _sum: { startOdometerKm: true, endOdometerKm: true },
+      }),
+      this.prisma.fuelLog.groupBy({
+        by: ["vehicleId"],
+        where: fuelWhere(currentRange),
+        _sum: { litersMl: true, totalCostPaisa: true },
+      }),
+      this.prisma.trip.groupBy({
+        by: ["vehicleId"],
+        where: tripWhere(baselineRange),
+        _sum: { startOdometerKm: true, endOdometerKm: true },
+      }),
+      this.prisma.fuelLog.groupBy({
+        by: ["vehicleId"],
+        where: fuelWhere(baselineRange),
+        _sum: { litersMl: true, totalCostPaisa: true },
+      }),
+    ]);
+
+    // Current merge map keyed by vehicleId. Distance and consumption
+    // come from different tables; a vehicle with only one of the two
+    // still appears (and flags insufficient-data for the missing half).
+    interface CurrentAccumulator {
+      distanceKm: number;
+      litresMl: number;
+      fuelPaisa: number;
+    }
+    const current = new Map<string, CurrentAccumulator>();
+    function ensureCurrent(vid: string): CurrentAccumulator {
+      let row = current.get(vid);
+      if (!row) {
+        row = { distanceKm: 0, litresMl: 0, fuelPaisa: 0 };
+        current.set(vid, row);
+      }
+      return row;
+    }
+
+    // Prisma types the groupBy key as `string | null` (vehicleId is
+    // nullable on PLANNED trips), but the COMPLETED filter guarantees a
+    // non-null vehicleId in practice; the guard is for the type-checker.
+    for (const group of currentTrips) {
+      if (group.vehicleId === null) continue;
+      const row = ensureCurrent(group.vehicleId);
+      row.distanceKm += (group._sum.endOdometerKm ?? 0) - (group._sum.startOdometerKm ?? 0);
+    }
+    for (const group of currentFuel) {
+      if (group.vehicleId === null) continue;
+      const row = ensureCurrent(group.vehicleId);
+      row.litresMl += group._sum.litersMl ?? 0;
+      row.fuelPaisa += group._sum.totalCostPaisa ?? 0;
+    }
+
+    // Baseline map carries only what the flag needs (distance + litres).
+    const baseline = new Map<string, EfficiencyBasis>();
+    function ensureBaseline(vid: string): EfficiencyBasis {
+      let row = baseline.get(vid);
+      if (!row) {
+        row = { distanceKm: 0, litresMl: 0 };
+        baseline.set(vid, row);
+      }
+      return row;
+    }
+    for (const group of baselineTrips) {
+      if (group.vehicleId === null) continue;
+      const row = ensureBaseline(group.vehicleId);
+      row.distanceKm += (group._sum.endOdometerKm ?? 0) - (group._sum.startOdometerKm ?? 0);
+    }
+    for (const group of baselineFuel) {
+      if (group.vehicleId === null) continue;
+      const row = ensureBaseline(group.vehicleId);
+      row.litresMl += group._sum.litersMl ?? 0;
+    }
+
+    // Registration join — one batched findMany over the vehicles with
+    // current-window activity (the rows we will emit). Same pattern as
+    // the cost report; a vehicle that vanished between the groupBy and
+    // the join has no registration to show and is dropped below.
+    const vehicleIds = Array.from(current.keys());
+    const vehicles = vehicleIds.length
+      ? await this.prisma.vehicle.findMany({
+          where: { id: { in: vehicleIds } },
+          select: { id: true, registrationNumber: true },
+        })
+      : [];
+    const registrationById = new Map(vehicles.map((v) => [v.id, v.registrationNumber]));
+
+    const rows: PerVehicleEfficiencyRow[] = [];
+    for (const [vid, acc] of current) {
+      const registrationNumber = registrationById.get(vid);
+      if (!registrationNumber) continue;
+      const base = baseline.get(vid) ?? { distanceKm: 0, litresMl: 0 };
+      const flag = classifyEfficiency(acc, base);
+      // km/L: distance per litre, with litres = mL / 1000 folded into
+      // the ×1000. Null exactly when the flag is insufficient-data
+      // (which already covers litresMl ≤ 0, so the divide is safe).
+      const kmPerLitre =
+        flag === "insufficient-data" ? null : (acc.distanceKm * 1000) / acc.litresMl;
+      // NPR/km: fuel paisa per km. Null only when there is no distance
+      // (no divide-by-zero); independent of the flag, per DESIGN.md.
+      const nprPerKm = acc.distanceKm === 0 ? null : acc.fuelPaisa / acc.distanceKm;
+      rows.push({
+        vehicleId: vid,
+        registrationNumber,
+        distanceKm: acc.distanceKm,
+        litresMl: acc.litresMl,
+        kmPerLitre,
+        nprPerKm,
+        fuelPaisa: acc.fuelPaisa,
+        flag,
+      });
+    }
+
+    // Sort by flag priority (exceptions first), then registration asc.
+    rows.sort((a, b) => {
+      if (FLAG_SORT_ORDER[a.flag] !== FLAG_SORT_ORDER[b.flag]) {
+        return FLAG_SORT_ORDER[a.flag] - FLAG_SORT_ORDER[b.flag];
+      }
+      return a.registrationNumber.localeCompare(b.registrationNumber);
+    });
+
+    // Fleet totals: integers summed, the two ratios computed at the edge.
+    let totalDistanceKm = 0;
+    let totalLitresMl = 0;
+    let totalFuelPaisa = 0;
+    for (const row of rows) {
+      totalDistanceKm += row.distanceKm;
+      totalLitresMl += row.litresMl;
+      totalFuelPaisa += row.fuelPaisa;
+    }
+
+    return {
+      from: formatDateUtc(from),
+      to: formatDateUtc(to),
+      rows,
+      totals: {
+        distanceKm: totalDistanceKm,
+        litresMl: totalLitresMl,
+        fuelPaisa: totalFuelPaisa,
+        kmPerLitre: totalLitresMl > 0 ? (totalDistanceKm * 1000) / totalLitresMl : null,
+        nprPerKm: totalDistanceKm > 0 ? totalFuelPaisa / totalDistanceKm : null,
       },
     };
   }

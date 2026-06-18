@@ -1,4 +1,5 @@
 import { Test, type TestingModule } from "@nestjs/testing";
+import { TripStatus } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 
 import { PrismaService } from "../src/modules/prisma/prisma.service";
@@ -6,6 +7,7 @@ import { ReportsQuerySchema } from "../src/modules/reports/reports.schemas";
 import {
   buildDateRange,
   formatDateUtc,
+  priorEqualWindow,
   ReportsService,
 } from "../src/modules/reports/reports.service";
 
@@ -540,5 +542,497 @@ describe("ReportsService.getPerVehicleCost (real Prisma)", () => {
     expect(report.rows).toHaveLength(1);
     expect(report.rows[0].vehicleId).toBe(a.id);
     expect(report.totals).toEqual({ fuelPaisa: 100_000, expensePaisa: 0, totalPaisa: 100_000 });
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────
+// Per-vehicle fuel-efficiency report (Reports v2, A2). Distance comes
+// from COMPLETED-trip odometer deltas (system-of-record, ADR-0003),
+// attributed to the window by `endedAt`; consumption from FuelLog over
+// the reporting `date`. The flag compares the window's km/L against the
+// vehicle's prior-equal-length window. See the service docblock for the
+// modeling decisions each test below pins.
+
+describe("ReportsService.priorEqualWindow (baseline window math)", () => {
+  // The baseline is the equal-length span immediately preceding
+  // [from, to]. Exported and pinned directly so a refactor that
+  // mis-computed the offset surfaces here rather than as a subtly-wrong
+  // flag in the wild.
+
+  test("28-day February window → the prior 28 days [Jan 4, Jan 31]", () => {
+    const from = new Date(Date.UTC(2026, 1, 1, 0, 0, 0, 0));
+    const to = new Date(Date.UTC(2026, 1, 28, 0, 0, 0, 0));
+    const prior = priorEqualWindow(from, to);
+    expect(prior.from.toISOString()).toBe("2026-01-04T00:00:00.000Z");
+    expect(prior.to.toISOString()).toBe("2026-01-31T00:00:00.000Z");
+  });
+
+  test("single-day window (from === to) → the immediately prior day", () => {
+    const day = new Date(Date.UTC(2026, 1, 15, 0, 0, 0, 0));
+    const prior = priorEqualWindow(day, day);
+    expect(prior.from.toISOString()).toBe("2026-02-14T00:00:00.000Z");
+    expect(prior.to.toISOString()).toBe("2026-02-14T00:00:00.000Z");
+  });
+
+  test("7-day window → the prior 7 days, ending the day before `from`", () => {
+    const from = new Date(Date.UTC(2026, 1, 8, 0, 0, 0, 0));
+    const to = new Date(Date.UTC(2026, 1, 14, 0, 0, 0, 0));
+    const prior = priorEqualWindow(from, to);
+    expect(prior.from.toISOString()).toBe("2026-02-01T00:00:00.000Z");
+    expect(prior.to.toISOString()).toBe("2026-02-07T00:00:00.000Z");
+  });
+});
+
+describe("ReportsService.getPerVehicleEfficiency (real Prisma)", () => {
+  let module: TestingModule;
+  let prisma: PrismaService;
+  let service: ReportsService;
+  let adminId: string;
+  let driverId: string;
+
+  beforeAll(async () => {
+    module = await Test.createTestingModule({
+      providers: [ReportsService, PrismaService],
+    }).compile();
+    prisma = module.get(PrismaService);
+    service = module.get(ReportsService);
+  });
+
+  afterAll(async () => {
+    await prisma.$disconnect();
+  });
+
+  beforeEach(async () => {
+    await resetDb(prisma);
+    adminId = await seedUser(prisma);
+    // One shared driver satisfies every Trip's required driverId FK; the
+    // efficiency report never reads the driver, so a single row is enough.
+    driverId = (await seedDriver(prisma, adminId)).id;
+  });
+
+  // Seed a COMPLETED trip whose odometer delta is exactly `distanceKm`.
+  // The absolute odometer values do not matter to the report (it sums
+  // Σend − Σstart, so the base cancels across trips); only the delta
+  // contributes. `endedAt` is the window-attribution column; `startedAt`
+  // defaults to it but can be set earlier to exercise the endedAt rule.
+  async function seedCompletedTrip(
+    vehicleId: string,
+    endedAt: Date,
+    distanceKm: number,
+    opts: { startedAt?: Date; startOdometerKm?: number } = {},
+  ) {
+    const startOdometerKm = opts.startOdometerKm ?? 100_000;
+    return seedTrip(prisma, {
+      vehicleId,
+      driverId,
+      createdById: adminId,
+      status: TripStatus.COMPLETED,
+      startedAt: opts.startedAt ?? endedAt,
+      endedAt,
+      startOdometerKm,
+      endOdometerKm: startOdometerKm + distanceKm,
+    });
+  }
+
+  // Seed a fuel log with explicit litres + total cost. pricePerLiterPaisa
+  // is required by the schema but unread by the report; a constant keeps
+  // the row valid without distracting from litres / total.
+  async function seedFuelLog(
+    vehicleId: string,
+    date: Date,
+    litersMl: number,
+    totalCostPaisa: number,
+  ) {
+    return prisma.fuelLog.create({
+      data: {
+        vehicleId,
+        date,
+        litersMl,
+        pricePerLiterPaisa: 15_000,
+        totalCostPaisa,
+        createdById: adminId,
+      },
+    });
+  }
+
+  // February 2026 is the current window; its prior-equal window is
+  // [Jan 4, Jan 31], so BASE_INSIDE (Jan 15) lands in the baseline.
+  const FROM = new Date(Date.UTC(2026, 1, 1, 0, 0, 0, 0));
+  const TO = new Date(Date.UTC(2026, 1, 28, 0, 0, 0, 0));
+  const INSIDE = new Date(Date.UTC(2026, 1, 15, 8, 0, 0, 0));
+  const BASE_INSIDE = new Date(Date.UTC(2026, 0, 15, 8, 0, 0, 0));
+
+  test("empty window returns no rows and zero totals", async () => {
+    const report = await service.getPerVehicleEfficiency({ from: FROM, to: TO });
+    expect(report.from).toBe("2026-02-01");
+    expect(report.to).toBe("2026-02-28");
+    expect(report.rows).toHaveLength(0);
+    expect(report.totals).toEqual({
+      distanceKm: 0,
+      litresMl: 0,
+      fuelPaisa: 0,
+      kmPerLitre: null,
+      nprPerKm: null,
+    });
+  });
+
+  test("distance is the sum of completed-trip odometer deltas; km/L and NPR/km computed at the edge", async () => {
+    const vehicle = await seedVehicle(prisma, adminId);
+    // Two completed trips: deltas 500 + 300 = 800 km.
+    await seedCompletedTrip(vehicle.id, INSIDE, 500);
+    await seedCompletedTrip(vehicle.id, INSIDE, 300, { startOdometerKm: 200_000 });
+    // 100 L burned for Rs 15,000 (1,500,000 paisa).
+    await seedFuelLog(vehicle.id, INSIDE, 100_000, 1_500_000);
+
+    const report = await service.getPerVehicleEfficiency({ from: FROM, to: TO });
+
+    expect(report.rows).toHaveLength(1);
+    expect(report.rows[0]).toMatchObject({
+      vehicleId: vehicle.id,
+      registrationNumber: vehicle.registrationNumber,
+      distanceKm: 800,
+      litresMl: 100_000,
+      fuelPaisa: 1_500_000,
+      // 800 km / 100 L = 8.00 km/L
+      kmPerLitre: 8,
+      // 1,500,000 paisa / 800 km = 1875 paisa/km
+      nprPerKm: 1875,
+      // No baseline activity → quiet (no flag).
+      flag: "normal",
+    });
+  });
+
+  test("NON-completed trips (PLANNED / IN_PROGRESS / CANCELLED) contribute no distance", async () => {
+    const vehicle = await seedVehicle(prisma, adminId);
+    // Only this completed trip should count (delta 500).
+    await seedCompletedTrip(vehicle.id, INSIDE, 500);
+    // Non-completed trips, each with odometer + endedAt set (the fixture
+    // bypasses the status-field refine) — the report's COMPLETED filter
+    // must exclude all three regardless of their fields.
+    await seedTrip(prisma, {
+      vehicleId: vehicle.id,
+      driverId,
+      createdById: adminId,
+      status: TripStatus.IN_PROGRESS,
+      startedAt: INSIDE,
+      endedAt: INSIDE,
+      startOdometerKm: 300_000,
+      endOdometerKm: 300_999,
+    });
+    await seedTrip(prisma, {
+      vehicleId: vehicle.id,
+      driverId,
+      createdById: adminId,
+      status: TripStatus.CANCELLED,
+      startedAt: INSIDE,
+      endedAt: INSIDE,
+      startOdometerKm: 400_000,
+      endOdometerKm: 400_999,
+    });
+    await seedTrip(prisma, {
+      vehicleId: vehicle.id,
+      driverId,
+      createdById: adminId,
+      status: TripStatus.PLANNED,
+      startedAt: INSIDE,
+      endedAt: INSIDE,
+      startOdometerKm: 500_000,
+      endOdometerKm: 500_999,
+    });
+
+    const report = await service.getPerVehicleEfficiency({ from: FROM, to: TO });
+    expect(report.rows).toHaveLength(1);
+    expect(report.rows[0].distanceKm).toBe(500);
+  });
+
+  test("completed trips outside the window (by endedAt) contribute no distance", async () => {
+    const vehicle = await seedVehicle(prisma, adminId);
+    await seedCompletedTrip(vehicle.id, INSIDE, 500);
+    // Before the window AND before the baseline (Dec 2025) → ignored.
+    await seedCompletedTrip(vehicle.id, new Date(Date.UTC(2025, 11, 15, 8, 0, 0, 0)), 700);
+    // After the window (Mar 2026) → ignored.
+    await seedCompletedTrip(vehicle.id, new Date(Date.UTC(2026, 2, 5, 8, 0, 0, 0)), 900);
+
+    const report = await service.getPerVehicleEfficiency({ from: FROM, to: TO });
+    expect(report.rows).toHaveLength(1);
+    expect(report.rows[0].distanceKm).toBe(500);
+  });
+
+  test("a trip is attributed by endedAt, not startedAt", async () => {
+    const vehicle = await seedVehicle(prisma, adminId);
+    // Started Jan 31 (before the window), ended Feb 2 (inside) → counted.
+    await seedCompletedTrip(vehicle.id, new Date(Date.UTC(2026, 1, 2, 8, 0, 0, 0)), 600, {
+      startedAt: new Date(Date.UTC(2026, 0, 31, 8, 0, 0, 0)),
+    });
+    // Started Feb 27 (inside), ended Mar 2 (after the window) → excluded.
+    await seedCompletedTrip(vehicle.id, new Date(Date.UTC(2026, 2, 2, 8, 0, 0, 0)), 900, {
+      startedAt: new Date(Date.UTC(2026, 1, 27, 8, 0, 0, 0)),
+    });
+
+    const report = await service.getPerVehicleEfficiency({ from: FROM, to: TO });
+    expect(report.rows).toHaveLength(1);
+    // Only the trip that ENDED inside the window counts; a startedAt
+    // filter would have flipped this to 900.
+    expect(report.rows[0].distanceKm).toBe(600);
+  });
+
+  test("inclusive through end of day: a trip and a fuel log late on the to-day are counted", async () => {
+    const vehicle = await seedVehicle(prisma, adminId);
+    const atToEnd = new Date(Date.UTC(2026, 1, 28, 23, 59, 59, 999));
+    await seedCompletedTrip(vehicle.id, atToEnd, 500);
+    await seedFuelLog(vehicle.id, atToEnd, 50_000, 750_000);
+
+    const report = await service.getPerVehicleEfficiency({ from: FROM, to: TO });
+    expect(report.rows).toHaveLength(1);
+    expect(report.rows[0].distanceKm).toBe(500);
+    expect(report.rows[0].litresMl).toBe(50_000);
+  });
+
+  test("flag `degraded`: current km/L worse than baseline by more than 15%", async () => {
+    const vehicle = await seedVehicle(prisma, adminId);
+    // Baseline km/L = 1000 km / 100 L = 10.0
+    await seedCompletedTrip(vehicle.id, BASE_INSIDE, 1000);
+    await seedFuelLog(vehicle.id, BASE_INSIDE, 100_000, 1_000_000);
+    // Current km/L = 800 km / 100 L = 8.0 → 20% worse → degraded
+    await seedCompletedTrip(vehicle.id, INSIDE, 800);
+    await seedFuelLog(vehicle.id, INSIDE, 100_000, 1_000_000);
+
+    const report = await service.getPerVehicleEfficiency({ from: FROM, to: TO });
+    expect(report.rows).toHaveLength(1);
+    expect(report.rows[0].flag).toBe("degraded");
+    expect(report.rows[0].kmPerLitre).toBe(8);
+  });
+
+  test("flag `improved`: current km/L better than baseline by more than 15%", async () => {
+    const vehicle = await seedVehicle(prisma, adminId);
+    // Baseline 10.0; current 1200 km / 100 L = 12.0 → 20% better → improved
+    await seedCompletedTrip(vehicle.id, BASE_INSIDE, 1000);
+    await seedFuelLog(vehicle.id, BASE_INSIDE, 100_000, 1_000_000);
+    await seedCompletedTrip(vehicle.id, INSIDE, 1200);
+    await seedFuelLog(vehicle.id, INSIDE, 100_000, 1_000_000);
+
+    const report = await service.getPerVehicleEfficiency({ from: FROM, to: TO });
+    expect(report.rows[0].flag).toBe("improved");
+    expect(report.rows[0].kmPerLitre).toBe(12);
+  });
+
+  test("flag `normal`: current km/L within ±15% of baseline", async () => {
+    const vehicle = await seedVehicle(prisma, adminId);
+    // Baseline 10.0; current 950 km / 100 L = 9.5 → 5% worse → normal
+    await seedCompletedTrip(vehicle.id, BASE_INSIDE, 1000);
+    await seedFuelLog(vehicle.id, BASE_INSIDE, 100_000, 1_000_000);
+    await seedCompletedTrip(vehicle.id, INSIDE, 950);
+    await seedFuelLog(vehicle.id, INSIDE, 100_000, 1_000_000);
+
+    const report = await service.getPerVehicleEfficiency({ from: FROM, to: TO });
+    expect(report.rows[0].flag).toBe("normal");
+    expect(report.rows[0].kmPerLitre).toBe(9.5);
+  });
+
+  test("flag `normal`: current window measurable but no baseline activity (new vehicle, no badge)", async () => {
+    const vehicle = await seedVehicle(prisma, adminId);
+    // No January activity at all → no baseline to compare against.
+    await seedCompletedTrip(vehicle.id, INSIDE, 500);
+    await seedFuelLog(vehicle.id, INSIDE, 50_000, 750_000);
+
+    const report = await service.getPerVehicleEfficiency({ from: FROM, to: TO });
+    expect(report.rows[0].flag).toBe("normal");
+    // The km/L is still shown — only the comparison is absent.
+    expect(report.rows[0].kmPerLitre).toBe(10);
+  });
+
+  test("flag `insufficient-data`: current distance below the 50 km floor (NPR/km still computed)", async () => {
+    const vehicle = await seedVehicle(prisma, adminId);
+    await seedCompletedTrip(vehicle.id, INSIDE, 30);
+    await seedFuelLog(vehicle.id, INSIDE, 10_000, 150_000);
+
+    const report = await service.getPerVehicleEfficiency({ from: FROM, to: TO });
+    expect(report.rows[0].flag).toBe("insufficient-data");
+    // km/L em-dashes (null) when insufficient-data …
+    expect(report.rows[0].kmPerLitre).toBeNull();
+    // … but NPR/km is gated only on distance > 0, so it is still
+    // computed here: 150,000 paisa / 30 km = 5000 paisa/km.
+    expect(report.rows[0].nprPerKm).toBe(5000);
+  });
+
+  test("flag `insufficient-data`: completed-trip distance but zero litres", async () => {
+    const vehicle = await seedVehicle(prisma, adminId);
+    // Distance but no fuel logged in the window.
+    await seedCompletedTrip(vehicle.id, INSIDE, 500);
+
+    const report = await service.getPerVehicleEfficiency({ from: FROM, to: TO });
+    expect(report.rows).toHaveLength(1);
+    expect(report.rows[0]).toMatchObject({
+      distanceKm: 500,
+      litresMl: 0,
+      kmPerLitre: null,
+      // distance > 0 with zero fuel cost → 0 paisa/km (not null).
+      nprPerKm: 0,
+      flag: "insufficient-data",
+    });
+  });
+
+  test("the 50 km insufficient-data floor is exact: 50 km is measurable, 49 km is not", async () => {
+    const at50 = await seedVehicle(prisma, adminId, { registrationNumber: "BA 1 KA 0050" });
+    const at49 = await seedVehicle(prisma, adminId, { registrationNumber: "BA 2 KA 0049" });
+    await seedCompletedTrip(at50.id, INSIDE, 50);
+    await seedFuelLog(at50.id, INSIDE, 5_000, 75_000);
+    await seedCompletedTrip(at49.id, INSIDE, 49);
+    await seedFuelLog(at49.id, INSIDE, 5_000, 75_000);
+
+    const report = await service.getPerVehicleEfficiency({ from: FROM, to: TO });
+    const row50 = report.rows.find((r) => r.vehicleId === at50.id);
+    const row49 = report.rows.find((r) => r.vehicleId === at49.id);
+    // 50 km is NOT below the floor (`< 50` is false) → measurable.
+    expect(row50?.flag).toBe("normal");
+    expect(row50?.kmPerLitre).toBe(10); // 50 km / 5 L
+    // 49 km IS below the floor → insufficient-data, km/L em-dashed.
+    expect(row49?.flag).toBe("insufficient-data");
+    expect(row49?.kmPerLitre).toBeNull();
+  });
+
+  test("the 15% deviation boundary is exact: exactly 15% worse is `normal`, not `degraded`", async () => {
+    const vehicle = await seedVehicle(prisma, adminId);
+    // Baseline 10.0; current 850 km / 100 L = 8.5 = baseline × 0.85
+    // exactly. "More than 15%" is strict, so this is normal, not
+    // degraded — the integer cross-multiplication makes the boundary
+    // deterministic (float baseline × 0.85 would drift past 8.5).
+    await seedCompletedTrip(vehicle.id, BASE_INSIDE, 1000);
+    await seedFuelLog(vehicle.id, BASE_INSIDE, 100_000, 1_000_000);
+    await seedCompletedTrip(vehicle.id, INSIDE, 850);
+    await seedFuelLog(vehicle.id, INSIDE, 100_000, 1_000_000);
+
+    const report = await service.getPerVehicleEfficiency({ from: FROM, to: TO });
+    expect(report.rows[0].flag).toBe("normal");
+    expect(report.rows[0].kmPerLitre).toBe(8.5);
+  });
+
+  test("the 15% deviation boundary is exact: just beyond 15% worse is `degraded`", async () => {
+    const vehicle = await seedVehicle(prisma, adminId);
+    // Baseline 10.0; current 840 km / 100 L = 8.4 < 8.5 → degraded.
+    await seedCompletedTrip(vehicle.id, BASE_INSIDE, 1000);
+    await seedFuelLog(vehicle.id, BASE_INSIDE, 100_000, 1_000_000);
+    await seedCompletedTrip(vehicle.id, INSIDE, 840);
+    await seedFuelLog(vehicle.id, INSIDE, 100_000, 1_000_000);
+
+    const report = await service.getPerVehicleEfficiency({ from: FROM, to: TO });
+    expect(report.rows[0].flag).toBe("degraded");
+  });
+
+  test("the 15% deviation boundary on the up side: exactly +15% is `normal`, just beyond is `improved`", async () => {
+    const atBoundary = await seedVehicle(prisma, adminId, { registrationNumber: "BA 1 KA 1150" });
+    const beyond = await seedVehicle(prisma, adminId, { registrationNumber: "BA 2 KA 1160" });
+    // Both share a baseline of 10.0 km/L.
+    await seedCompletedTrip(atBoundary.id, BASE_INSIDE, 1000);
+    await seedFuelLog(atBoundary.id, BASE_INSIDE, 100_000, 1_000_000);
+    await seedCompletedTrip(beyond.id, BASE_INSIDE, 1000);
+    await seedFuelLog(beyond.id, BASE_INSIDE, 100_000, 1_000_000);
+    // 1150 km / 100 L = 11.5 = baseline × 1.15 exactly → normal.
+    await seedCompletedTrip(atBoundary.id, INSIDE, 1150);
+    await seedFuelLog(atBoundary.id, INSIDE, 100_000, 1_000_000);
+    // 1160 km / 100 L = 11.6 > 11.5 → improved.
+    await seedCompletedTrip(beyond.id, INSIDE, 1160);
+    await seedFuelLog(beyond.id, INSIDE, 100_000, 1_000_000);
+
+    const report = await service.getPerVehicleEfficiency({ from: FROM, to: TO });
+    expect(report.rows.find((r) => r.vehicleId === atBoundary.id)?.flag).toBe("normal");
+    expect(report.rows.find((r) => r.vehicleId === beyond.id)?.flag).toBe("improved");
+  });
+
+  test("NPR/km is null when there is no completed-trip distance (fuel-only vehicle)", async () => {
+    const vehicle = await seedVehicle(prisma, adminId);
+    // Fuel logged but no completed trips → distance 0.
+    await seedFuelLog(vehicle.id, INSIDE, 50_000, 750_000);
+
+    const report = await service.getPerVehicleEfficiency({ from: FROM, to: TO });
+    expect(report.rows).toHaveLength(1);
+    expect(report.rows[0]).toMatchObject({
+      distanceKm: 0,
+      litresMl: 50_000,
+      kmPerLitre: null, // insufficient-data (distance below floor)
+      nprPerKm: null, // no divide-by-zero
+      flag: "insufficient-data",
+    });
+  });
+
+  test("vehicleId filter narrows to one vehicle (current and baseline both narrowed)", async () => {
+    const a = await seedVehicle(prisma, adminId, { registrationNumber: "BA 1 KA 0001" });
+    const b = await seedVehicle(prisma, adminId, { registrationNumber: "BA 2 KA 0002" });
+    // Vehicle b also has a baseline that would change its flag — the
+    // narrow must drop b's rows entirely, not just hide them.
+    await seedCompletedTrip(a.id, INSIDE, 500);
+    await seedFuelLog(a.id, INSIDE, 50_000, 750_000);
+    await seedCompletedTrip(b.id, BASE_INSIDE, 1000);
+    await seedFuelLog(b.id, BASE_INSIDE, 100_000, 1_000_000);
+    await seedCompletedTrip(b.id, INSIDE, 600);
+    await seedFuelLog(b.id, INSIDE, 100_000, 1_000_000);
+
+    const report = await service.getPerVehicleEfficiency({ from: FROM, to: TO, vehicleId: a.id });
+    expect(report.rows).toHaveLength(1);
+    expect(report.rows[0].vehicleId).toBe(a.id);
+    expect(report.totals.distanceKm).toBe(500);
+  });
+
+  test("rows sort by flag priority (degraded → improved → normal → insufficient-data), then registration asc", async () => {
+    // Two degraded vehicles pin the within-flag registration tiebreak;
+    // the improved vehicle's registration sorts first alphabetically but
+    // its flag must place it AFTER both degradeds.
+    const d1 = await seedVehicle(prisma, adminId, { registrationNumber: "BA 1 KA 0001" });
+    const d2 = await seedVehicle(prisma, adminId, { registrationNumber: "BA 1 KA 0002" });
+    const imp = await seedVehicle(prisma, adminId, { registrationNumber: "BA 0 KA 0000" });
+    const nrm = await seedVehicle(prisma, adminId, { registrationNumber: "BA 0 KA 0001" });
+    const ins = await seedVehicle(prisma, adminId, { registrationNumber: "BA 0 KA 0002" });
+
+    // Shared baseline of 10.0 km/L for the three flagged-by-comparison
+    // vehicles (d1, d2, imp). nrm is normal via no-baseline; ins is
+    // insufficient-data via the distance floor.
+    for (const v of [d1, d2, imp]) {
+      await seedCompletedTrip(v.id, BASE_INSIDE, 1000);
+      await seedFuelLog(v.id, BASE_INSIDE, 100_000, 1_000_000);
+    }
+    await seedCompletedTrip(d1.id, INSIDE, 800); // 8.0 → degraded
+    await seedFuelLog(d1.id, INSIDE, 100_000, 1_000_000);
+    await seedCompletedTrip(d2.id, INSIDE, 800); // 8.0 → degraded
+    await seedFuelLog(d2.id, INSIDE, 100_000, 1_000_000);
+    await seedCompletedTrip(imp.id, INSIDE, 1200); // 12.0 → improved
+    await seedFuelLog(imp.id, INSIDE, 100_000, 1_000_000);
+    await seedCompletedTrip(nrm.id, INSIDE, 500); // no baseline → normal
+    await seedFuelLog(nrm.id, INSIDE, 50_000, 750_000);
+    await seedCompletedTrip(ins.id, INSIDE, 30); // below floor → insufficient-data
+    await seedFuelLog(ins.id, INSIDE, 10_000, 150_000);
+
+    const report = await service.getPerVehicleEfficiency({ from: FROM, to: TO });
+    expect(report.rows.map((r) => r.vehicleId)).toEqual([d1.id, d2.id, imp.id, nrm.id, ins.id]);
+    expect(report.rows.map((r) => r.flag)).toEqual([
+      "degraded",
+      "degraded",
+      "improved",
+      "normal",
+      "insufficient-data",
+    ]);
+  });
+
+  test("fleet totals sum the rows; fleet km/L and NPR/km are display ratios at the edge", async () => {
+    const a = await seedVehicle(prisma, adminId, { registrationNumber: "BA 1 KA 7777" });
+    const b = await seedVehicle(prisma, adminId, { registrationNumber: "BA 2 KA 8888" });
+    await seedCompletedTrip(a.id, INSIDE, 600);
+    await seedFuelLog(a.id, INSIDE, 60_000, 900_000);
+    await seedCompletedTrip(b.id, INSIDE, 400);
+    await seedFuelLog(b.id, INSIDE, 40_000, 600_000);
+
+    const report = await service.getPerVehicleEfficiency({ from: FROM, to: TO });
+
+    const sumDistance = report.rows.reduce((acc, r) => acc + r.distanceKm, 0);
+    const sumLitres = report.rows.reduce((acc, r) => acc + r.litresMl, 0);
+    const sumFuel = report.rows.reduce((acc, r) => acc + r.fuelPaisa, 0);
+    expect(report.totals.distanceKm).toBe(sumDistance);
+    expect(report.totals.litresMl).toBe(sumLitres);
+    expect(report.totals.fuelPaisa).toBe(sumFuel);
+    expect(sumDistance).toBe(1000);
+    expect(sumLitres).toBe(100_000);
+    expect(sumFuel).toBe(1_500_000);
+    // Fleet km/L = 1000 km / 100 L = 10.0; NPR/km = 1,500,000 / 1000 = 1500.
+    expect(report.totals.kmPerLitre).toBe(10);
+    expect(report.totals.nprPerKm).toBe(1500);
   });
 });
