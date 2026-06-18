@@ -3,9 +3,11 @@ import { afterEach, describe, expect, test } from "vitest";
 import {
   currentMonthRange,
   rollUpCompliance,
+  rollUpServiceSchedules,
   vehicleComplianceState,
   type VehicleComplianceFields,
 } from "../src/lib/dashboard";
+import type { ScheduleWithReading } from "../src/lib/maintenance";
 
 /**
  * Pins the Home-dashboard data layer's PURE helpers (D1):
@@ -139,6 +141,57 @@ describe("rollUpCompliance — each vehicle counted once by its worst state", ()
       expiredCount: 2,
       expiringSoonCount: 2,
       total: 6,
+    });
+  });
+});
+
+describe("rollUpServiceSchedules — each ACTIVE schedule tallied by its own state", () => {
+  // A DISTANCE_KM (schedule, reading) pair: anchor 0 + interval 5000 → next-due
+  // 5000; the default 500 km window puts due-soon at current ∈ [4500, 5000] and
+  // overdue at current > 5000. A null anchor → none (no badge yet).
+  function kmPair(currentKm: number, anchor: number | null = 0): ScheduleWithReading {
+    return {
+      schedule: {
+        intervalType: "DISTANCE_KM",
+        intervalValue: 5000,
+        lastServiceAt: NOW.toISOString(),
+        lastServiceOdometerKm: anchor,
+        lastServiceEngineHours: null,
+      },
+      vehicle: { odometerCurrentKm: currentKm, engineHoursCurrent: null },
+    };
+  }
+
+  test("empty set → all zeros", () => {
+    expect(rollUpServiceSchedules([], NOW)).toEqual({
+      overdueCount: 0,
+      dueSoonCount: 0,
+      total: 0,
+    });
+  });
+
+  test("a mixed set tallies overdue + due-soon; ok and none count toward neither", () => {
+    const items = [
+      kmPair(5001), // remaining -1 → overdue
+      kmPair(4600), // remaining 400 → due-soon
+      kmPair(4500), // remaining 500 (edge) → due-soon
+      kmPair(0), // remaining 5000 → ok (neither bucket)
+      kmPair(9999, null), // null anchor → none (neither bucket)
+    ];
+    expect(rollUpServiceSchedules(items, NOW)).toEqual({
+      overdueCount: 1,
+      dueSoonCount: 2,
+      total: 5, // total counts every schedule scanned, including ok / none
+    });
+  });
+
+  test("each schedule is its own unit — two due schedules on one vehicle both count", () => {
+    // Unlike compliance (a vehicle counted once), a vehicle's multiple schedules
+    // each tally independently. Both pairs read overdue.
+    expect(rollUpServiceSchedules([kmPair(6000), kmPair(7000)], NOW)).toEqual({
+      overdueCount: 2,
+      dueSoonCount: 0,
+      total: 2,
     });
   });
 });

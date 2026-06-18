@@ -24,6 +24,8 @@ const QUICK_LINKS: QuickLink[] = [
   { href: "/fuel-logs", label: "Fuel logs" },
   { href: "/expense-logs", label: "Expense logs" },
   { href: "/geofences", label: "Geofences" },
+  { href: "/service-schedules", label: "Service schedules" },
+  { href: "/service-records", label: "Service history" },
   { href: "/reports/per-vehicle-cost", label: "Cost report" },
   { href: "/reports/per-vehicle-efficiency", label: "Fuel efficiency" },
 ];

@@ -31,12 +31,14 @@
 
 import { apiFetch } from "./api";
 import { worstComplianceState, type ComplianceBadgeState } from "./compliance";
+import { serviceScheduleState, type ScheduleWithReading } from "./maintenance";
 import type { ExpenseLogListItem } from "../app/expense-logs/types";
 import type { FuelLogListItem } from "../app/fuel-logs/types";
 import type {
   PerVehicleCostReport,
   PerVehicleCostTotals,
 } from "../app/reports/per-vehicle-cost/types";
+import type { ServiceSchedule } from "../app/service-schedules/types";
 import type { TripListItem } from "../app/trips/types";
 import type { Vehicle } from "../app/vehicles/types";
 
@@ -108,6 +110,40 @@ export function rollUpCompliance(
   return { expiredCount, expiringSoonCount, total: vehicles.length };
 }
 
+/** The "Services due" card's counts (DESIGN.md §"Preventive maintenance"). */
+export interface ServiceScheduleRollUp {
+  /** ACTIVE schedules whose next service is overdue. */
+  overdueCount: number;
+  /** ACTIVE schedules whose next service is within its due-soon window. */
+  dueSoonCount: number;
+  /** Active schedules scanned — bounded by the `take=200` ceiling (loadDashboard). */
+  total: number;
+}
+
+/**
+ * Roll a set of (schedule, vehicle-reading) pairs up into the "Services due"
+ * card's counts. The maintenance sibling of `rollUpCompliance` — but the unit is
+ * the SCHEDULE, not the vehicle (a vehicle can have several schedules in
+ * different states), so each schedule is classified independently by the shipped
+ * `serviceScheduleState` (the state machine, per-dimension windows, and
+ * UTC-calendar-day rule all live there and are never re-derived here) and tallied
+ * into its bucket. Schedules whose state is `ok` or `none` (no reading / anchor
+ * yet) count toward neither bucket. `total` is the number of schedules scanned.
+ */
+export function rollUpServiceSchedules(
+  items: readonly ScheduleWithReading[],
+  now: Date,
+): ServiceScheduleRollUp {
+  let overdueCount = 0;
+  let dueSoonCount = 0;
+  for (const item of items) {
+    const state = serviceScheduleState(item.schedule, item.vehicle, now);
+    if (state === "overdue") overdueCount += 1;
+    else if (state === "due-soon") dueSoonCount += 1;
+  }
+  return { overdueCount, dueSoonCount, total: items.length };
+}
+
 // Format a Date as YYYY-MM-DD from its UTC calendar-day components. Timezone-
 // independent by construction (reads getUTC*). Mirrors the reports service's
 // `formatDateUtc` and the reports page's inline formatter.
@@ -172,6 +208,7 @@ export interface DashboardCounts {
  */
 export interface DashboardData {
   compliance: ComplianceRollUp;
+  services: ServiceScheduleRollUp;
   activeTrips: DashboardActiveTrips;
   thisMonthCost: DashboardThisMonthCost;
   recentFuel: FuelLogListItem[];
@@ -200,13 +237,20 @@ const PREVIEW_TAKE = 5;
 // undercount note).
 const COMPLIANCE_SCAN_TAKE = 200;
 
+// The service-schedule-scan ceiling. The service-schedules list endpoint clamps
+// `take` at 200; the "Services due" roll-up scans at most 200 ACTIVE schedules,
+// and only those whose vehicle is among the 200 scanned vehicles (the same
+// undercount caveat as compliance — flagged in DESIGN.md §"Preventive
+// maintenance" and the due-list).
+const SERVICE_SCAN_TAKE = 200;
+
 /**
  * Load the Home dashboard's read model from existing endpoints.
  *
  * SERVER-ONLY: calls `apiFetch`, which forwards the request cookie via
  * next/headers; must run in a server component / server context (D2's page).
  *
- * Fires SIX reads in parallel via `Promise.all` (DESIGN.md §"Data & states":
+ * Fires SEVEN reads in parallel via `Promise.all` (DESIGN.md §"Data & states":
  * the cards "compose existing read endpoints fetched in parallel"). Each
  * query param is verified against its controller's Zod schema:
  *
@@ -221,10 +265,12 @@ const COMPLIANCE_SCAN_TAKE = 200;
  *   5. expense-logs?sortBy=date&sortDir=desc&take=5  — recent expenses (≤5)
  *      (date is the whitelisted default sort on both log endpoints)
  *   6. drivers?take=1                          — driver count via `total` only
+ *   7. service-schedules?status=ACTIVE&take=200 — the "Services due" roll-up
+ *      (each ACTIVE schedule joined to its vehicle's reading + classified)
  *
  * The fleet-counts card REUSES the `total` from calls 1 and 2 (vehicles and
- * active trips), so only the driver count needs its own request — SIX calls,
- * not seven.
+ * active trips), so the driver count (call 6) is the only count needing its own
+ * request; call 7 feeds the "Services due" card.
  *
  * The compliance roll-up is computed SERVER-SIDE here so the (up to 200)
  * vehicle rows never cross the wire to the browser; only the three counts do.
@@ -246,7 +292,7 @@ export async function loadDashboard(): Promise<DashboardData> {
   // Every query value below is a controlled constant or a UTC `YYYY-MM-DD`
   // string from currentMonthRange — all URL-safe, no user input — so a plain
   // template literal is sufficient (no URLSearchParams escaping needed).
-  const [vehicles, activeTrips, costReport, recentFuel, recentExpenses, drivers] =
+  const [vehicles, activeTrips, costReport, recentFuel, recentExpenses, drivers, activeSchedules] =
     await Promise.all([
       apiFetch<ListEnvelope<Vehicle>>(`/api/v1/vehicles?take=${COMPLIANCE_SCAN_TAKE}`),
       apiFetch<ListEnvelope<TripListItem>>(
@@ -262,10 +308,33 @@ export async function loadDashboard(): Promise<DashboardData> {
       // Driver count only — `take=1` keeps the payload to a single row; we read
       // `total`, never the item, hence the `unknown` item type.
       apiFetch<ListEnvelope<unknown>>(`/api/v1/drivers?take=1`),
+      // ACTIVE service schedules for the "Services due" roll-up (ADR-0037 B5).
+      apiFetch<ListEnvelope<ServiceSchedule>>(
+        `/api/v1/service-schedules?status=ACTIVE&take=${SERVICE_SCAN_TAKE}&sortBy=name&sortDir=asc`,
+      ),
     ]);
+
+  // Join each active schedule to its vehicle's CURRENT meter reading (from the
+  // already-fetched vehicle rows) so the "Services due" roll-up can classify it.
+  // A schedule whose vehicle is outside the scanned 200 is skipped — the same
+  // undercount the compliance roll-up carries.
+  const vehicleById = new Map(vehicles.items.map((v) => [v.id, v]));
+  const schedulePairs: ScheduleWithReading[] = [];
+  for (const schedule of activeSchedules.items) {
+    const v = vehicleById.get(schedule.vehicleId);
+    if (!v) continue;
+    schedulePairs.push({
+      schedule,
+      vehicle: {
+        odometerCurrentKm: v.odometerCurrentKm,
+        engineHoursCurrent: v.engineHoursCurrent,
+      },
+    });
+  }
 
   return {
     compliance: rollUpCompliance(vehicles.items, now),
+    services: rollUpServiceSchedules(schedulePairs, now),
     activeTrips: { items: activeTrips.items, total: activeTrips.total },
     thisMonthCost: { from: costReport.from, to: costReport.to, totals: costReport.totals },
     recentFuel: recentFuel.items,
