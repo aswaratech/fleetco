@@ -30,4 +30,16 @@ export class InvoiceSettingsService {
     const pan = env.INVOICE_SUPPLIER_PAN;
     return pan !== undefined && pan.trim() !== "" ? pan.trim() : null;
   }
+
+  /**
+   * FleetCo's supplier (seller) NAME printed on the invoice header, beside the
+   * PAN. Operator-supplied via INVOICE_SUPPLIER_NAME but, unlike the PAN, it falls
+   * back to "FleetCo" (the company this software serves per CLAUDE.md — a known
+   * name, not a fabrication) so a missing name never blocks issue. Only the PAN is
+   * a hard precondition (it is the tax-legal identity that must never be faked).
+   */
+  getSupplierName(): string {
+    const name = env.INVOICE_SUPPLIER_NAME;
+    return name !== undefined && name.trim() !== "" ? name.trim() : "FleetCo";
+  }
 }

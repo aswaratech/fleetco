@@ -100,6 +100,34 @@ const envSchema = z.object({
   // undefined, like SENTRY_DSN's siblings, so a blank line in .env means "not
   // set" rather than an empty PAN.
   INVOICE_SUPPLIER_PAN: z.preprocess(emptyStringAsUndefined, z.string().optional()),
+
+  // FleetCo's OWN supplier NAME for the invoice header (ADR-0039 c9). The seller
+  // name printed beside the supplier PAN. Operator-supplied but, unlike the PAN,
+  // it has a safe default ("FleetCo" — the company this software serves per
+  // CLAUDE.md, not a fabrication) so a missing name never blocks issue; only the
+  // PAN is a hard precondition. Tier-3 business config. Empty-string -> undefined.
+  INVOICE_SUPPLIER_NAME: z.preprocess(emptyStringAsUndefined, z.string().optional()),
+
+  // Cloudflare R2 object-storage config for the invoice PDF (ADR-0039 commitment
+  // 7 — the FIRST in-app R2 use; ADR-0014 c6 deferred in-app R2 uploads to Phase
+  // 2). All four are OPERATOR-SUPPLIED and empty until the operator fills them
+  // (exactly like RESEND_API_KEY / INVOICE_SUPPLIER_PAN): when any is unset the
+  // module wires the no-network MockObjectStorage and invoice issue() refuses with
+  // a clear 422 (the same precondition posture as the supplier PAN), so the API
+  // never reaches R2 outside production. All read through the typed env exactly as
+  // REDIS_URL is, and consumed ONLY by R2ObjectStorage (r2.object-storage.ts).
+  // Empty-string -> undefined, like SENTRY_DSN's siblings.
+  //
+  // R2_ENDPOINT (the S3 API endpoint, e.g. https://<accountid>.r2.cloudflarestorage.com)
+  // and R2_BUCKET are Tier-3 config. R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY are
+  // Tier 1 secrets per ADR-0013: they live ONLY in the production secret store
+  // (ADR-0014), are NEVER committed to any file, and are NEVER logged (the
+  // `*.secret` / `*.token` / `*.key` pino redact paths backstop; the primary
+  // defense is that R2ObjectStorage never logs them). NEVER hardcode a credential.
+  R2_ENDPOINT: z.preprocess(emptyStringAsUndefined, z.string().url().optional()),
+  R2_ACCESS_KEY_ID: z.preprocess(emptyStringAsUndefined, z.string().optional()),
+  R2_SECRET_ACCESS_KEY: z.preprocess(emptyStringAsUndefined, z.string().optional()),
+  R2_BUCKET: z.preprocess(emptyStringAsUndefined, z.string().optional()),
 });
 
 export type Env = z.infer<typeof envSchema>;
