@@ -59,6 +59,23 @@ const envSchema = z.object({
   // command (not stored in .env) so it does not land in argv / `ps` / shell
   // history. Min length 8 mirrors ADMIN_PASSWORD and better-auth's own minimum.
   CREATE_USER_PASSWORD: z.preprocess(emptyStringAsUndefined, z.string().min(8).optional()),
+
+  // Transactional-email provider API key (ADR-0038 commitment 1/9 — the
+  // notification/reminder-delivery channel, Program C). Read here through the
+  // typed env exactly as REDIS_URL is, and consumed only by ResendMailer
+  // (apps/api/src/modules/notifications/resend.mailer.ts).
+  //
+  // Tier 1 secret per ADR-0013: it lives ONLY in the production secret store
+  // (ADR-0014), is NEVER committed to any file, and is NEVER logged — loaded
+  // via this config, never string-concatenated into a log line (the `*.secret`
+  // / `*.token` pino redact paths are the backstop; the primary defense is that
+  // ResendMailer never logs it). OPTIONAL so the app still boots without it in
+  // dev / test / CI: the reminder channel only delivers from production, where
+  // the operator supplies the key and a verified sending domain. When unset,
+  // ResendMailer tolerates construction but throws a clear error if a real send
+  // is attempted (so a misconfigured prod surfaces loudly, while dev/test/CI
+  // never reach the network). Empty-string -> undefined, like SENTRY_DSN.
+  RESEND_API_KEY: z.preprocess(emptyStringAsUndefined, z.string().optional()),
 });
 
 export type Env = z.infer<typeof envSchema>;
