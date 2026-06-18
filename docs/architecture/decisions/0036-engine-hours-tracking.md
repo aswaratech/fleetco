@@ -1,8 +1,12 @@
 # ADR-0036: Engine-hours (hour-meter) tracking for the earthmoving fleet — a nullable hours dimension on the central Vehicle/Trip aggregate that mirrors the odometer machinery (a meter-type discriminator, integer tenths-of-an-hour readings, the Trip→Vehicle bump inside the existing transaction, and lifetime-hours stats)
 
-- **Status:** Proposed
+- **Status:** Accepted (ratified by the PO 2026-06-18 — see ## Acceptance)
 - **Date:** 2026-06-18
 - **Decider:** Product owner (CEO)
+
+## Acceptance
+
+Ratified by the Product Owner on 2026-06-18 (this session): the PO accepted all four decision records (ADR-0036–0039) together, with the explicit directive "I accept all ADRs, go ahead", and chose the **build-now** path (option (a)) for each. The implementing slice — **Program B's engine-hours ticket** — is authorized to proceed. The standing production-deploy caveat in §"Phase mismatch (stated honestly)" is acknowledged and accepted by the PO.
 
 ## Context
 
