@@ -172,4 +172,34 @@ export class InvoicesController {
     }
     return cancelled;
   }
+
+  /**
+   * Issue an invoice (DRAFT → ISSUED) — assign the gapless fiscal-year number,
+   * freeze the tax snapshot, and lock the financial body (ADR-0039 c4–5). The
+   * service throws the right status itself: 404 (missing), 409 (not a DRAFT), 422
+   * (no lines / no serviceType / supplier PAN not configured / discount >
+   * subtotal). The PDF render + R2 store (also at issue per ADR-0039 c5) are D5.
+   * A POST action (a one-way state transition with side effects), not a PATCH.
+   */
+  @Post(":id/issue")
+  async issue(@Param("id") id: string): Promise<InvoiceDetail> {
+    // No issuedAt argument from the HTTP path — issue() defaults it to now.
+    return this.invoices.issue(id);
+  }
+
+  /**
+   * Create a credit note correcting an ISSUED invoice (ADR-0039 c5) — the only
+   * correction path for an issued invoice. Returns a CREDIT_NOTE DRAFT (201)
+   * referencing the original, with its own gapless series assigned when issued.
+   * The service throws 404 (original missing) / 409 (original not an ISSUED
+   * INVOICE). The full credit-note web flow is D6; this is the seam.
+   */
+  @Post(":id/credit-notes")
+  @HttpCode(HttpStatus.CREATED)
+  async createCreditNote(
+    @Param("id") id: string,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<InvoiceDetail> {
+    return this.invoices.createCreditNote(id, request.session.user.id);
+  }
 }

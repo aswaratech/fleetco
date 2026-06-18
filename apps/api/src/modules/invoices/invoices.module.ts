@@ -2,6 +2,7 @@ import { Module } from "@nestjs/common";
 
 import { AuthModule } from "../auth/auth.module";
 import { InvoiceNumberingService } from "./invoice-numbering.service";
+import { InvoiceSettingsService } from "./invoice-settings.service";
 import { InvoicesController } from "./invoices.controller";
 import { InvoicesService } from "./invoices.service";
 
@@ -24,10 +25,10 @@ import { InvoicesService } from "./invoices.service";
 @Module({
   imports: [AuthModule],
   controllers: [InvoicesController],
-  // InvoiceNumberingService is the D3 gapless-numbering collaborator; it is a
-  // provider (not exported) — InvoicesService.issue() consumes it internally, no
-  // other module needs the number generator directly.
-  providers: [InvoicesService, InvoiceNumberingService],
+  // InvoiceNumberingService (gapless numbering) and InvoiceSettingsService
+  // (FleetCo's supplier-PAN config) are the D3 issue-flow collaborators —
+  // providers, not exported: InvoicesService.issue() consumes them internally.
+  providers: [InvoicesService, InvoiceNumberingService, InvoiceSettingsService],
   exports: [InvoicesService],
 })
 export class InvoicesModule {}

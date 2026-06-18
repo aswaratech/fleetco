@@ -1,12 +1,23 @@
-import { BadRequestException, ConflictException, Injectable } from "@nestjs/common";
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  NotFoundException,
+  UnprocessableEntityException,
+} from "@nestjs/common";
 // `Prisma` is a VALUE import now (D3 write path uses
 // `instanceof Prisma.PrismaClientKnownRequestError` to map P2003 → 400, like
-// CustomersService/JobsService). The enums InvoiceStatus / DocumentType stay
-// type-only — status comparisons here are against string literals ("DRAFT"), so
-// the runtime enum object is never needed.
+// CustomersService/JobsService). The enums InvoiceStatus / DocumentType /
+// InvoiceServiceType stay type-only — status comparisons here are against string
+// literals ("DRAFT"), so the runtime enum object is never needed.
 import { Prisma } from "@prisma/client";
-import type { InvoiceStatus, DocumentType } from "@prisma/client";
+import type { InvoiceStatus, DocumentType, InvoiceServiceType } from "@prisma/client";
 
+import { computeInvoiceTax, type InvoiceTaxSnapshot } from "./invoice-tax";
+// eslint-disable-next-line @typescript-eslint/consistent-type-imports
+import { InvoiceNumberingService } from "./invoice-numbering.service";
+// eslint-disable-next-line @typescript-eslint/consistent-type-imports
+import { InvoiceSettingsService } from "./invoice-settings.service";
 import type {
   CreateInvoiceInput,
   InvoiceSortColumn,
@@ -91,7 +102,11 @@ export interface ListResult {
 
 @Injectable()
 export class InvoicesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly numbering: InvoiceNumberingService,
+    private readonly settings: InvoiceSettingsService,
+  ) {}
 
   /**
    * List invoices with optional filter / sort / pagination. Returns the slim
@@ -294,6 +309,188 @@ export class InvoicesService {
       where: { id },
       data: { status: "CANCELLED" },
       include: DETAIL_INCLUDE,
+    });
+  }
+
+  /**
+   * Issue an invoice (or credit-note) draft — the one-way DRAFT → ISSUED
+   * transition (ADR-0039 c4–5). In a SINGLE interactive `$transaction`:
+   *
+   *   1. Lock the invoice row `SELECT … FOR UPDATE` — so two concurrent issues of
+   *      the SAME invoice cannot both assign a number (which would burn one and
+   *      leave a gap). The second blocks here, then sees ISSUED → 409.
+   *   2. Validate: it is a DRAFT (else 409); has ≥ 1 line (else 422); has a
+   *      serviceType (else 422 — it selects the TDS rate).
+   *   3. Compute + FREEZE the tax snapshot via computeInvoiceTax (ADR-0039 c3).
+   *      The rates ride IN the snapshot, so a future statutory change is
+   *      forward-only. A bad-data RangeError (e.g. discount > subtotal) maps to
+   *      422, not a 500.
+   *   4. Assign the next gapless fiscal-year number for the document's series
+   *      (the counter advances WITH this transaction; a rollback reverts it).
+   *   5. Flip to ISSUED + set issuedAt + write every frozen figure. After commit
+   *      the financial body is immutable (update()/cancel() refuse a non-DRAFT).
+   *
+   * The supplier-PAN precondition is checked BEFORE the transaction (a documented
+   * operator gate, ADR-0039 c9). The PDF render + R2 store that ADR-0039 c5 also
+   * lists at issue are D5 — this leaves `pdfR2Key` NULL; the seam is the issued
+   * row itself (D5 renders once at issue and stores the key).
+   *
+   * @param issuedAt Defaults to now (the HTTP path never passes it). Tests pass an
+   *                 explicit date to exercise the BS fiscal-year boundary; a real
+   *                 back-dating policy would be its own compliance decision.
+   */
+  async issue(id: string, issuedAt: Date = new Date()): Promise<InvoiceDetail> {
+    // Precondition (independent of the row): FleetCo's own supplier PAN must be
+    // configured before a real tax invoice goes out (ADR-0039 c9). Checked before
+    // the transaction — a clear, actionable error, never a fabricated PAN.
+    if (this.settings.getSupplierPan() === null) {
+      throw new UnprocessableEntityException(
+        "Cannot issue: FleetCo's supplier PAN/VAT number is not configured. Set " +
+          "INVOICE_SUPPLIER_PAN (operator-supplied; ADR-0039 c9) before issuing.",
+      );
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      // 1. Lock the row. Raw SELECT … FOR UPDATE returns the scalar fields the
+      //    issue flow needs; the enum columns come back as their string labels.
+      const locked = await tx.$queryRaw<
+        {
+          status: InvoiceStatus;
+          serviceType: InvoiceServiceType | null;
+          discountPaisa: number | null;
+          documentType: DocumentType;
+        }[]
+      >`
+        SELECT "status", "serviceType", "discountPaisa", "documentType"
+        FROM "invoice" WHERE "id" = ${id} FOR UPDATE`;
+      const row = locked[0];
+      if (row === undefined) {
+        throw new NotFoundException(`Invoice ${id} not found`);
+      }
+      if (row.status !== "DRAFT") {
+        throw new ConflictException(
+          `Invoice ${id} is ${row.status}; only a DRAFT can be issued (ADR-0039 c5).`,
+        );
+      }
+      if (row.serviceType === null) {
+        throw new UnprocessableEntityException(
+          "Cannot issue: serviceType is required (it selects the TDS rate). Set it on the " +
+            "draft first (ADR-0039 c3/c9).",
+        );
+      }
+
+      // 2. Lines (only the captured amounts are needed for the tax math).
+      const lines = await tx.invoiceLine.findMany({
+        where: { invoiceId: id },
+        select: { lineAmountPaisa: true },
+      });
+      if (lines.length === 0) {
+        throw new UnprocessableEntityException(
+          "Cannot issue: an invoice needs at least one line (ADR-0039 c5).",
+        );
+      }
+
+      // 3. Freeze the tax snapshot. computeInvoiceTax throws on bad data (e.g. a
+      //    discount exceeding the subtotal) — surface as 422, not an opaque 500.
+      let snapshot: InvoiceTaxSnapshot;
+      try {
+        snapshot = computeInvoiceTax({
+          lineAmountsPaisa: lines.map((line) => line.lineAmountPaisa),
+          discountPaisa: row.discountPaisa ?? undefined,
+          serviceType: row.serviceType,
+        });
+      } catch (error) {
+        if (error instanceof RangeError) {
+          throw new UnprocessableEntityException(`Cannot issue: ${error.message}`);
+        }
+        throw error;
+      }
+
+      // 4. Assign the gapless number for this document's series + fiscal year.
+      const number = await this.numbering.nextNumber(tx, row.documentType, issuedAt);
+
+      // 5. Flip to ISSUED and FREEZE every figure (+ the two rates) onto the row.
+      return tx.invoice.update({
+        where: { id },
+        data: {
+          status: "ISSUED",
+          number,
+          issuedAt,
+          subtotalPaisa: snapshot.subtotalPaisa,
+          discountPaisa: snapshot.discountPaisa,
+          vatRateBp: snapshot.vatRateBp,
+          vatPaisa: snapshot.vatPaisa,
+          grossPaisa: snapshot.grossPaisa,
+          tdsRateBp: snapshot.tdsRateBp,
+          tdsPaisa: snapshot.tdsPaisa,
+          netReceivablePaisa: snapshot.netReceivablePaisa,
+          serviceType: snapshot.serviceType,
+        },
+        include: DETAIL_INCLUDE,
+      });
+    });
+  }
+
+  /**
+   * Create a CREDIT_NOTE draft correcting an ISSUED invoice (ADR-0039 c5) — the
+   * ONLY correction path for an issued invoice (never an edit or delete). The
+   * credit note is a separate document with its OWN gapless fiscal-year series
+   * (it draws a CRN-… number when issued, because the counter is keyed by
+   * documentType). It references the original via `originalInvoiceId` and copies
+   * the customer, job, serviceType, discount, and lines (a full-reversal credit
+   * note by default).
+   *
+   * This is the D3 SEAM: it creates the credit-note DRAFT (issued like any
+   * document via {@link issue}). The credit-note SEMANTICS — full vs partial, the
+   * sign convention, which lines to reverse — are an accountant-verified detail
+   * refined in the D6 web surface (ADR-0039 c9); D3 ships the seam + the
+   * independent numbering.
+   */
+  async createCreditNote(originalInvoiceId: string, createdById: string): Promise<InvoiceDetail> {
+    return this.prisma.$transaction(async (tx) => {
+      const original = await tx.invoice.findUnique({
+        where: { id: originalInvoiceId },
+        include: { lines: true },
+      });
+      if (!original) {
+        throw new NotFoundException(`Invoice ${originalInvoiceId} not found`);
+      }
+      if (original.documentType !== "INVOICE") {
+        throw new ConflictException(
+          `Invoice ${originalInvoiceId} is a ${original.documentType}; a credit note can only ` +
+            "correct an INVOICE (ADR-0039 c5).",
+        );
+      }
+      if (original.status !== "ISSUED") {
+        throw new ConflictException(
+          `Invoice ${originalInvoiceId} is ${original.status}; only an ISSUED invoice can be ` +
+            "credited (ADR-0039 c5).",
+        );
+      }
+
+      return tx.invoice.create({
+        data: {
+          documentType: "CREDIT_NOTE",
+          originalInvoiceId: original.id,
+          customerId: original.customerId,
+          jobId: original.jobId,
+          serviceType: original.serviceType,
+          discountPaisa: original.discountPaisa,
+          status: "DRAFT",
+          createdById,
+          lines: {
+            create: original.lines.map((line) => ({
+              tripId: line.tripId,
+              jobId: line.jobId,
+              description: line.description,
+              quantity: line.quantity,
+              unitPricePaisa: line.unitPricePaisa,
+              lineAmountPaisa: line.lineAmountPaisa,
+            })),
+          },
+        },
+        include: DETAIL_INCLUDE,
+      });
     });
   }
 }

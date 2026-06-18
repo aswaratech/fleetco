@@ -10,6 +10,8 @@ import {
 } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 
+import { InvoiceNumberingService } from "../src/modules/invoices/invoice-numbering.service";
+import { InvoiceSettingsService } from "../src/modules/invoices/invoice-settings.service";
 import { InvoicesService } from "../src/modules/invoices/invoices.service";
 import { PrismaService } from "../src/modules/prisma/prisma.service";
 import { resetDb } from "./db";
@@ -34,7 +36,11 @@ describe("InvoicesService (integration, real Postgres)", () => {
 
   beforeAll(async () => {
     module = await Test.createTestingModule({
-      providers: [InvoicesService, PrismaService],
+      // InvoicesService now depends on the numbering + settings collaborators
+      // (for issue(), exercised in invoices.issue.test.ts). These read-path /
+      // create-update-cancel tests never issue, so the real providers (settings
+      // reads an unset env → null PAN) are fine here.
+      providers: [InvoicesService, InvoiceNumberingService, InvoiceSettingsService, PrismaService],
     }).compile();
     await module.init();
 

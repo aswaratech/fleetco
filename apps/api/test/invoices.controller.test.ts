@@ -13,6 +13,8 @@ import { ZodValidationPipe } from "../src/common/zod-validation.pipe";
 import { AuthGuard } from "../src/modules/auth/auth.guard";
 import { AUTH } from "../src/modules/auth/auth.tokens";
 import type { AuthenticatedRequest } from "../src/modules/auth/auth.types";
+import { InvoiceNumberingService } from "../src/modules/invoices/invoice-numbering.service";
+import { InvoiceSettingsService } from "../src/modules/invoices/invoice-settings.service";
 import { InvoicesController } from "../src/modules/invoices/invoices.controller";
 import { InvoicesService } from "../src/modules/invoices/invoices.service";
 import {
@@ -128,6 +130,8 @@ describe("InvoicesController.list (integration, real Prisma)", () => {
       controllers: [InvoicesController],
       providers: [
         InvoicesService,
+        InvoiceNumberingService,
+        InvoiceSettingsService,
         PrismaService,
         // AUTH is required by AuthGuard's constructor. The override below replaces
         // the guard itself, but Nest still resolves its dependencies — provide a
@@ -237,6 +241,8 @@ describe("InvoicesController.getById (integration, real Prisma)", () => {
       controllers: [InvoicesController],
       providers: [
         InvoicesService,
+        InvoiceNumberingService,
+        InvoiceSettingsService,
         PrismaService,
         { provide: AUTH, useValue: { api: { getSession: () => null } } },
       ],
@@ -395,6 +401,8 @@ describe("InvoicesController write path (integration, real Prisma)", () => {
       controllers: [InvoicesController],
       providers: [
         InvoicesService,
+        InvoiceNumberingService,
+        InvoiceSettingsService,
         PrismaService,
         { provide: AUTH, useValue: { api: { getSession: () => null } } },
       ],
