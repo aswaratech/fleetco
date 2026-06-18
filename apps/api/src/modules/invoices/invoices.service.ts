@@ -349,6 +349,12 @@ export class InvoicesService {
           "INVOICE_SUPPLIER_PAN (operator-supplied; ADR-0039 c9) before issuing.",
       );
     }
+    // The BUYER PAN (Customer.panNumber) is deliberately NOT a hard gate here.
+    // Whether a buyer PAN is mandatory for a VAT invoice depends on whether the
+    // buyer is VAT-registered — precisely the IRD/accountant-verified rule the
+    // agent must not assume (ADR-0039 c9). v1 captures the buyer PAN when present
+    // (it renders on the D5 PDF); enforcing it as a precondition is a deferred
+    // operator/accountant decision, flagged here rather than guessed.
 
     return this.prisma.$transaction(async (tx) => {
       // 1. Lock the row. Raw SELECT … FOR UPDATE returns the scalar fields the
