@@ -6,8 +6,9 @@ import { Button } from "@/components/ui/button";
 // augments, never replaces, navigation." Every CRUD destination stays one click
 // away as a compact link strip below the cards. This surface carries the app's
 // primary navigation until the Navigation sidebar is built; removing a link
-// would strand that screen. All nine destinations from the prior nav-only home
-// are preserved (Cost report → /reports/per-vehicle-cost).
+// would strand that screen. All destinations from the prior nav-only home are
+// preserved (Cost report → /reports/per-vehicle-cost); Fuel efficiency
+// (Reports v2) sits beside it.
 
 interface QuickLink {
   href: string;
@@ -24,6 +25,7 @@ const QUICK_LINKS: QuickLink[] = [
   { href: "/expense-logs", label: "Expense logs" },
   { href: "/geofences", label: "Geofences" },
   { href: "/reports/per-vehicle-cost", label: "Cost report" },
+  { href: "/reports/per-vehicle-efficiency", label: "Fuel efficiency" },
 ];
 
 export function QuickLinks(): React.ReactElement {
