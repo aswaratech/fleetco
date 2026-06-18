@@ -227,6 +227,14 @@ const EngineHoursInt = z
   .min(ENGINE_HOURS_MIN, `Engine hours must be ${ENGINE_HOURS_MIN} or greater.`)
   .max(ENGINE_HOURS_MAX, `Engine hours must be ${ENGINE_HOURS_MAX} or less.`);
 
+// Mirror of Prisma's MeterType enum values (ADR-0036). This schema file
+// deliberately does not import the Prisma runtime (see the header), so the
+// meter classification is expressed as a local string union; the service
+// passes `vehicle.meterType`, whose Prisma type is exactly this union, so the
+// two stay assignable without a runtime coupling. `undefined` is the
+// "meter unknown to this caller" case — see validateTripCrossFields below.
+export type TripMeterType = "ODOMETER_KM" | "ENGINE_HOURS" | "BOTH";
+
 // `superRefine` callback shared by the create and update schemas. It
 // receives the merged shape (for update: pre-fetched row + patch
 // applied; for create: just the body) and enforces the cross-field
@@ -253,29 +261,41 @@ export interface TripCrossFieldShape {
  * Validate the trip cross-field rules against a merged shape. Returns
  * a list of human-readable error messages; an empty array means valid.
  *
- * Rules:
- *   - IN_PROGRESS: startedAt and startOdometerKm MUST be set.
- *   - COMPLETED:   all four start/end odometer+timing fields MUST be set;
- *                  endOdometerKm >= startOdometerKm;
- *                  endedAt >= startedAt;
- *                  endEngineHours >= startEngineHours WHEN BOTH are present.
+ * Rules (the timing checks are meter-agnostic; the reading-required checks
+ * are meter-aware per ADR-0036 c7 — see `meterType` below):
+ *   - IN_PROGRESS: startedAt MUST be set; the meter's start reading MUST be set.
+ *   - COMPLETED:   startedAt + endedAt MUST be set; the meter's start AND end
+ *                  reading MUST be set; endedAt >= startedAt; and end >= start
+ *                  for whichever reading pair(s) are present.
  *   - PLANNED / CANCELLED: no constraint (a planned trip may have
  *     startedAt prefilled for scheduling; a cancelled trip may have
  *     been cancelled at any lifecycle stage and so any combination of
  *     timing fields is legitimate).
  *
- * Engine-hours (ADR-0036) are deliberately NOT required on COMPLETED here:
- * they are meter-dependent (only ENGINE_HOURS/BOTH vehicles capture them),
- * and the meterType-aware "hours required for an hour-metered asset" rule
- * is the trip-stop capture surface's job (B2). This validator only enforces
- * the meter-agnostic pair-invariant — end >= start when both readings are
- * present — which keeps totalHoursLogged (Σ end − start) from going negative.
+ * Meter-aware required readings (ADR-0036 c7). `meterType` says which
+ * reading(s) the asset captures:
+ *   - ODOMETER_KM  → odometer required, engine-hours not.
+ *   - ENGINE_HOURS → engine-hours required, odometer not.
+ *   - BOTH         → both required.
+ * When `meterType` is `undefined` the caller does not know the vehicle's
+ * meter — the CreateTripSchema `.superRefine` path, which sees only the
+ * request body and not the Vehicle row. In that case the required-reading
+ * check is SKIPPED and the *service* re-runs this with the real meterType
+ * (looked up from the vehicle) as the authority. This is why a pure
+ * ENGINE_HOURS vehicle can now complete a trip carrying hours and no
+ * odometer: B1 required odometer unconditionally here, which is exactly
+ * the bug B2 relaxes. The end-≥-start invariants are meter-agnostic and
+ * always run for any reading pair that is present — keeping
+ * totalKmLogged / totalHoursLogged (Σ end − start) from going negative.
  *
- * The service calls this after merging a PATCH; the schema calls this
- * (via superRefine) on the body alone — for `create` that is also the
- * full shape, so the two callsites converge.
+ * The service calls this (with meterType) after merging a PATCH and on
+ * create; the schema calls this (via superRefine, without meterType) on
+ * the body alone as the client-facing first line.
  */
-export function validateTripCrossFields(shape: TripCrossFieldShape): string[] {
+export function validateTripCrossFields(
+  shape: TripCrossFieldShape,
+  meterType?: TripMeterType,
+): string[] {
   const errors: string[] = [];
   const {
     status,
@@ -293,19 +313,36 @@ export function validateTripCrossFields(shape: TripCrossFieldShape): string[] {
   const hasStartHours = startEngineHours !== null && startEngineHours !== undefined;
   const hasEndHours = endEngineHours !== null && endEngineHours !== undefined;
 
+  // Which reading(s) the meter requires. When meterType is undefined (the
+  // schema-superRefine path), neither is required here — the service is the
+  // authority once it knows the vehicle's meter.
+  const requireOdometer = meterType === "ODOMETER_KM" || meterType === "BOTH";
+  const requireHours = meterType === "ENGINE_HOURS" || meterType === "BOTH";
+
   if (status === "IN_PROGRESS") {
     if (!hasStartedAt) {
       errors.push("startedAt is required when status is IN_PROGRESS.");
     }
-    if (!hasStartOdo) {
+    if (requireOdometer && !hasStartOdo) {
       errors.push("startOdometerKm is required when status is IN_PROGRESS.");
+    }
+    if (requireHours && !hasStartHours) {
+      errors.push("startEngineHours is required when status is IN_PROGRESS.");
     }
   }
   if (status === "COMPLETED") {
     if (!hasStartedAt) errors.push("startedAt is required when status is COMPLETED.");
     if (!hasEndedAt) errors.push("endedAt is required when status is COMPLETED.");
-    if (!hasStartOdo) errors.push("startOdometerKm is required when status is COMPLETED.");
-    if (!hasEndOdo) errors.push("endOdometerKm is required when status is COMPLETED.");
+    if (requireOdometer && !hasStartOdo)
+      errors.push("startOdometerKm is required when status is COMPLETED.");
+    if (requireOdometer && !hasEndOdo)
+      errors.push("endOdometerKm is required when status is COMPLETED.");
+    if (requireHours && !hasStartHours)
+      errors.push("startEngineHours is required when status is COMPLETED.");
+    if (requireHours && !hasEndHours)
+      errors.push("endEngineHours is required when status is COMPLETED.");
+    // end-≥-start invariants — meter-agnostic, checked for whichever pair is
+    // present so a BOTH vehicle that carries both readings validates both.
     if (hasStartOdo && hasEndOdo) {
       const start = startOdometerKm as number;
       const end = endOdometerKm as number;
@@ -313,10 +350,6 @@ export function validateTripCrossFields(shape: TripCrossFieldShape): string[] {
         errors.push("endOdometerKm must be greater than or equal to startOdometerKm.");
       }
     }
-    // Engine-hours pair-invariant (ADR-0036 c7), the hours rotation of the
-    // odometer end-≥-start rule. Checked only when BOTH are present — hours
-    // are not required on COMPLETED (see the docstring): an ODOMETER_KM
-    // vehicle's COMPLETED trip carries no hours and must still validate.
     if (hasStartHours && hasEndHours) {
       const start = startEngineHours as number;
       const end = endEngineHours as number;
@@ -351,14 +384,19 @@ export const CreateTripSchema = z
     startOdometerKm: OdometerInt.nullable().optional(),
     endOdometerKm: OdometerInt.nullable().optional(),
     // Engine-hours readings (ADR-0036) — nullable + optional, captured only
-    // for hour-metered vehicles. The meterType-aware "which reading to
-    // prompt for" branching is the trip-stop UI's job (B2); the wire shape
-    // accepts the readings when present.
+    // for hour-metered vehicles. The meterType-aware "which reading is
+    // required" rule (B2) runs in the service, which knows the vehicle's
+    // meter; the wire shape accepts the readings when present.
     startEngineHours: EngineHoursInt.nullable().optional(),
     endEngineHours: EngineHoursInt.nullable().optional(),
     notes: z.string().max(NOTES_MAX, `notes must be at most ${NOTES_MAX} characters.`).optional(),
   })
   .strict()
+  // The superRefine runs the meter-AGNOSTIC checks on the body (timing
+  // presence + end-≥-start). It passes no meterType, so the meter-aware
+  // required-reading rule is deferred to the service (TripsService.create /
+  // .update), which looks up the vehicle's meterType — the body alone cannot
+  // tell whether a missing odometer is wrong (km asset) or fine (hours asset).
   .superRefine((value, ctx) => {
     for (const message of validateTripCrossFields(value)) {
       ctx.addIssue({ code: "custom", message });

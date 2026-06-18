@@ -14,6 +14,7 @@ import {
 import { apiFetch, ApiError } from "@/lib/api";
 import { DRIVER_STATUS_LABELS, LICENSE_CLASS_LABELS } from "@/lib/drivers-schema";
 import { getServerSession } from "@/lib/session";
+import { formatHours } from "@/lib/units";
 
 import { TRIP_STATUS_LABELS, type TripListItem, type TripStatus } from "../../trips/types";
 import type { Driver } from "../types";
@@ -47,6 +48,10 @@ interface DriverStatsResponse {
   driverId: string;
   completedTripCount: number;
   totalKmLogged: number;
+  // Engine-hours lifetime stat (ADR-0036), integer tenths-of-an-hour summed
+  // across the driver's COMPLETED trips; 0 for a driver who never operated
+  // hour-metered equipment. Shown only when > 0 (see the Lifetime stats card).
+  totalHoursLogged: number;
   mostRecentVehicle: {
     id: string;
     registrationNumber: string;
@@ -234,6 +239,17 @@ export default async function DriverDetailPage({
               value={formatKilometers(stats.totalKmLogged)}
               numeric
             />
+            {/* Engine-hours (ADR-0036): a driver may operate both km-metered
+                trucks and hour-metered equipment. Show the hours total only
+                when they have logged equipment hours, so a km-only driver's
+                card stays uncluttered. */}
+            {stats.totalHoursLogged > 0 ? (
+              <DetailRow
+                label="Total hours logged"
+                value={formatHours(stats.totalHoursLogged)}
+                numeric
+              />
+            ) : null}
             <DetailRow
               label="Most recent vehicle"
               value={

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { formatKmPerLitre } from "../src/lib/units";
+import { formatHours, formatKmPerLitre, hoursToTenths, tenthsToHoursInput } from "../src/lib/units";
 
 /**
  * Pins `formatKmPerLitre` — the km/L display helper the per-vehicle
@@ -53,5 +53,55 @@ describe("formatKmPerLitre", () => {
   test("renders a non-finite value as the em-dash", () => {
     expect(formatKmPerLitre(Number.POSITIVE_INFINITY)).toBe("—");
     expect(formatKmPerLitre(Number.NaN)).toBe("—");
+  });
+});
+
+/**
+ * Pins the engine-hours helpers (ADR-0036). Engine-hours are stored as integer
+ * TENTHS of an hour (deci-hours) — the FuelLog.litersMl integer-minor-units
+ * precedent — so the web crosses the decimal↔integer boundary at the form edge
+ * (hoursToTenths / tenthsToHoursInput) and at render (formatHours). These three
+ * are the only place that conversion happens; pinning them keeps the wire
+ * integer matching what the operator typed and the display matching the wire.
+ */
+describe("formatHours", () => {
+  test("renders integer tenths as a one-decimal hours string", () => {
+    expect(formatHours(600)).toBe("60.0 h");
+  });
+
+  test("renders zero as 0.0 h", () => {
+    expect(formatHours(0)).toBe("0.0 h");
+  });
+
+  test("renders a fractional tenth (the hour-meter's native resolution)", () => {
+    expect(formatHours(12345)).toBe("1,234.5 h");
+  });
+
+  test("renders null / undefined / non-finite as the em-dash", () => {
+    expect(formatHours(null)).toBe("—");
+    expect(formatHours(undefined)).toBe("—");
+    expect(formatHours(Number.NaN)).toBe("—");
+    expect(formatHours(Number.POSITIVE_INFINITY)).toBe("—");
+  });
+});
+
+describe("hoursToTenths / tenthsToHoursInput round-trip", () => {
+  test("hoursToTenths converts a decimal-hours value to integer tenths (half-up)", () => {
+    expect(hoursToTenths(1234.5)).toBe(12345);
+    expect(hoursToTenths(60)).toBe(600);
+    expect(hoursToTenths(0)).toBe(0);
+  });
+
+  test("tenthsToHoursInput converts integer tenths back to a one-decimal string", () => {
+    expect(tenthsToHoursInput(12345)).toBe("1234.5");
+    expect(tenthsToHoursInput(12000)).toBe("1200.0");
+    expect(tenthsToHoursInput(0)).toBe("0.0");
+  });
+
+  test("a value round-trips through tenths and back to the same hours", () => {
+    // The edit-form pre-fill (tenths → string) and submit (string → tenths)
+    // must compose to the identity so an untouched hours field is a no-op diff.
+    const tenths = 12345;
+    expect(hoursToTenths(Number(tenthsToHoursInput(tenths)))).toBe(tenths);
   });
 });

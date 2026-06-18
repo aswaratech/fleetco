@@ -18,9 +18,12 @@ import { fuelLogPayload, previewTotalCostPaisa } from "./src/fuel";
 import {
   isStartable,
   isStoppable,
+  meterIncludesHours,
+  meterIncludesOdometer,
   tripStartPayload,
   tripStopPayload,
   type DriverTrip,
+  type TripReadings,
 } from "./src/trips";
 
 // D3 (ADR-0034): a signed-in driver works across two screens — start/stop their
@@ -108,17 +111,18 @@ function TripScreen() {
   }, []);
 
   // Start / stop, then refresh the list. Runs from an onPress handler (not an
-  // effect), so these are ordinary event-driven state updates.
+  // effect), so these are ordinary event-driven state updates. `readings` carries
+  // the meter reading(s) the vehicle calls for (ADR-0036) — km, hours, or both.
   const transition = useCallback(
-    async (trip: DriverTrip, odometerKm: number, kind: "start" | "stop") => {
+    async (trip: DriverTrip, readings: TripReadings, kind: "start" | "stop") => {
       setBusyId(trip.id);
       setError(null);
       try {
         const nowIso = new Date().toISOString();
         const payload =
           kind === "start"
-            ? tripStartPayload(odometerKm, nowIso)
-            : tripStopPayload(odometerKm, nowIso);
+            ? tripStartPayload(readings, nowIso)
+            : tripStopPayload(readings, nowIso);
         await patchTrip(trip.id, payload);
         setTrips(await listMyTrips());
       } catch {
@@ -147,8 +151,8 @@ function TripScreen() {
             <TripRow
               trip={item}
               busy={busyId === item.id}
-              onStart={(km) => void transition(item, km, "start")}
-              onStop={(km) => void transition(item, km, "stop")}
+              onStart={(readings) => void transition(item, readings, "start")}
+              onStop={(readings) => void transition(item, readings, "stop")}
             />
           )}
         />
@@ -165,14 +169,32 @@ function TripRow({
 }: {
   trip: DriverTrip;
   busy: boolean;
-  onStart: (odometerKm: number) => void;
-  onStop: (odometerKm: number) => void;
+  onStart: (readings: TripReadings) => void;
+  onStop: (readings: TripReadings) => void;
 }) {
   const [odometer, setOdometer] = useState("");
+  const [hours, setHours] = useState("");
   const startable = isStartable(trip);
   const stoppable = isStoppable(trip);
+
+  // Meter-aware capture (ADR-0036 c7): prompt for the reading(s) the vehicle's
+  // meter calls for — km for ODOMETER_KM, engine-hours for ENGINE_HOURS, both
+  // for BOTH. A shown reading is required (the API rejects a missing one).
+  const showOdometer = meterIncludesOdometer(trip.vehicle.meterType);
+  const showHours = meterIncludesHours(trip.vehicle.meterType);
+
   const km = Number.parseInt(odometer, 10);
-  const kmValid = Number.isFinite(km) && km >= 0;
+  const odometerOk = !showOdometer || (odometer.trim() !== "" && Number.isFinite(km) && km >= 0);
+  const hoursNum = Number(hours);
+  const hoursOk = !showHours || (hours.trim() !== "" && Number.isFinite(hoursNum) && hoursNum >= 0);
+  const readingsValid = odometerOk && hoursOk;
+
+  function buildReadings(): TripReadings {
+    const readings: TripReadings = {};
+    if (showOdometer) readings.odometerKm = km;
+    if (showHours) readings.engineHours = hoursNum;
+    return readings;
+  }
 
   return (
     <View style={styles.tripRow}>
@@ -182,18 +204,30 @@ function TripRow({
       </View>
       {startable || stoppable ? (
         <View style={styles.tripActions}>
-          <TextInput
-            style={styles.odometer}
-            placeholder="Odometer (km)"
-            keyboardType="number-pad"
-            value={odometer}
-            onChangeText={setOdometer}
-            editable={!busy}
-          />
+          {showOdometer ? (
+            <TextInput
+              style={styles.reading}
+              placeholder="Odometer (km)"
+              keyboardType="number-pad"
+              value={odometer}
+              onChangeText={setOdometer}
+              editable={!busy}
+            />
+          ) : null}
+          {showHours ? (
+            <TextInput
+              style={styles.reading}
+              placeholder="Engine hours"
+              keyboardType="decimal-pad"
+              value={hours}
+              onChangeText={setHours}
+              editable={!busy}
+            />
+          ) : null}
           <Button
             title={busy ? "…" : startable ? "Start trip" : "End trip"}
-            disabled={busy || !kmValid}
-            onPress={() => (startable ? onStart(km) : onStop(km))}
+            disabled={busy || !readingsValid}
+            onPress={() => (startable ? onStart(buildReadings()) : onStop(buildReadings()))}
           />
         </View>
       ) : null}
@@ -538,12 +572,12 @@ const styles = StyleSheet.create({
     color: "#666",
   },
   tripActions: {
-    flexDirection: "row",
-    alignItems: "center",
+    // Column so an hour-metered (or BOTH) vehicle can stack its reading
+    // input(s) above the action button without cramping (ADR-0036).
+    flexDirection: "column",
     gap: 8,
   },
-  odometer: {
-    flex: 1,
+  reading: {
     borderWidth: 1,
     borderColor: "#ccc",
     borderRadius: 8,

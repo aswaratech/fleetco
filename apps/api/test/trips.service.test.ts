@@ -1429,6 +1429,266 @@ describe("TripsService (integration, real Postgres)", () => {
     });
   });
 
+  describe("meter-aware cross-field validation (ADR-0036 c7, B2)", () => {
+    // The B2 relaxation: validateTripCrossFields is now meter-aware. The
+    // service looks up the vehicle's meterType and requires the reading(s)
+    // that meter calls for — km for ODOMETER_KM, hours for ENGINE_HOURS, both
+    // for BOTH. B1 required odometer unconditionally, which blocked a pure
+    // ENGINE_HOURS vehicle from ever completing a trip; these tests pin the fix
+    // across the create AND update paths.
+
+    // --- update(): the headline relaxation ---
+
+    test("ENGINE_HOURS vehicle CAN complete a trip with hours and NO odometer (the B1 blocker, now fixed)", async () => {
+      const excavator = await seedVehicle(prisma, adminId, {
+        kind: VehicleKind.EXCAVATOR,
+        meterType: MeterType.ENGINE_HOURS,
+        engineHoursCurrent: 25000, // 2500.0 h
+      });
+      const created = await seedTrip(prisma, {
+        vehicleId: excavator.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.IN_PROGRESS,
+        startedAt: new Date("2026-02-01T07:00:00Z"),
+        // No odometer reading at all — a pure hour-metered asset.
+        startEngineHours: 25000,
+      });
+
+      const result = await service.update(
+        created.id,
+        {
+          status: TripStatus.COMPLETED,
+          endedAt: "2026-02-01T16:30:00Z",
+          endEngineHours: 25095, // +9.5 h, no endOdometerKm
+        },
+        STAFF_ACTOR,
+      );
+
+      expect(result.status).toBe(TripStatus.COMPLETED);
+      expect(result.endEngineHours).toBe(25095);
+      expect(result.endOdometerKm).toBeNull();
+      // The hours bump still runs; the odometer stays put (none supplied).
+      expect(result.vehicle.engineHoursCurrent).toBe(25095);
+    });
+
+    test("ENGINE_HOURS vehicle: COMPLETED transition WITHOUT end hours → BadRequestException", async () => {
+      const excavator = await seedVehicle(prisma, adminId, {
+        kind: VehicleKind.EXCAVATOR,
+        meterType: MeterType.ENGINE_HOURS,
+        engineHoursCurrent: 25000,
+      });
+      const created = await seedTrip(prisma, {
+        vehicleId: excavator.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.IN_PROGRESS,
+        startedAt: new Date("2026-02-01T07:00:00Z"),
+        startEngineHours: 25000,
+      });
+      // endedAt present but no endEngineHours — the meter requires hours.
+      await expect(
+        service.update(
+          created.id,
+          { status: TripStatus.COMPLETED, endedAt: "2026-02-01T16:30:00Z" },
+          STAFF_ACTOR,
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    test("ENGINE_HOURS vehicle: starting a trip WITHOUT start hours → BadRequestException", async () => {
+      const excavator = await seedVehicle(prisma, adminId, {
+        kind: VehicleKind.EXCAVATOR,
+        meterType: MeterType.ENGINE_HOURS,
+        engineHoursCurrent: 25000,
+      });
+      const created = await seedTrip(prisma, {
+        vehicleId: excavator.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.PLANNED,
+      });
+      // IN_PROGRESS with startedAt but no startEngineHours — hours required.
+      await expect(
+        service.update(
+          created.id,
+          { status: TripStatus.IN_PROGRESS, startedAt: "2026-02-01T07:00:00Z" },
+          STAFF_ACTOR,
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    test("ENGINE_HOURS vehicle: an odometer reading is NOT required to complete", async () => {
+      // Symmetric to the ODOMETER_KM rule — an hour-metered asset's COMPLETED
+      // trip validates with hours only; the absent km is correct, not an error.
+      const loader = await seedVehicle(prisma, adminId, {
+        kind: VehicleKind.LOADER,
+        meterType: MeterType.ENGINE_HOURS,
+        engineHoursCurrent: 5000,
+      });
+      const created = await seedTrip(prisma, {
+        vehicleId: loader.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.IN_PROGRESS,
+        startedAt: new Date("2026-03-01T06:00:00Z"),
+        startEngineHours: 5000,
+      });
+      const result = await service.update(
+        created.id,
+        {
+          status: TripStatus.COMPLETED,
+          endedAt: "2026-03-01T14:00:00Z",
+          endEngineHours: 5080,
+        },
+        STAFF_ACTOR,
+      );
+      expect(result.status).toBe(TripStatus.COMPLETED);
+    });
+
+    test("ODOMETER_KM vehicle: COMPLETED WITHOUT end odometer → BadRequestException (km still required)", async () => {
+      // The default seeded `vehicle` is ODOMETER_KM. Hours are not required,
+      // but km still is — the km path is unchanged by B2.
+      const created = await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.IN_PROGRESS,
+        startedAt: new Date("2026-01-10T08:00:00Z"),
+        startOdometerKm: 80000,
+      });
+      await expect(
+        service.update(
+          created.id,
+          { status: TripStatus.COMPLETED, endedAt: "2026-01-10T17:00:00Z" },
+          STAFF_ACTOR,
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    test("BOTH vehicle: COMPLETED with odometer but NO hours → BadRequestException", async () => {
+      const both = await seedVehicle(prisma, adminId, {
+        meterType: MeterType.BOTH,
+        odometerCurrentKm: 80000,
+        engineHoursCurrent: 10000,
+      });
+      const created = await seedTrip(prisma, {
+        vehicleId: both.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.IN_PROGRESS,
+        startedAt: new Date("2026-01-10T08:00:00Z"),
+        startOdometerKm: 80000,
+        startEngineHours: 10000,
+      });
+      await expect(
+        service.update(
+          created.id,
+          {
+            status: TripStatus.COMPLETED,
+            endedAt: "2026-01-10T17:00:00Z",
+            endOdometerKm: 80250, // km present...
+            // ...but endEngineHours missing — BOTH requires it.
+          },
+          STAFF_ACTOR,
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    test("BOTH vehicle: COMPLETED with hours but NO odometer → BadRequestException", async () => {
+      const both = await seedVehicle(prisma, adminId, {
+        meterType: MeterType.BOTH,
+        odometerCurrentKm: 80000,
+        engineHoursCurrent: 10000,
+      });
+      const created = await seedTrip(prisma, {
+        vehicleId: both.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.IN_PROGRESS,
+        startedAt: new Date("2026-01-10T08:00:00Z"),
+        startOdometerKm: 80000,
+        startEngineHours: 10000,
+      });
+      await expect(
+        service.update(
+          created.id,
+          {
+            status: TripStatus.COMPLETED,
+            endedAt: "2026-01-10T17:00:00Z",
+            endEngineHours: 10080, // hours present, endOdometerKm missing — required.
+          },
+          STAFF_ACTOR,
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    // --- create(): the same rule, meter-aware, on the create path ---
+
+    test("create(): ENGINE_HOURS vehicle COMPLETED with hours-only persists (no odometer required)", async () => {
+      const excavator = await seedVehicle(prisma, adminId, {
+        kind: VehicleKind.EXCAVATOR,
+        meterType: MeterType.ENGINE_HOURS,
+        engineHoursCurrent: 30000,
+      });
+      const result = await service.create(
+        {
+          vehicleId: excavator.id,
+          driverId: driver.id,
+          status: TripStatus.COMPLETED,
+          startedAt: "2026-04-01T07:00:00Z",
+          endedAt: "2026-04-01T15:00:00Z",
+          startEngineHours: 30000,
+          endEngineHours: 30080,
+        },
+        adminId,
+        STAFF_ACTOR,
+      );
+      expect(result.status).toBe(TripStatus.COMPLETED);
+      expect(result.endEngineHours).toBe(30080);
+      expect(result.endOdometerKm).toBeNull();
+    });
+
+    test("create(): ENGINE_HOURS vehicle COMPLETED missing hours → BadRequestException", async () => {
+      const excavator = await seedVehicle(prisma, adminId, {
+        kind: VehicleKind.EXCAVATOR,
+        meterType: MeterType.ENGINE_HOURS,
+        engineHoursCurrent: 30000,
+      });
+      await expect(
+        service.create(
+          {
+            vehicleId: excavator.id,
+            driverId: driver.id,
+            status: TripStatus.COMPLETED,
+            startedAt: "2026-04-01T07:00:00Z",
+            endedAt: "2026-04-01T15:00:00Z",
+            // no engine-hours readings — required for ENGINE_HOURS.
+          },
+          adminId,
+          STAFF_ACTOR,
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    test("create(): ODOMETER_KM vehicle COMPLETED missing odometer → BadRequestException (unchanged)", async () => {
+      await expect(
+        service.create(
+          {
+            vehicleId: vehicle.id, // default ODOMETER_KM
+            driverId: driver.id,
+            status: TripStatus.COMPLETED,
+            startedAt: "2026-01-10T08:00:00Z",
+            endedAt: "2026-01-10T17:00:00Z",
+            // no odometer readings — still required for a km asset.
+          },
+          adminId,
+          STAFF_ACTOR,
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+  });
+
   describe("delete()", () => {
     test("happy path: row gone from the database", async () => {
       const created = await seedTrip(prisma, {

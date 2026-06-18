@@ -20,6 +20,8 @@ import {
   CreateVehicleFormSchema,
   type CreateVehicleFormValues,
   INSURANCE_TYPE_OPTIONS,
+  meterIncludesHours,
+  METER_TYPE_OPTIONS,
   VEHICLE_KIND_OPTIONS,
   VEHICLE_STATUS_OPTIONS,
 } from "@/lib/vehicles-schema";
@@ -67,6 +69,11 @@ export function CreateVehicleForm(): React.ReactElement {
       year: new Date().getFullYear(),
       status: "ACTIVE",
       odometerStartKm: 0,
+      // Engine-hours metering (ADR-0036). Default ODOMETER_KM so the common
+      // truck/tipper create is unchanged; the hours input is hidden until the
+      // operator picks an hour-metered classification.
+      meterType: "ODOMETER_KM",
+      engineHoursStart: "",
       acquiredAt: todayLocalISO(),
       // Compliance metadata (iter 14) — all blank by default; optional.
       bluebookNumber: "",
@@ -79,6 +86,10 @@ export function CreateVehicleForm(): React.ReactElement {
       routePermitExpiresAt: "",
     },
   });
+
+  // Watch meterType so the engine-hours input shows only when the chosen meter
+  // captures hours (ENGINE_HOURS / BOTH) — ADR-0036 c1's "which meter" branch.
+  const hoursMetered = meterIncludesHours(form.watch("meterType"));
 
   async function onSubmit(values: CreateVehicleFormValues): Promise<void> {
     setSubmitError(null);
@@ -235,6 +246,60 @@ export function CreateVehicleForm(): React.ReactElement {
               </FormItem>
             )}
           />
+        </div>
+
+        {/* Metering (ADR-0036). meterType picks which meter(s) the asset has;
+            the engine-hours-at-acquisition input appears only for an
+            hour-metered classification (the earthmoving half of the fleet).
+            The hours "current" field is omitted here, exactly as
+            odometerCurrentKm is — the API defaults current to start. */}
+        <div className="grid gap-4 sm:grid-cols-2">
+          <FormField
+            control={form.control}
+            name="meterType"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Meter type</FormLabel>
+                <FormControl>
+                  <select
+                    className="border-input focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 h-9 w-full rounded-md border bg-transparent px-3 py-1 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:ring-[3px]"
+                    {...field}
+                  >
+                    {METER_TYPE_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          {hoursMetered ? (
+            <FormField
+              control={form.control}
+              name="engineHoursStart"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Engine hours at acquisition</FormLabel>
+                  <FormControl>
+                    <Input
+                      type="number"
+                      inputMode="decimal"
+                      min={0}
+                      step={0.1}
+                      placeholder="1234.5"
+                      className="tabular-nums"
+                      {...field}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          ) : null}
         </div>
 
         <FormField

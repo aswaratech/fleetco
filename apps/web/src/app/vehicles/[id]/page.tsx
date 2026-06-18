@@ -15,8 +15,12 @@ import {
 import { apiFetch, ApiError } from "@/lib/api";
 import { complianceBadgeState } from "@/lib/compliance";
 import { getServerSession } from "@/lib/session";
+import { formatHours } from "@/lib/units";
 import {
   INSURANCE_TYPE_LABELS,
+  meterIncludesHours,
+  meterIncludesOdometer,
+  METER_TYPE_LABELS,
   VEHICLE_KIND_LABELS,
   VEHICLE_STATUS_LABELS,
 } from "@/lib/vehicles-schema";
@@ -55,6 +59,9 @@ interface VehicleStatsResponse {
   vehicleId: string;
   completedTripCount: number;
   totalKmLogged: number;
+  // Engine-hours lifetime stat (ADR-0036), integer tenths-of-an-hour; 0 for a
+  // km-only vehicle. Shown on the Lifetime stats card for hour-metered assets.
+  totalHoursLogged: number;
   mostRecentDriver: {
     id: string;
     fullName: string;
@@ -188,6 +195,12 @@ export default async function VehicleDetailPage({
     throw error;
   }
 
+  // Engine-hours (ADR-0036 c1/c6): the detail page shows km, hours, or both per
+  // the asset's meter — an ENGINE_HOURS excavator shows hours where a truck
+  // shows km, a BOTH asset shows both.
+  const showOdometer = meterIncludesOdometer(vehicle.meterType);
+  const showHours = meterIncludesHours(vehicle.meterType);
+
   return (
     <main className="bg-surface-canvas min-h-svh">
       <div className="mx-auto max-w-3xl space-y-6 px-8 py-8">
@@ -232,15 +245,37 @@ export default async function VehicleDetailPage({
               value={VEHICLE_STATUS_LABELS[vehicle.status] ?? vehicle.status}
             />
             <DetailRow
-              label="Odometer at acquisition"
-              value={formatKilometers(vehicle.odometerStartKm)}
-              numeric
+              label="Meter type"
+              value={METER_TYPE_LABELS[vehicle.meterType] ?? vehicle.meterType}
             />
-            <DetailRow
-              label="Odometer current"
-              value={formatKilometers(vehicle.odometerCurrentKm)}
-              numeric
-            />
+            {showOdometer ? (
+              <>
+                <DetailRow
+                  label="Odometer at acquisition"
+                  value={formatKilometers(vehicle.odometerStartKm)}
+                  numeric
+                />
+                <DetailRow
+                  label="Odometer current"
+                  value={formatKilometers(vehicle.odometerCurrentKm)}
+                  numeric
+                />
+              </>
+            ) : null}
+            {showHours ? (
+              <>
+                <DetailRow
+                  label="Engine hours at acquisition"
+                  value={formatHours(vehicle.engineHoursStart)}
+                  numeric
+                />
+                <DetailRow
+                  label="Engine hours current"
+                  value={formatHours(vehicle.engineHoursCurrent)}
+                  numeric
+                />
+              </>
+            ) : null}
             <DetailRow label="Acquired at" value={<NepaliDate iso={vehicle.acquiredAt} />} />
             <DetailRow label="Retired at" value={<NepaliDate iso={vehicle.retiredAt} />} />
             <DetailRow label="Created at" value={formatTimestamp(vehicle.createdAt)} />
@@ -301,11 +336,20 @@ export default async function VehicleDetailPage({
           </h2>
           <dl className="grid grid-cols-1 gap-x-8 gap-y-4 sm:grid-cols-3">
             <DetailRow label="Completed trips" value={String(stats.completedTripCount)} numeric />
-            <DetailRow
-              label="Total km logged"
-              value={formatKilometers(stats.totalKmLogged)}
-              numeric
-            />
+            {showOdometer ? (
+              <DetailRow
+                label="Total km logged"
+                value={formatKilometers(stats.totalKmLogged)}
+                numeric
+              />
+            ) : null}
+            {showHours ? (
+              <DetailRow
+                label="Total hours logged"
+                value={formatHours(stats.totalHoursLogged)}
+                numeric
+              />
+            ) : null}
             <DetailRow
               label="Most recent driver"
               value={

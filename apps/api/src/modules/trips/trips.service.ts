@@ -74,6 +74,10 @@ const LIST_SELECT = {
     select: {
       id: true,
       registrationNumber: true,
+      // meterType (ADR-0036 B2): the driver app branches its trip start/stop
+      // capture on the vehicle's meter (km vs engine-hours vs both). Additive
+      // to the slim list projection — the web list ignores the extra field.
+      meterType: true,
     },
   },
   driver: {
@@ -270,12 +274,16 @@ export class TripsService {
    * the wire; the service trusts that and uses only fields from
    * `CreateTripInput`.
    *
-   * Cross-field rules (IN_PROGRESS requires startedAt + startOdometerKm;
-   * COMPLETED requires all four start/end fields and end >= start) are
-   * already validated by the schema's superRefine for the create path,
-   * so this method does not re-run them — re-validation here would
-   * change nothing on a happy path and only obscure error origin on
-   * the failure path.
+   * Cross-field rules: the schema's `.superRefine` runs the meter-AGNOSTIC
+   * subset (timing presence + end-≥-start) on the body. The meter-AWARE
+   * required-reading rule (ADR-0036 c7 — km for ODOMETER_KM, hours for
+   * ENGINE_HOURS, both for BOTH) needs the vehicle's meterType, which the
+   * schema cannot see, so we re-run `validateTripCrossFields` here with the
+   * meterType looked up from the vehicle — but only for the two statuses that
+   * carry readings (IN_PROGRESS / COMPLETED), so a PLANNED create (the common
+   * case) skips the extra read. A missing vehicle leaves meterType undefined
+   * (no required-reading check); the trip.create below then raises the FK
+   * P2003 → "Vehicle does not exist." that names the real problem.
    *
    * P2003 (foreign-key constraint failure) on insert means the
    * `vehicleId` or `driverId` points at a deleted (or never-existed)
@@ -292,6 +300,21 @@ export class TripsService {
     // capability denial), not 404.
     if (actor.role === UserRole.DRIVER) {
       throw new ForbiddenException();
+    }
+
+    // Meter-aware cross-field re-validation (ADR-0036 c7). Only IN_PROGRESS /
+    // COMPLETED carry readings, so only those need the vehicle's meterType; a
+    // PLANNED/CANCELLED create skips the lookup. The schema already ran the
+    // meter-agnostic subset; this adds the "right reading for this meter" rule.
+    if (input.status === "IN_PROGRESS" || input.status === "COMPLETED") {
+      const vehicleMeter = await this.prisma.vehicle.findUnique({
+        where: { id: input.vehicleId },
+        select: { meterType: true },
+      });
+      const crossFieldErrors = validateTripCrossFields(input, vehicleMeter?.meterType);
+      if (crossFieldErrors.length > 0) {
+        throw new BadRequestException(crossFieldErrors.join(" "));
+      }
     }
 
     const data: Prisma.TripUncheckedCreateInput = {
@@ -428,8 +451,23 @@ export class TripsService {
       }
     }
 
-    // Cross-field validation against the merged shape.
-    const crossFieldErrors = validateTripCrossFields(merged);
+    // Cross-field validation against the merged shape. The meter-aware
+    // required-reading rule (ADR-0036 c7) needs the vehicle's meterType; we
+    // look it up for the EFFECTIVE vehicle (a PATCH may reassign vehicleId)
+    // only when the merged status carries readings. A missing vehicle leaves
+    // meterType undefined (no required-reading check); the FK P2003 below
+    // surfaces the real "Vehicle does not exist." on the write.
+    let meterType: MeterType | undefined;
+    if (merged.status === "IN_PROGRESS" || merged.status === "COMPLETED") {
+      const effectiveVehicleId =
+        has("vehicleId") && input.vehicleId !== undefined ? input.vehicleId : existing.vehicleId;
+      const vehicleMeter = await this.prisma.vehicle.findUnique({
+        where: { id: effectiveVehicleId },
+        select: { meterType: true },
+      });
+      meterType = vehicleMeter?.meterType;
+    }
+    const crossFieldErrors = validateTripCrossFields(merged, meterType);
     if (crossFieldErrors.length > 0) {
       throw new BadRequestException(crossFieldErrors.join(" "));
     }
