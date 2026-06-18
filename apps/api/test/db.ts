@@ -35,6 +35,12 @@ const TABLES = [
   "geofence",
   "gps_ping",
   "fuel_log",
+  // Program D (ADR-0039): the Invoice aggregate. invoice_line is the owned child
+  // (FK -> invoice CASCADE, + nullable trip/job provenance FKs) so it precedes
+  // invoice; invoice FKs into customer/job/user (and itself, the credit-note
+  // self-FK), so both precede those tables. CASCADE makes order cosmetic.
+  "invoice_line",
+  "invoice",
   "job",
   "trip",
   "driver",

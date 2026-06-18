@@ -60,6 +60,7 @@ model User {
   geofencesCreated        Geofence[]        @relation("GeofenceCreatedBy")
   serviceSchedulesCreated ServiceSchedule[] @relation("ServiceScheduleCreatedBy")
   serviceRecordsCreated   ServiceRecord[]   @relation("ServiceRecordCreatedBy")
+  invoicesCreated         Invoice[]         @relation("InvoiceCreatedBy")
   /// The Driver this login identity is linked to, if any (ADR-0034 c4). A User
   /// with role DRIVER is linked 1:1 to a Driver row via Driver.userId.
   driver                  Driver?           @relation("DriverUser")
@@ -507,6 +508,12 @@ model Trip {
   expenseLogs ExpenseLog[]
   gpsPings    GpsPing[]
 
+  // Program D (ADR-0039 c2): an InvoiceLine optionally references its source Trip
+  // (InvoiceLine.tripId, nullable) for provenance — the billable execution a line
+  // bills. onDelete: Restrict, so a trip referenced by an invoice line cannot be
+  // silently deleted.
+  invoiceLines InvoiceLine[]
+
   @@index([status])
   @@index([vehicleId])
   @@index([driverId])
@@ -611,6 +618,13 @@ model Customer {
   // customer that owns a customer-site fence returns a clean 409.
   geofences Geofence[]
 
+  // Program D (ADR-0039 c1): the Invoice aggregate references Customer by id
+  // (Invoice.customerId, required, onDelete: Restrict). Covered for free by
+  // CustomersService.delete's EXISTING P2003 -> 409 arm — deleting a customer
+  // that has invoices returns a clean 409, no CustomersService change in
+  // Program D.
+  invoices Invoice[]
+
   @@index([status])
   @@index([createdById])
   @@map("customer")
@@ -714,6 +728,14 @@ model Job {
   /// should remain intact for the job's lifetime.
   createdById        String
   createdBy          User      @relation("JobCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  // Program D (ADR-0039 c1/c2): an Invoice optionally references a Job
+  // (Invoice.jobId, nullable) and an InvoiceLine optionally references its source
+  // Job (InvoiceLine.jobId, nullable) for provenance. Both FKs are onDelete:
+  // Restrict, so a job referenced by invoices or invoice lines cannot be silently
+  // deleted (the future JobsService.delete P2003 -> 409 arm covers it).
+  invoices     Invoice[]
+  invoiceLines InvoiceLine[]
 
   @@index([customerId])
   @@index([status])
@@ -1453,17 +1475,17 @@ model NotificationLog {
 
   /// Tier 3 per ADR-0013 — the subject domain. "VEHICLE" today; "SERVICE_SCHEDULE"
   /// in C3. A String (not an enum) so C3 extends it with no migration.
-  subjectType String
+  subjectType   String
   /// Tier 3 per ADR-0013 — the subject row id (e.g. the Vehicle id). Not a FK:
   /// the ledger must survive the subject's deletion as an audit record.
-  subjectId   String
+  subjectId     String
   /// Tier 3 per ADR-0013 — which document/dimension lapsed. "BLUEBOOK" /
   /// "INSURANCE" / "ROUTE_PERMIT" today; the service kinds in C3.
-  reminderKind String
+  reminderKind  String
   /// Tier 3 per ADR-0013 — the threshold crossed, the shared classifier's literal
   /// ("expiring-soon" / "expired"; C3 adds "due-soon" / "overdue"). Distinct keys
   /// per state so one reminder fires on entering each.
-  state        String
+  state         String
   /// Tier 3 per ADR-0013 — the due date that armed this reminder (the expiry ISO
   /// date string). A new expiry (renewal) is a new occurrenceKey, so the reminder
   /// re-arms rather than staying suppressed.
@@ -1494,4 +1516,250 @@ model NotificationLog {
   // Default "most recent first" ordering for the C4 history view.
   @@index([createdAt(sort: Desc)])
   @@map("notification_log")
+}
+
+// Invoicing module. Owned by apps/api/src/modules/invoices/ per ADR-0001.
+// FleetCo's FIRST revenue-side aggregate (Program D / ADR-0039), pulled forward
+// from Phase 4 "Money" under the ADR-0025 ahead-of-gate pattern (ADR-0039
+// §"Phase mismatch"; the PO accepted the build-now path 2026-06-18, see the
+// ADR's ## Acceptance block). Everything shipped to date is COST-side
+// (FuelLog.totalCostPaisa, ExpenseLog.amountPaisa); an Invoice turns the
+// Customer -> Job -> Trip chain (ADR-0003) into a compliant Nepal VAT invoice —
+// the first EXTERNAL legal/tax document in the system.
+//
+// Modeled as a dedicated TWO-table aggregate (ADR-0039 c1) — an Invoice (the
+// header: customer, optional job, the fiscal-year number, the status, the frozen
+// tax breakdown, the R2 PDF key) and an InvoiceLine (the billable lines, each
+// optionally referencing a Trip/Job for provenance and carrying the captured
+// selling amount) — rather than columns on Customer/Job, because the cardinality
+// is wrong for columns (a customer has MANY invoices; an invoice has MANY lines),
+// the same reasoning ADR-0030's Geofence and ADR-0037's ServiceSchedule/
+// ServiceRecord used. This mirrors the Phase-1 aggregate CRUD convention.
+//
+// D1 (this slice) ships ONLY the schema + its hand-authored migration + the READ
+// skeleton (list/detail) + the test/db.ts truncate entries + tests. The TAX MATH
+// (D2), the gapless fiscal-year NUMBER + the DRAFT->ISSUED lifecycle (D3), the
+// build-from-trips line assembly (D4), the PDF render + R2 storage (D5), and the
+// web surface (D6) layer on top in later tickets. So every frozen-tax column +
+// the number + issuedAt + pdfR2Key land NULLABLE now and are filled at issue
+// later; no create/issue/update logic exists in D1.
+//
+// Tier annotations per ADR-0013: an invoice is Tier-3 financial / operational
+// business data (ADR-0013 names "customer commercial terms" Tier 3; its Context
+// already anticipated "financial records that interact with Nepal's IRD"). The
+// money columns, the rates, the number, the serviceType, and the PDF key carry
+// /// Tier 3 marks. There is NO new PII on these tables: the buyer PAN is the
+// existing Tier-3 Customer.panNumber (read through the Customer relation, not
+// copied here), FleetCo's OWN supplier PAN is an operator-supplied settings value
+// (NOT built in D1, NOT hardcoded — ADR-0039 c9), and any buyer contact PII on
+// the rendered document is the existing Tier-2 Customer fields the pino redact
+// list already covers. So — like Geofence/ServiceSchedule — NO new pino-redact
+// entry is added (over-redacting Tier-3 operational data hides signal). ADR-0039
+// c9 flags a companion ADR-0013 revisit for financial-data sensitivity; that is
+// a later decision, not assumed here.
+//
+// Nepal tax specifics are PROPOSED-pending-operator/accountant-verification
+// (ADR-0039 c9): the VAT rate (13%), the TDS rates (1.5% vehicle-hire / 2.5%
+// goods-transport) and their service mapping, the IRD-required field set, and the
+// gapless/immutable/BS-fiscal-year numbering rules are stated as proposed values
+// the operator's accountant verifies BEFORE real billing. D1 lands only NULLABLE
+// columns to hold those values; the FLAGGED proposed rate constants live in the
+// D2 tax calculator. Money stays integer paisa (CLAUDE.md); storage stays ISO/UTC
+// (DESIGN.md anti-pattern #12 — never store BS; the BS fiscal year is DERIVED at
+// issue/render, not stored).
+//
+// FK delete policy (ADR-0039 c1): Invoice.customerId (required) and Invoice.jobId
+// (nullable) are onDelete: Restrict (the house posture — FuelLog/ExpenseLog/
+// GpsPing/Job all Restrict): a customer or job with invoices cannot be silently
+// deleted, and CustomersService.delete's EXISTING P2003 -> 409 arm (and a future
+// JobsService one) covers the new referencer with no service change. The one
+// parent-child relation that CASCADEs is Invoice -> InvoiceLine: a line is OWNED
+// by its invoice, so deleting a DRAFT invoice deletes its lines (an ISSUED
+// invoice is immutable and never deleted — D3). InvoiceLine.tripId/jobId
+// (provenance, nullable) Restrict. Invoice.originalInvoiceId (a credit note's
+// reference to the invoice it corrects, nullable self-FK) Restrict — the original
+// is never deleted out from under its credit note. createdById follows the same
+// Restrict audit-chain posture as every other createdBy FK.
+
+// Invoice lifecycle status (ADR-0039 c5). A DRAFT is fully mutable and unnumbered;
+// issuing (D3) is a one-way transition that assigns the gapless number, freezes
+// the tax snapshot, and flips to ISSUED (immutable, corrected only by credit
+// note); CANCELLED is available only for a DRAFT. The LOGIC is D3 — D1 lands only
+// the column (default DRAFT). Mirrors the discriminated-enum house style
+// (TripStatus/JobStatus/CustomerStatus over a free string).
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  CANCELLED
+
+  @@map("invoice_status")
+}
+
+// Document-type discriminator (ADR-0039 c5). An INVOICE bills a customer; a
+// CREDIT_NOTE corrects an already-ISSUED invoice (the ONLY correction path — an
+// issued invoice is never edited or deleted) and references its original via
+// Invoice.originalInvoiceId, with its OWN gapless fiscal-year series. The credit-
+// note LOGIC is D3 — D1 lands only the column (default INVOICE) + the self-FK.
+// An invoice-specific discriminator on the same aggregate is the deliberate
+// choice over a generic/polymorphic "document" engine (ADR-0039 c10e / the
+// EAV-over-abstraction rejection ADR-0037 made).
+enum DocumentType {
+  INVOICE
+  CREDIT_NOTE
+
+  @@map("document_type")
+}
+
+// Service-type discriminator for the applicable TDS rate (ADR-0039 c9).
+// VEHICLE_HIRE (vehicle/equipment hire) vs GOODS_TRANSPORT (goods carriage within
+// Nepal) select the PROPOSED 1.5% vs 2.5% TDS rate respectively — the D2
+// calculator maps this to a tdsRateBp. WHICH service maps to WHICH rate, and
+// whether a given job is "hire" or "transport", is precisely the accountant-
+// verified detail the agent must not assume (ADR-0039 c9); D1 lands only the
+// nullable column. Named InvoiceServiceType (not ServiceType) to avoid confusion
+// with the maintenance "service" domain (ServiceSchedule/ServiceRecord).
+// Nullable: chosen/frozen at issue.
+enum InvoiceServiceType {
+  VEHICLE_HIRE
+  GOODS_TRANSPORT
+
+  @@map("invoice_service_type")
+}
+
+model Invoice {
+  id                 String              @id @default(cuid())
+  /// FK to Customer (the billed party; ADR-0039 c1). Required — every invoice
+  /// bills a customer. Indexed individually so the "invoices for this customer"
+  /// query hits an index. onDelete: Restrict — a customer with invoices cannot be
+  /// deleted (CustomersService.delete's existing P2003 -> 409 arm covers it).
+  customerId         String
+  customer           Customer            @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  /// Nullable FK to Job (ADR-0039 c1). The common case is one invoice for one
+  /// job, but a consolidated invoice may span several jobs (or a date range of
+  /// trips) and an ad-hoc invoice may reference none — hence nullable. onDelete:
+  /// Restrict so a referenced job cannot be silently deleted.
+  jobId              String?
+  job                Job?                @relation(fields: [jobId], references: [id], onDelete: Restrict)
+  status             InvoiceStatus       @default(DRAFT)
+  documentType       DocumentType        @default(INVOICE)
+  /// Nullable self-FK (ADR-0039 c5): a CREDIT_NOTE references the ISSUED invoice
+  /// it corrects; null for an ordinary INVOICE. onDelete: Restrict — the original
+  /// is never deleted out from under its credit note. The credit-note LOGIC is
+  /// D3; D1 lands the column + the self-relation only.
+  originalInvoiceId  String?
+  originalInvoice    Invoice?            @relation("InvoiceCreditNotes", fields: [originalInvoiceId], references: [id], onDelete: Restrict)
+  creditNotes        Invoice[]           @relation("InvoiceCreditNotes")
+  /// Tier 3 per ADR-0013 — the gapless, never-reused, BS-fiscal-year-scoped
+  /// invoice number (e.g. INV-2082-83-00001), the IRD anti-tamper anchor.
+  /// Assigned ONLY at issue (D3) by a transaction-locked counter; NULL on a
+  /// DRAFT. @unique so two issued documents never share a number (Postgres allows
+  /// multiple NULLs under a UNIQUE index, so unnumbered drafts do not collide).
+  /// The numbering LOGIC is D3.
+  number             String?             @unique
+  /// Tier 3 per ADR-0013 — sum of lineAmountPaisa before VAT (the taxable base
+  /// before any discount), integer paisa. NULL until issue freezes the snapshot
+  /// (D2/D3).
+  subtotalPaisa      Int?
+  /// Tier 3 per ADR-0013 — optional discount applied to the subtotal, integer
+  /// paisa; the discounted figure is the taxable base. NULL until issue.
+  discountPaisa      Int?
+  /// Tier 3 per ADR-0013 — the VAT rate in BASIS POINTS (1300 = 13%), snapshot-
+  /// frozen on the invoice so a future statutory rate change never rewrites an
+  /// already-issued invoice (the anti-tamper freeze, ADR-0039 c3/c5). The PROPOSED
+  /// 13% is operator/accountant-verify before real use (ADR-0039 c9). NULL until
+  /// issue.
+  vatRateBp          Int?
+  /// Tier 3 per ADR-0013 — VAT amount = round(taxable * vatRateBp / 10000),
+  /// integer paisa, half-up (the FuelLogsService.deriveTotalCostPaisa rule, D2).
+  /// NULL until issue.
+  vatPaisa           Int?
+  /// Tier 3 per ADR-0013 — gross total = taxable + VAT, the amount legally billed
+  /// to the customer, integer paisa. NULL until issue.
+  grossPaisa         Int?
+  /// Tier 3 per ADR-0013 — the applicable TDS rate in BASIS POINTS (150 = 1.5%
+  /// vehicle-hire / 250 = 2.5% goods-transport, by serviceType), snapshot-frozen.
+  /// TDS is WITHHELD by the payer, not charged by FleetCo (it does not change
+  /// grossPaisa); captured to show the expected net receivable. PROPOSED rates,
+  /// operator/accountant-verify (ADR-0039 c9). NULL until issue.
+  tdsRateBp          Int?
+  /// Tier 3 per ADR-0013 — TDS memo amount = round(taxable * tdsRateBp / 10000),
+  /// integer paisa, half-up. NULL until issue.
+  tdsPaisa           Int?
+  /// Tier 3 per ADR-0013 — net receivable = grossPaisa - tdsPaisa, the cash
+  /// FleetCo expects after the customer withholds and remits TDS to the IRD on
+  /// FleetCo's behalf, integer paisa. NULL until issue.
+  netReceivablePaisa Int?
+  /// Tier 3 per ADR-0013 — the service-type discriminator selecting the TDS rate
+  /// (D2). Nullable: chosen/frozen at issue. PROPOSED mapping, operator-verify.
+  serviceType        InvoiceServiceType?
+  /// When the invoice was ISSUED (UTC). NULL on a DRAFT; set by the one-way issue
+  /// transition (D3). ISO/UTC per CLAUDE.md; rendered Bikram Sambat on the web
+  /// side (D6) and used to derive the BS fiscal year for the number (D3).
+  issuedAt           DateTime?
+  /// Tier 3 per ADR-0013 — the Cloudflare R2 object key of the FROZEN issued PDF
+  /// (ADR-0039 c7; the FIRST in-app R2 use, wired in D5). NULL until issue; DRAFT
+  /// previews regenerate on demand and are never stored.
+  pdfR2Key           String?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  /// References the User who created the invoice (ADR-0021). Audit field;
+  /// Restrict so the invoice's audit chain stays intact for its lifetime.
+  createdById        String
+  createdBy          User                @relation("InvoiceCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  /// The owned billable lines. Cascade on the InvoiceLine side: deleting a DRAFT
+  /// invoice deletes its lines (an ISSUED invoice is immutable and never deleted).
+  lines InvoiceLine[]
+
+  @@index([customerId])
+  @@index([jobId])
+  @@index([status])
+  @@index([documentType])
+  @@index([originalInvoiceId])
+  @@index([createdById])
+  @@index([createdAt(sort: Desc)])
+  @@map("invoice")
+}
+
+model InvoiceLine {
+  id              String   @id @default(cuid())
+  /// FK to the owning Invoice (ADR-0039 c1). onDelete: Cascade — a line is OWNED
+  /// by its invoice (the one true parent-child relation in this aggregate; the
+  /// invoice itself Restricts against Customer/Job). Deleting a DRAFT invoice
+  /// deletes its lines. Indexed so the "lines for this invoice" read hits an index.
+  invoiceId       String
+  invoice         Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  /// Nullable FK to the source Trip (ADR-0039 c2) — the billable execution this
+  /// line bills, for provenance. NULL for a manual line (a flat mobilization fee,
+  /// a discount). onDelete: Restrict so a referenced trip cannot be silently
+  /// deleted.
+  tripId          String?
+  trip            Trip?    @relation(fields: [tripId], references: [id], onDelete: Restrict)
+  /// Nullable FK to the source Job (ADR-0039 c2) for provenance. onDelete:
+  /// Restrict.
+  jobId           String?
+  job             Job?     @relation(fields: [jobId], references: [id], onDelete: Restrict)
+  /// Tier 3 per ADR-0013 — free-text line description (e.g. "Haul aggregate
+  /// Kalimati -> Pokhara, 2083 Shrawan 3"). The trip's BS date is rendered into
+  /// this string at build time (D4); not PII.
+  description     String
+  /// Tier 3 per ADR-0013 — the unit count (tonnes, trips, days), an INTEGER per
+  /// ADR-0039 c2. Fractional quantities are a follow-up (capture as quantity=1 +
+  /// the full amount in unitPricePaisa).
+  quantity        Int
+  /// Tier 3 per ADR-0013 — price per unit in paisa (1 NPR = 100 paisa), always
+  /// integer minor units (CLAUDE.md). The LINE is the FIRST place a SELLING price
+  /// is captured — the Trip carries no price (ADR-0039 c2 / Phase-mismatch §4).
+  unitPricePaisa  Int
+  /// Tier 3 per ADR-0013 — derived line total = quantity * unitPricePaisa, integer
+  /// paisa, stored so reads do not recompute. The derivation runs at write time
+  /// (D4); D1 treats it as authoritative for the amount entered.
+  lineAmountPaisa Int
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([invoiceId])
+  @@index([tripId])
+  @@index([jobId])
+  @@map("invoice_line")
 }
