@@ -17,6 +17,7 @@
     "auth:secret": "node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\""
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "3.1072.0",
     "@fleetco/shared": "workspace:*",
     "@nestjs/bullmq": "^11.0.4",
     "@nestjs/common": "^11.1.24",
@@ -34,6 +35,7 @@
     "dotenv": "^17.0.0",
     "ioredis": "^5.0.0",
     "nestjs-pino": "^4.0.0",
+    "pdfkit": "0.19.1",
     "pino": "^9.0.0",
     "pino-http": "^10.0.0",
     "reflect-metadata": "^0.2.0",
@@ -47,6 +49,7 @@
     "@swc/core": "^1.15.40",
     "@types/express": "^5.0.6",
     "@types/node": "^24.0.0",
+    "@types/pdfkit": "0.17.6",
     "pino-pretty": "^11.0.0",
     "prisma": "^6.0.0",
     "tsx": "^4.22.3",
