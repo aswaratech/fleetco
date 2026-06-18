@@ -1403,3 +1403,95 @@ model ServiceRecord {
   @@index([createdById])
   @@map("service_record")
 }
+
+// NotificationLog — the send-once dedup ledger AND audit trail for the
+// reminder-delivery channel (ADR-0038 commitment 5). The load-bearing
+// correctness requirement is that a lapsing compliance document (or, in C3, an
+// overdue service) is emailed ONCE when it crosses a threshold, never re-emailed
+// every morning until it is renewed — the behavior that would train the operator
+// to filter the channel to trash. Each daily scan classifies the current
+// sources, computes the dedup key below for every item now in a remind-worthy
+// state, and emails only the keys ABSENT from this table; the keys it does email
+// are recorded here so the next scan skips them.
+//
+// THE DEDUP KEY — @@unique([subjectType, subjectId, reminderKind, state,
+// occurrenceKey]):
+//   • subjectType + subjectId — what lapsed. e.g. "VEHICLE" + the vehicle id
+//     (C3 adds "SERVICE_SCHEDULE" + the schedule id).
+//   • reminderKind — which document/dimension. e.g. "BLUEBOOK" / "INSURANCE" /
+//     "ROUTE_PERMIT" (C3 adds the service kinds).
+//   • state — the threshold crossed. "expiring-soon" vs "expired" are DISTINCT
+//     keys, so an item reminds at most once on entering EACH state (one
+//     "expiring soon" email, then one "expired" email), never daily within a
+//     state. (C3's service source uses "due-soon" / "overdue".)
+//   • occurrenceKey — the due date itself (the expiry ISO date string). This is
+//     what makes RENEWAL re-arm: when the operator renews the bluebook to a new
+//     expiry, the new date is a new occurrenceKey, so a future lapse of the
+//     renewed document is a genuinely new reminder, not a suppressed duplicate.
+//
+// WHY THESE ARE STRING COLUMNS, NOT PRISMA ENUMS: the C3 maintenance source must
+// wire in WITHOUT a migration (the kickoff's "C3 is migration-free"), so the key
+// fields must accept new values (SERVICE_SCHEDULE, the service kinds, due-soon/
+// overdue) as new strings — an enum would force an ALTER TYPE migration.
+// Additionally `state` mirrors the SHARED @fleetco/shared classifier's output
+// (ComplianceBadgeState), so storing the literal keeps ONE source of the value
+// and avoids a classifier↔enum drift hazard (the exact failure ADR-0038 c6
+// guards against). Type-safety for these fields lives in the TS scan layer
+// (typed unions built from the shared classifier + FleetCo-owned constants); the
+// column just stores the computed key. This is a deliberate departure from the
+// enum house style, justified by the extensibility + anti-drift requirements.
+//
+// Tier 3 per ADR-0013 — operational audit data. The one Tier-2 field is
+// `recipient` (a recipient email address); it is NEVER logged (the worker span
+// carries only counts, never addresses — ADR-0038 c9 — and no code logs a
+// NotificationLog row), so per the ADR no new pino redact entry is added.
+//
+// NO createdById FK: a scan is a background job, not a user action, so there is
+// no acting User to attribute (unlike every request-driven aggregate).
+model NotificationLog {
+  id String @id @default(cuid())
+
+  /// Tier 3 per ADR-0013 — the subject domain. "VEHICLE" today; "SERVICE_SCHEDULE"
+  /// in C3. A String (not an enum) so C3 extends it with no migration.
+  subjectType String
+  /// Tier 3 per ADR-0013 — the subject row id (e.g. the Vehicle id). Not a FK:
+  /// the ledger must survive the subject's deletion as an audit record.
+  subjectId   String
+  /// Tier 3 per ADR-0013 — which document/dimension lapsed. "BLUEBOOK" /
+  /// "INSURANCE" / "ROUTE_PERMIT" today; the service kinds in C3.
+  reminderKind String
+  /// Tier 3 per ADR-0013 — the threshold crossed, the shared classifier's literal
+  /// ("expiring-soon" / "expired"; C3 adds "due-soon" / "overdue"). Distinct keys
+  /// per state so one reminder fires on entering each.
+  state        String
+  /// Tier 3 per ADR-0013 — the due date that armed this reminder (the expiry ISO
+  /// date string). A new expiry (renewal) is a new occurrenceKey, so the reminder
+  /// re-arms rather than staying suppressed.
+  occurrenceKey String
+
+  /// Tier 2 PII per ADR-0013 — the recipient address(es) the digest was sent to
+  /// (comma-joined when more than one; v1 is the single operator). NEVER logged:
+  /// the worker span carries only counts (ADR-0038 c9) and no code logs this row,
+  /// so per ADR-0038 no new pino redact entry is added.
+  recipient         String
+  /// When the send that delivered this lapse's digest completed (ADR-0038 c5:
+  /// written at scan time as intent with sentAt null, completed by the send).
+  /// Null between the scan-time intent and the send completion.
+  sentAt            DateTime?
+  /// Tier 3 per ADR-0013 — the transactional provider's message id from the
+  /// completing send, when it returns one (Resend does). Null until sent.
+  providerMessageId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // The send-once dedup key (ADR-0038 c5). At most one row per
+  // (subject, kind, state, occurrence) — the scan checks this key's presence to
+  // decide whether a lapse is newly-crossed.
+  @@unique([subjectType, subjectId, reminderKind, state, occurrenceKey])
+  // "All reminders about this subject" (the C4 history view / debugging).
+  @@index([subjectType, subjectId])
+  // Default "most recent first" ordering for the C4 history view.
+  @@index([createdAt(sort: Desc)])
+  @@map("notification_log")
+}
