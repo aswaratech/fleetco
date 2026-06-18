@@ -16,14 +16,22 @@ import {
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { UpdateTripFormSchema, type UpdateTripFormValues } from "@/lib/trips-schema";
+import { tenthsToHoursInput } from "@/lib/units";
+import { meterIncludesHours, meterIncludesOdometer } from "@/lib/vehicles-schema";
 
-import type { TripDetail } from "../../types";
+import type { TripDetail, VehicleMeterType } from "../../types";
 import { TRIP_STATUS_OPTIONS } from "../../types";
 import { updateTripAction } from "../../actions";
 
 interface EditTripFormProps {
   trip: TripDetail;
-  vehicles: { id: string; registrationNumber: string; make: string; model: string }[];
+  vehicles: {
+    id: string;
+    registrationNumber: string;
+    make: string;
+    model: string;
+    meterType: VehicleMeterType;
+  }[];
   drivers: { id: string; fullName: string; licenseNumber: string }[];
 }
 
@@ -49,6 +57,12 @@ function numberOrEmpty(value: number | null): string {
   return String(value);
 }
 
+// Engine-hours (ADR-0036): integer tenths → decimal-hours string for pre-fill,
+// or "" when null (a km-only trip). Mirror of numberOrEmpty for the hours pair.
+function hoursOrEmpty(tenths: number | null): string {
+  return tenths === null ? "" : tenthsToHoursInput(tenths);
+}
+
 // Edit-trip form (iter 9). Pre-fills every field from the
 // server-fetched trip; on submit, computes a diff against the initial
 // values and only PATCHes the keys the user actually changed.
@@ -71,6 +85,12 @@ export function EditTripForm({ trip, vehicles, drivers }: EditTripFormProps): Re
       endedAt: isoToDateTimeLocal(trip.endedAt),
       startOdometerKm: numberOrEmpty(trip.startOdometerKm),
       endOdometerKm: numberOrEmpty(trip.endOdometerKm),
+      // Engine-hours capture (ADR-0036). meterType seeds from the trip's
+      // current vehicle (re-synced if the operator reassigns); the hours
+      // inputs pre-fill from the stored tenths.
+      startEngineHours: hoursOrEmpty(trip.startEngineHours),
+      endEngineHours: hoursOrEmpty(trip.endEngineHours),
+      meterType: trip.vehicle.meterType,
       notes: trip.notes ?? "",
     }),
     [trip],
@@ -80,6 +100,13 @@ export function EditTripForm({ trip, vehicles, drivers }: EditTripFormProps): Re
     resolver: zodResolver(UpdateTripFormSchema),
     defaultValues: initialValues,
   });
+
+  // The selected vehicle's meter drives which reading inputs to show (ADR-0036
+  // c7); meterType is synced by the vehicle picker below so the resolver's
+  // meter-aware cross-field rule tracks the current selection.
+  const meterType = form.watch("meterType");
+  const showOdometer = meterIncludesOdometer(meterType ?? "ODOMETER_KM");
+  const showHours = meterIncludesHours(meterType ?? "ODOMETER_KM");
 
   async function onSubmit(values: UpdateTripFormValues): Promise<void> {
     setSubmitError(null);
@@ -123,6 +150,16 @@ export function EditTripForm({ trip, vehicles, drivers }: EditTripFormProps): Re
                   <select
                     className="border-input focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 h-9 w-full rounded-md border bg-transparent px-3 py-1 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:ring-[3px]"
                     {...field}
+                    onChange={(e) => {
+                      field.onChange(e);
+                      // Re-sync meterType when the operator reassigns the trip
+                      // to a different vehicle, so the reading inputs + the
+                      // cross-field rule follow the new vehicle's meter.
+                      const picked = vehicles.find((v) => v.id === e.target.value);
+                      form.setValue("meterType", picked?.meterType ?? "ODOMETER_KM", {
+                        shouldValidate: form.formState.isSubmitted,
+                      });
+                    }}
                   >
                     {vehicles.map((v) => (
                       <option key={v.id} value={v.id}>
@@ -213,49 +250,102 @@ export function EditTripForm({ trip, vehicles, drivers }: EditTripFormProps): Re
           />
         </div>
 
-        <div className="grid gap-4 sm:grid-cols-2">
-          <FormField
-            control={form.control}
-            name="startOdometerKm"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>Start odometer (km)</FormLabel>
-                <FormControl>
-                  <Input
-                    type="number"
-                    inputMode="numeric"
-                    min={0}
-                    max={9_999_999}
-                    className="font-mono tabular-nums"
-                    {...field}
-                  />
-                </FormControl>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
+        {showOdometer ? (
+          <div className="grid gap-4 sm:grid-cols-2">
+            <FormField
+              control={form.control}
+              name="startOdometerKm"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Start odometer (km)</FormLabel>
+                  <FormControl>
+                    <Input
+                      type="number"
+                      inputMode="numeric"
+                      min={0}
+                      max={9_999_999}
+                      className="font-mono tabular-nums"
+                      {...field}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
 
-          <FormField
-            control={form.control}
-            name="endOdometerKm"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>End odometer (km)</FormLabel>
-                <FormControl>
-                  <Input
-                    type="number"
-                    inputMode="numeric"
-                    min={0}
-                    max={9_999_999}
-                    className="font-mono tabular-nums"
-                    {...field}
-                  />
-                </FormControl>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
-        </div>
+            <FormField
+              control={form.control}
+              name="endOdometerKm"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>End odometer (km)</FormLabel>
+                  <FormControl>
+                    <Input
+                      type="number"
+                      inputMode="numeric"
+                      min={0}
+                      max={9_999_999}
+                      className="font-mono tabular-nums"
+                      {...field}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </div>
+        ) : null}
+
+        {/* Engine-hours capture (ADR-0036) — shown only for an hour-metered
+            vehicle. Decimal hours; the action converts to integer tenths and
+            sends only the changed reading in the diff. */}
+        {showHours ? (
+          <div className="grid gap-4 sm:grid-cols-2">
+            <FormField
+              control={form.control}
+              name="startEngineHours"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Start engine hours</FormLabel>
+                  <FormControl>
+                    <Input
+                      type="number"
+                      inputMode="decimal"
+                      min={0}
+                      step={0.1}
+                      placeholder="1234.5"
+                      className="font-mono tabular-nums"
+                      {...field}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="endEngineHours"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>End engine hours</FormLabel>
+                  <FormControl>
+                    <Input
+                      type="number"
+                      inputMode="decimal"
+                      min={0}
+                      step={0.1}
+                      placeholder="1234.5"
+                      className="font-mono tabular-nums"
+                      {...field}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </div>
+        ) : null}
 
         <FormField
           control={form.control}

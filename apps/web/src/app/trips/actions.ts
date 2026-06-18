@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 
 import { apiFetch, ApiError } from "@/lib/api";
+import { hoursToTenths } from "@/lib/units";
 import {
   CreateTripFormSchema,
   UpdateTripFormSchema,
@@ -72,6 +73,15 @@ function buildCreateWireBody(values: CreateTripFormValues): Record<string, unkno
   if (values.endOdometerKm && values.endOdometerKm.length > 0) {
     body.endOdometerKm = Number(values.endOdometerKm);
   }
+  // Engine-hours (ADR-0036): decimal hours → integer tenths. meterType is a
+  // derived form field, NOT sent — the trip body has no meterType (.strict()),
+  // and the API re-derives the meter from the vehicle for cross-field checks.
+  if (values.startEngineHours && values.startEngineHours.length > 0) {
+    body.startEngineHours = hoursToTenths(Number(values.startEngineHours));
+  }
+  if (values.endEngineHours && values.endEngineHours.length > 0) {
+    body.endEngineHours = hoursToTenths(Number(values.endEngineHours));
+  }
   if (values.notes && values.notes.length > 0) {
     body.notes = values.notes;
   }
@@ -102,6 +112,22 @@ function buildUpdateWireBody(diff: Partial<UpdateTripFormValues>): Record<string
   if ("endOdometerKm" in diff) {
     body.endOdometerKm =
       diff.endOdometerKm && diff.endOdometerKm.length > 0 ? Number(diff.endOdometerKm) : null;
+  }
+  // Engine-hours (ADR-0036): a changed reading arrives as a decimal-hours
+  // string or "" when cleared. Convert non-empty → integer tenths, "" → null.
+  // meterType is intentionally NOT forwarded (derived form-only field; the
+  // trip body has no meterType — .strict() would reject it).
+  if ("startEngineHours" in diff) {
+    body.startEngineHours =
+      diff.startEngineHours && diff.startEngineHours.length > 0
+        ? hoursToTenths(Number(diff.startEngineHours))
+        : null;
+  }
+  if ("endEngineHours" in diff) {
+    body.endEngineHours =
+      diff.endEngineHours && diff.endEngineHours.length > 0
+        ? hoursToTenths(Number(diff.endEngineHours))
+        : null;
   }
   if ("notes" in diff) {
     body.notes = diff.notes ?? "";

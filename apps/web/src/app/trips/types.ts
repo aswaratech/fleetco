@@ -17,6 +17,11 @@ import type { Vehicle } from "../vehicles/types";
 
 export type TripStatus = "PLANNED" | "IN_PROGRESS" | "COMPLETED" | "CANCELLED";
 
+// Engine-hours meter classification (ADR-0036). Mirrors the Vehicle type's
+// `meterType`; re-exported here so the trip forms can type their vehicle
+// pickers without importing the whole Vehicle shape.
+export type VehicleMeterType = "ODOMETER_KM" | "ENGINE_HOURS" | "BOTH";
+
 // List-endpoint item shape: the slim Vehicle + Driver projection
 // (`registrationNumber` and `fullName` only). Matches the API's
 // TripListItem (apps/api/src/modules/trips/trips.service.ts:LIST_SELECT).
@@ -36,6 +41,9 @@ export interface TripListItem {
   vehicle: {
     id: string;
     registrationNumber: string;
+    // meterType (ADR-0036) — the API's trip list projects it so the driver app
+    // can branch its capture; the web list does not render it but carries it.
+    meterType: VehicleMeterType;
   };
   driver: {
     id: string;
@@ -56,6 +64,11 @@ export interface TripDetail {
   endedAt: string | null;
   startOdometerKm: number | null;
   endOdometerKm: number | null;
+  // Engine-hours readings (ADR-0036), integer tenths-of-an-hour. The detail
+  // endpoint returns them (the slim list projection does not). Null for a
+  // km-only trip; the edit form pre-fills the hours inputs from these.
+  startEngineHours: number | null;
+  endEngineHours: number | null;
   notes: string | null;
   createdById: string;
   createdAt: string;

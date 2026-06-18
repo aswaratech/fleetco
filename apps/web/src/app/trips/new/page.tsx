@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { apiFetch, ApiError } from "@/lib/api";
 import { getServerSession } from "@/lib/session";
 
+import type { VehicleMeterType } from "../types";
 import { CreateTripForm } from "./create-trip-form";
 
 // New trip — iter 9 of the Trips slice. Server-rendered shell that
@@ -29,6 +30,9 @@ interface ActiveVehicle {
   registrationNumber: string;
   make: string;
   model: string;
+  // meterType (ADR-0036): the create form branches its reading capture on the
+  // selected vehicle's meter. The vehicles list endpoint returns it on each row.
+  meterType: VehicleMeterType;
 }
 
 interface ActiveDriver {

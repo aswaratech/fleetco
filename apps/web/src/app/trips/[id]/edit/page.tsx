@@ -4,7 +4,7 @@ import { notFound, redirect } from "next/navigation";
 import { apiFetch, ApiError } from "@/lib/api";
 import { getServerSession } from "@/lib/session";
 
-import type { TripDetail } from "../../types";
+import type { TripDetail, VehicleMeterType } from "../../types";
 import { EditTripForm } from "./edit-trip-form";
 
 // Edit trip — iter 9 of the Trips slice. Server-rendered shell that
@@ -26,6 +26,9 @@ interface ActiveVehicle {
   registrationNumber: string;
   make: string;
   model: string;
+  // meterType (ADR-0036): the edit form branches its reading capture on the
+  // selected vehicle's meter, and re-syncs when the trip is reassigned.
+  meterType: VehicleMeterType;
 }
 
 interface ActiveDriver {
@@ -101,6 +104,7 @@ export default async function EditTripPage({ params }: EditPageProps): Promise<R
     registrationNumber: trip.vehicle.registrationNumber,
     make: trip.vehicle.make,
     model: trip.vehicle.model,
+    meterType: trip.vehicle.meterType,
   });
   const drivers = mergeUnique(activeDrivers, {
     id: trip.driver.id,

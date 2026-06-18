@@ -20,6 +20,10 @@ import { z } from "zod";
 // for the optional / nullable fields.
 
 const TRIP_STATUSES = ["PLANNED", "IN_PROGRESS", "COMPLETED", "CANCELLED"] as const;
+// Meter type (ADR-0036) — mirrors the API's MeterType. A derived form field,
+// synced from the selected vehicle, that drives which reading(s) the cross-field
+// rule requires. Never sent on the wire (the trip body has no meterType).
+const METER_TYPES = ["ODOMETER_KM", "ENGINE_HOURS", "BOTH"] as const;
 
 // `<input type="datetime-local">` value format. Accepts `YYYY-MM-DDTHH:MM`
 // or empty string. The action layer turns empty → undefined and
@@ -39,6 +43,14 @@ const OdometerString = z.string().regex(/^\d{0,7}$|^$/, {
   message: "Enter a whole number of kilometers (0–9,999,999).",
 });
 
+// Engine-hours reading (ADR-0036): a DECIMAL number of hours (e.g. "1234.5"),
+// at most one decimal place (the hour-meter's 0.1 h resolution). Empty means
+// "not set". The action layer converts a non-empty value to integer tenths via
+// hoursToTenths (units.ts). Mirror of vehicles-schema.ts's OptionalHoursString.
+const HoursString = z.string().regex(/^$|^\d+(\.\d)?$/, {
+  message: "Enter hours as a number with at most one decimal (e.g. 1234.5).",
+});
+
 // Shared field shape for the create and update forms. The cross-field
 // rules around status × timing × odometer are encoded as `.refine`s on
 // each derived schema so the same constraint set runs at the schema
@@ -56,6 +68,15 @@ function buildTripFormShape() {
     endedAt: DateTimeLocalString.optional(),
     startOdometerKm: OdometerString.optional(),
     endOdometerKm: OdometerString.optional(),
+    // Engine-hours readings (ADR-0036), decimal-hours strings. Captured only
+    // for an hour-metered vehicle; the action layer converts to integer tenths.
+    startEngineHours: HoursString.optional(),
+    endEngineHours: HoursString.optional(),
+    // Derived: the selected vehicle's meter, synced by the form's vehicle
+    // picker. Drives the meter-aware required-reading rule below. Not sent on
+    // the wire — the trip body has no meterType; the API re-derives it from the
+    // vehicle (TripsService cross-field re-validation).
+    meterType: z.enum(METER_TYPES),
     notes: z.string().max(1000, "Notes cap is 1000 characters.").optional(),
   };
 }
@@ -71,14 +92,26 @@ interface TripFormRefineInput {
   endedAt?: string;
   startOdometerKm?: string;
   endOdometerKm?: string;
+  startEngineHours?: string;
+  endEngineHours?: string;
+  meterType?: (typeof METER_TYPES)[number];
 }
 
 function isPresent(value: string | undefined): boolean {
   return value !== undefined && value !== "";
 }
 
-// IN_PROGRESS requires startedAt + startOdometerKm. Mirrors the
-// CreateTripSchema cross-field rule.
+// Which reading(s) the selected meter requires (ADR-0036 c7), mirroring the
+// API's rule. An undefined meterType (no vehicle picked yet) defaults to
+// odometer — the safe default and the create form's initial state.
+function meterRequiresOdometer(meterType?: string): boolean {
+  return meterType !== "ENGINE_HOURS"; // ODOMETER_KM, BOTH, undefined → true
+}
+function meterRequiresHours(meterType?: string): boolean {
+  return meterType === "ENGINE_HOURS" || meterType === "BOTH";
+}
+
+// IN_PROGRESS requires startedAt + the meter's start reading (km / hours / both).
 function checkInProgressShape(
   data: TripFormRefineInput,
 ): { ok: true } | { ok: false; path: string; message: string } {
@@ -86,17 +119,25 @@ function checkInProgressShape(
   if (!isPresent(data.startedAt)) {
     return { ok: false, path: "startedAt", message: "IN_PROGRESS trip needs a start time." };
   }
-  if (!isPresent(data.startOdometerKm)) {
+  if (meterRequiresOdometer(data.meterType) && !isPresent(data.startOdometerKm)) {
     return {
       ok: false,
       path: "startOdometerKm",
       message: "IN_PROGRESS trip needs a start odometer reading.",
     };
   }
+  if (meterRequiresHours(data.meterType) && !isPresent(data.startEngineHours)) {
+    return {
+      ok: false,
+      path: "startEngineHours",
+      message: "IN_PROGRESS trip needs a start engine-hours reading.",
+    };
+  }
   return { ok: true };
 }
 
-// COMPLETED requires all four start/end fields, and end >= start on both.
+// COMPLETED requires startedAt + endedAt and the meter's start AND end readings,
+// with end >= start on whichever reading pair(s) are present.
 function checkCompletedShape(
   data: TripFormRefineInput,
 ): { ok: true } | { ok: false; path: string; message: string } {
@@ -105,27 +146,52 @@ function checkCompletedShape(
     return { ok: false, path: "startedAt", message: "COMPLETED trip needs a start time." };
   if (!isPresent(data.endedAt))
     return { ok: false, path: "endedAt", message: "COMPLETED trip needs an end time." };
-  if (!isPresent(data.startOdometerKm))
-    return {
-      ok: false,
-      path: "startOdometerKm",
-      message: "COMPLETED trip needs a start odometer reading.",
-    };
-  if (!isPresent(data.endOdometerKm))
-    return {
-      ok: false,
-      path: "endOdometerKm",
-      message: "COMPLETED trip needs an end odometer reading.",
-    };
-  // Compare numerically (both strings of digits).
-  const start = Number(data.startOdometerKm);
-  const end = Number(data.endOdometerKm);
-  if (Number.isFinite(start) && Number.isFinite(end) && end < start) {
-    return {
-      ok: false,
-      path: "endOdometerKm",
-      message: "End odometer must be >= start odometer.",
-    };
+  if (meterRequiresOdometer(data.meterType)) {
+    if (!isPresent(data.startOdometerKm))
+      return {
+        ok: false,
+        path: "startOdometerKm",
+        message: "COMPLETED trip needs a start odometer reading.",
+      };
+    if (!isPresent(data.endOdometerKm))
+      return {
+        ok: false,
+        path: "endOdometerKm",
+        message: "COMPLETED trip needs an end odometer reading.",
+      };
+  }
+  if (meterRequiresHours(data.meterType)) {
+    if (!isPresent(data.startEngineHours))
+      return {
+        ok: false,
+        path: "startEngineHours",
+        message: "COMPLETED trip needs a start engine-hours reading.",
+      };
+    if (!isPresent(data.endEngineHours))
+      return {
+        ok: false,
+        path: "endEngineHours",
+        message: "COMPLETED trip needs an end engine-hours reading.",
+      };
+  }
+  // end >= start for whichever reading pair is present (compare numerically).
+  if (isPresent(data.startOdometerKm) && isPresent(data.endOdometerKm)) {
+    if (Number(data.endOdometerKm) < Number(data.startOdometerKm)) {
+      return {
+        ok: false,
+        path: "endOdometerKm",
+        message: "End odometer must be >= start odometer.",
+      };
+    }
+  }
+  if (isPresent(data.startEngineHours) && isPresent(data.endEngineHours)) {
+    if (Number(data.endEngineHours) < Number(data.startEngineHours)) {
+      return {
+        ok: false,
+        path: "endEngineHours",
+        message: "End engine-hours must be >= start engine-hours.",
+      };
+    }
   }
   // Compare lexicographically for datetime-local strings (sortable as
   // strings because the format is fixed-width).
