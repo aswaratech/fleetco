@@ -1,8 +1,12 @@
 # ADR-0039: Invoice aggregate — a dedicated `Invoice` + `InvoiceLine` pair built from the `Customer` / `Job` / `Trip` chain, Nepal VAT (13%) and TDS (1.5% / 2.5%) computed in integer paisa with half-up rounding, sequential gapless anti-tamper numbering by the Nepali (Bikram Sambat) fiscal year with a `DRAFT` → `ISSUED` lifecycle frozen at issue and corrected only by credit note, and a server-side PDF renderer behind a thin interface storing the issued PDF in Cloudflare R2
 
-- **Status:** Proposed
+- **Status:** Accepted (ratified by the PO 2026-06-18 — see ## Acceptance)
 - **Date:** 2026-06-18
 - **Decider:** Product owner (CEO)
+
+## Acceptance
+
+Ratified by the Product Owner on 2026-06-18 (this session): the PO accepted all four decision records (ADR-0036–0039) together, with the explicit directive "I accept all ADRs, go ahead", and chose the **build-now** path (option (a)) for each. The implementing slice — **Program D's invoicing tickets** — is authorized to proceed. The Nepal VAT/TDS rates and required invoice fields remain **proposed pending operator/accountant verification** (commitment 9); real-time IRD/CBMS e-billing stays out of v1. The standing production-deploy caveat in §"Phase mismatch and the compliance posture (stated honestly)" is acknowledged and accepted by the PO.
 
 ## Context
 

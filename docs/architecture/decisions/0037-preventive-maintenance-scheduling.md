@@ -1,8 +1,12 @@
 # ADR-0037: Preventive-maintenance and service-scheduling aggregate — a dedicated `ServiceSchedule` + `ServiceRecord` pair, anchored to the central `Vehicle`, with intervals expressed in km / engine-hours / calendar, a "service due / overdue" badge that rotates the compliance pattern, and a cost link into the existing `ExpenseLog` ledger
 
-- **Status:** Proposed
+- **Status:** Accepted (ratified by the PO 2026-06-18 — see ## Acceptance)
 - **Date:** 2026-06-18
 - **Decider:** Product owner (CEO)
+
+## Acceptance
+
+Ratified by the Product Owner on 2026-06-18 (this session): the PO accepted all four decision records (ADR-0036–0039) together, with the explicit directive "I accept all ADRs, go ahead", and chose the **build-now** path (option (a)) for each. The implementing slice — **Program B's preventive-maintenance ticket**, sequenced after/with ADR-0036's engine-hours slice (the dependency this ADR names) — is authorized to proceed. The standing production-deploy caveat in §"Phase mismatch and the ADR-0036 dependency (stated honestly)" is acknowledged and accepted by the PO.
 
 ## Context
 

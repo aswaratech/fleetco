@@ -1,8 +1,12 @@
 # ADR-0038: Email/notification infrastructure — a transactional-email provider behind a thin mailer interface, a dedicated `NotificationModule` owning a BullMQ daily-repeatable scan modelled on the ADR-0029 T4 retention prune, a sent-reminder notification-log for send-once idempotency, the single CEO/operator as the v1 recipient, and a "reminder delivery" SLI
 
-- **Status:** Proposed
+- **Status:** Accepted (ratified by the PO 2026-06-18 — see ## Acceptance)
 - **Date:** 2026-06-18
 - **Decider:** Product owner (CEO)
+
+## Acceptance
+
+Ratified by the Product Owner on 2026-06-18 (this session): the PO accepted all four decision records (ADR-0036–0039) together, with the explicit directive "I accept all ADRs, go ahead", and chose the **build-now** path (option (a)) for each. The implementing slice — **Program C's notification ticket**, compliance-source-first with the maintenance source wired after ADR-0037's producer ships — is authorized to proceed. The transactional-email provider's API key remains an operator-supplied production secret (never committed). The standing production-deploy caveat in §"Phase mismatch and the dependency posture (stated honestly)" is acknowledged and accepted by the PO.
 
 ## Context
 
