@@ -31,9 +31,10 @@ const LIST_TAKE_MIN = 1;
 
 // Prisma error codes. ServiceRecord has no unique constraint, so no P2002.
 // P2003 (FK violation) on a write means a stale vehicleId / serviceScheduleId /
-// createdById → HTTP 400. P2025 (record not found) on update/delete → 404.
-// Nothing FKs INTO ServiceRecord (the B4 ExpenseLog link points OUT of it), so
-// there is no delete-when-referenced 409 arm here.
+// expenseLogId / createdById → HTTP 400. P2025 (record not found) on
+// update/delete → 404. Nothing FKs INTO ServiceRecord (the ExpenseLog cost-link
+// points OUT of it — the Restrict is enforced on ExpenseLog's delete, not
+// here), so there is no delete-when-referenced 409 arm in this service.
 const PRISMA_FK_VIOLATION = "P2003";
 const PRISMA_RECORD_NOT_FOUND = "P2025";
 
@@ -115,10 +116,14 @@ export class ServiceRecordsService {
     if (input.serviceScheduleId) {
       await this.assertScheduleBelongsToVehicle(input.serviceScheduleId, input.vehicleId);
     }
+    if (input.expenseLogId) {
+      await this.assertExpenseLogLinkable(input.expenseLogId, input.vehicleId);
+    }
 
     const data: Prisma.ServiceRecordUncheckedCreateInput = {
       vehicleId: input.vehicleId,
       serviceScheduleId: input.serviceScheduleId ?? null,
+      expenseLogId: input.expenseLogId ?? null,
       performedAt: input.performedAt,
       odometerKm: input.odometerKm ?? null,
       engineHours: input.engineHours ?? null,
@@ -127,18 +132,45 @@ export class ServiceRecordsService {
     };
 
     try {
-      return await this.prisma.serviceRecord.create({ data });
+      // Anchor-advance (ADR-0037 c5), ATOMIC with the insert: when a service is
+      // recorded against a schedule, advance that schedule's last-service anchor
+      // forward in the SAME interactive $transaction as the record insert — the
+      // exact shape of the Trip→Vehicle odometer bump (iter 11), so a mid-flight
+      // failure can never leave a recorded service with a stale schedule anchor.
+      // An ad-hoc record (no schedule) is a plain insert. Recording is a CREATE
+      // event: a later PATCH does NOT re-advance the anchor (the documented
+      // manual-correction path — edit the schedule's anchor or the record — is
+      // the compensating action), mirroring the odometer-correction story.
+      return await this.prisma.$transaction(async (tx) => {
+        const record = await tx.serviceRecord.create({ data });
+        if (record.serviceScheduleId !== null) {
+          await this.advanceScheduleAnchor(tx, record);
+        }
+        return record;
+      });
     } catch (error) {
-      throw mapRecordWriteError(error, input.vehicleId, input.serviceScheduleId ?? null);
+      throw mapRecordWriteError(
+        error,
+        input.vehicleId,
+        input.serviceScheduleId ?? null,
+        input.expenseLogId ?? null,
+      );
     }
   }
 
   /**
    * Diff-PATCH a ServiceRecord. Returns null when the row is not found
    * (controller maps to 404). vehicleId is immutable (omitted from the schema).
-   * `serviceScheduleId` is mutable: re-linking re-runs the vehicle-match check
-   * against the STORED vehicleId. The service distinguishes "client provided
-   * null" (unlink) from "client did not mention" (leave it) via hasOwnProperty.
+   * `serviceScheduleId` and `expenseLogId` are mutable: re-linking either
+   * re-runs its consistency check against the STORED vehicleId (the schedule
+   * must be on the same vehicle; the expense must be a same-vehicle
+   * MAINTENANCE/REPAIR row). The service distinguishes "client provided null"
+   * (unlink) from "client did not mention" (leave it) via hasOwnProperty.
+   *
+   * PATCH does NOT advance the schedule anchor — the anchor-advance is a
+   * recording (create) event (ADR-0037 c5); editing a recorded service is the
+   * manual-correction path, so it leaves the anchor where the original
+   * recording left it.
    */
   async update(id: string, input: UpdateServiceRecordInput): Promise<ServiceRecord | null> {
     const existing = await this.prisma.serviceRecord.findUnique({ where: { id } });
@@ -149,14 +181,18 @@ export class ServiceRecordsService {
     const has = (key: keyof UpdateServiceRecordInput): boolean =>
       Object.prototype.hasOwnProperty.call(input, key);
 
-    // Re-link to a (non-null) schedule re-validates the vehicle-match against
-    // the record's immutable stored vehicleId.
+    // Re-link to a (non-null) schedule / expense re-validates against the
+    // record's immutable stored vehicleId.
     if (input.serviceScheduleId) {
       await this.assertScheduleBelongsToVehicle(input.serviceScheduleId, existing.vehicleId);
+    }
+    if (input.expenseLogId) {
+      await this.assertExpenseLogLinkable(input.expenseLogId, existing.vehicleId);
     }
 
     const data: Prisma.ServiceRecordUncheckedUpdateInput = {
       ...(has("serviceScheduleId") && { serviceScheduleId: input.serviceScheduleId ?? null }),
+      ...(has("expenseLogId") && { expenseLogId: input.expenseLogId ?? null }),
       ...(input.performedAt !== undefined && { performedAt: input.performedAt }),
       ...(has("odometerKm") && { odometerKm: input.odometerKm ?? null }),
       ...(has("engineHours") && { engineHours: input.engineHours ?? null }),
@@ -173,7 +209,12 @@ export class ServiceRecordsService {
         // Row vanished between the findUnique and the update (concurrent delete).
         return null;
       }
-      throw mapRecordWriteError(error, existing.vehicleId, input.serviceScheduleId ?? null);
+      throw mapRecordWriteError(
+        error,
+        existing.vehicleId,
+        input.serviceScheduleId ?? null,
+        input.expenseLogId ?? null,
+      );
     }
   }
 
@@ -233,18 +274,102 @@ export class ServiceRecordsService {
       );
     }
   }
+
+  /**
+   * Assert the referenced ExpenseLog exists, is a MAINTENANCE or REPAIR row, and
+   * is on the same vehicle as the record (ADR-0037 c6 — the cost-link
+   * consistency check, the rotation of the fuel/expense trip-vehicle check). A
+   * missing expense → 400 (clean, pre-empts the FK's P2003); a non-maintenance
+   * category → 400; a vehicle mismatch (including a vehicle-agnostic
+   * null-vehicle expense) → 400. The cost lives in exactly one place — the
+   * ExpenseLog row — and the link must point at the RIGHT one.
+   */
+  private async assertExpenseLogLinkable(expenseLogId: string, vehicleId: string): Promise<void> {
+    const expense = await this.prisma.expenseLog.findUnique({
+      where: { id: expenseLogId },
+      select: { category: true, vehicleId: true },
+    });
+    if (!expense) {
+      throw new BadRequestException(`Expense log ${expenseLogId} does not exist.`);
+    }
+    if (expense.category !== "MAINTENANCE" && expense.category !== "REPAIR") {
+      throw new BadRequestException(
+        `Expense log ${expenseLogId} is category ${expense.category}; a service record can only ` +
+          "link a MAINTENANCE or REPAIR expense.",
+      );
+    }
+    if (expense.vehicleId !== vehicleId) {
+      throw new BadRequestException(
+        `Expense log ${expenseLogId} is not attributed to this vehicle; a service record must ` +
+          "reference an expense on the same vehicle.",
+      );
+    }
+  }
+
+  /**
+   * Advance the linked schedule's last-service anchor to the record's values,
+   * inside the caller's interactive $transaction (ADR-0037 c5). The monotonic
+   * "once forward, stays forward" rule, the rotation of the Trip→Vehicle
+   * odometer bump (iter 11):
+   *   - lastServiceAt takes the recorded performedAt, but only when it moves
+   *     FORWARD (a backdated correction record must not roll the calendar anchor
+   *     back) — so "next due" for a CALENDAR schedule resets forward.
+   *   - the meter anchors (odometer / engine-hours) advance only when the
+   *     record's reading is strictly greater than the stored anchor; a null
+   *     stored anchor is "behind any reading", so the first record seeds it.
+   * Recording a service therefore resets "next due" forward by one interval.
+   * Issues at most one UPDATE (skipped entirely when nothing moves forward — a
+   * pure backdated correction). `tx` is the transaction client so this write and
+   * the record insert commit together.
+   */
+  private async advanceScheduleAnchor(
+    tx: Prisma.TransactionClient,
+    record: ServiceRecord,
+  ): Promise<void> {
+    if (record.serviceScheduleId === null) return; // defensive — the caller guards
+    const schedule = await tx.serviceSchedule.findUniqueOrThrow({
+      where: { id: record.serviceScheduleId },
+      select: { lastServiceAt: true, lastServiceOdometerKm: true, lastServiceEngineHours: true },
+    });
+
+    const patch: Prisma.ServiceScheduleUncheckedUpdateInput = {};
+    if (record.performedAt > schedule.lastServiceAt) {
+      patch.lastServiceAt = record.performedAt;
+    }
+    if (
+      record.odometerKm !== null &&
+      (schedule.lastServiceOdometerKm === null ||
+        record.odometerKm > schedule.lastServiceOdometerKm)
+    ) {
+      patch.lastServiceOdometerKm = record.odometerKm;
+    }
+    if (
+      record.engineHours !== null &&
+      (schedule.lastServiceEngineHours === null ||
+        record.engineHours > schedule.lastServiceEngineHours)
+    ) {
+      patch.lastServiceEngineHours = record.engineHours;
+    }
+
+    if (Object.keys(patch).length > 0) {
+      await tx.serviceSchedule.update({ where: { id: record.serviceScheduleId }, data: patch });
+    }
+  }
 }
 
 // Translate a Prisma write error into the HTTP-facing exception. A P2003 on a
 // ServiceRecord write is a stale FK: name the offending field in the 400 per
 // docs/runbook/api-error-mapping.md (the web actions layer pattern-matches the
-// message to set the field token). serviceScheduleId is pre-checked in the
-// service, so in practice P2003 names vehicleId (or, defensively, createdById).
-// Non-P2003 errors pass through unchanged (Nest renders them as 500).
+// message to set the field token). serviceScheduleId and expenseLogId are
+// pre-checked in the service, so in practice P2003 names vehicleId (or,
+// defensively, createdById / a schedule or expense deleted between the
+// pre-check and the write). Non-P2003 errors pass through unchanged (Nest
+// renders them as 500).
 function mapRecordWriteError(
   error: unknown,
   vehicleId: string,
   serviceScheduleId: string | null,
+  expenseLogId: string | null,
 ): unknown {
   if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === PRISMA_FK_VIOLATION) {
     const meta = error.meta as { field_name?: string; constraint?: string } | undefined;
@@ -254,6 +379,9 @@ function mapRecordWriteError(
     }
     if (fieldName.includes("serviceschedule") && serviceScheduleId) {
       return new BadRequestException(`Service schedule ${serviceScheduleId} does not exist.`);
+    }
+    if (fieldName.includes("expenselog") && expenseLogId) {
+      return new BadRequestException(`Expense log ${expenseLogId} does not exist.`);
     }
     return new BadRequestException(`Vehicle ${vehicleId} does not exist.`);
   }

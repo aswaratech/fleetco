@@ -120,13 +120,18 @@ export const ListServiceRecordsQuerySchema = z
 export type ListServiceRecordsQuery = z.infer<typeof ListServiceRecordsQuerySchema>;
 
 // POST /api/v1/service-records body. Required: vehicleId, performedAt. Optional:
-// serviceScheduleId (nullable — an ad-hoc service has no schedule), odometerKm,
-// engineHours, notes. `createdById` is NOT accepted from the client — the
-// controller pulls it from the session; `.strict()` rejects it.
+// serviceScheduleId (nullable — an ad-hoc service has no schedule), expenseLogId
+// (nullable — a warranty service has no cost, or the invoice isn't keyed yet),
+// odometerKm, engineHours, notes. `createdById` is NOT accepted from the client
+// — the controller pulls it from the session; `.strict()` rejects it. The
+// expenseLogId consistency check (B4: the referenced expense must be
+// MAINTENANCE/REPAIR and on the same vehicle, ADR-0037 c6) needs a DB lookup and
+// so lives at the service layer, not here.
 export const CreateServiceRecordSchema = z
   .object({
     vehicleId: Cuid,
     serviceScheduleId: Cuid.nullable().optional(),
+    expenseLogId: Cuid.nullable().optional(),
     performedAt: PerformedAt,
     odometerKm: OdometerKm.nullable().optional(),
     engineHours: EngineHours.nullable().optional(),
@@ -142,11 +147,14 @@ export type CreateServiceRecordInput = z.infer<typeof CreateServiceRecordSchema>
 // like the fuel-logs / expense-logs vehicleId. `serviceScheduleId` IS mutable —
 // linking / unlinking an ad-hoc record to a schedule after the fact is a
 // routine correction (mirror of the fuel-logs mutable tripId), re-validated for
-// the vehicle-match against the stored vehicle. The empty-body refine rejects a
-// no-op PATCH as 400.
+// the vehicle-match against the stored vehicle. `expenseLogId` is likewise
+// mutable — attaching the cost invoice after the fact is the same routine
+// correction, re-validated as a same-vehicle MAINTENANCE/REPAIR expense. The
+// empty-body refine rejects a no-op PATCH as 400.
 export const UpdateServiceRecordSchema = z
   .object({
     serviceScheduleId: Cuid.nullable().optional(),
+    expenseLogId: Cuid.nullable().optional(),
     performedAt: PerformedAt.optional(),
     odometerKm: OdometerKm.nullable().optional(),
     engineHours: EngineHours.nullable().optional(),

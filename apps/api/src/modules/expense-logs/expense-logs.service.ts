@@ -1,4 +1,9 @@
-import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import type { ExpenseCategory } from "@prisma/client";
 
@@ -397,14 +402,18 @@ export class ExpenseLogsService {
    * Hard delete an ExpenseLog. P2025 (delete targets a non-existent
    * row) maps to NotFoundException.
    *
-   * ExpenseLog has no inbound FKs from other aggregates in Phase 1
-   * (no other model FK-references it under `onDelete: Restrict`),
-   * so the delete path has no 409-delete-blocker branch today. A
-   * future Reports v1 aggregate may materialize per-expense
-   * summaries; if any of those add an FK to ExpenseLog under
-   * Restrict, this method will gain the same P2003 →
-   * ConflictException treatment the Customer / Vehicle deletes
-   * have today.
+   * P2003 (FK violation) maps to ConflictException (HTTP 409): a
+   * ServiceRecord references this expense via its `onDelete: Restrict`
+   * `expenseLogId` cost-link FK (ADR-0037 c6, B4) — so a linked
+   * maintenance/repair expense cannot be silently deleted out from
+   * under the service record it documents the cost of. This is the
+   * SAME delete-blocker treatment the Customer / Vehicle deletes have,
+   * and is exactly the P2003 → ConflictException arm this method's
+   * iter-22 docstring anticipated once a Restrict FK pointed at
+   * ExpenseLog. The message is the GENERIC "referenced by other
+   * records." shape (mirroring CustomersService.delete) — ServiceRecord
+   * is the only referencer today, but naming it specifically would cost
+   * an extra query and would mislead if a second referencer is added.
    *
    * Returns void on success; the controller responds 204 No
    * Content.
@@ -413,8 +422,15 @@ export class ExpenseLogsService {
     try {
       await this.prisma.expenseLog.delete({ where: { id } });
     } catch (error) {
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2025") {
-        throw new NotFoundException(`Expense log ${id} not found`);
+      if (error instanceof Prisma.PrismaClientKnownRequestError) {
+        if (error.code === "P2025") {
+          throw new NotFoundException(`Expense log ${id} not found`);
+        }
+        if (error.code === "P2003") {
+          throw new ConflictException(
+            "Cannot delete expense log: it is referenced by other records.",
+          );
+        }
       }
       throw error;
     }
