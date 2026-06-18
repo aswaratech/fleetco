@@ -21,6 +21,7 @@ const QUICK_LINKS: QuickLink[] = [
   { href: "/trips", label: "Trips" },
   { href: "/customers", label: "Customers" },
   { href: "/jobs", label: "Jobs" },
+  { href: "/invoices", label: "Invoices" },
   { href: "/fuel-logs", label: "Fuel logs" },
   { href: "/expense-logs", label: "Expense logs" },
   { href: "/geofences", label: "Geofences" },
