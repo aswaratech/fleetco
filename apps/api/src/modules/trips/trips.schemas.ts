@@ -213,6 +213,20 @@ const OdometerInt = z
   .min(ODOMETER_MIN, `Odometer must be ${ODOMETER_MIN} or greater.`)
   .max(ODOMETER_MAX, `Odometer must be ${ODOMETER_MAX} or less.`);
 
+// Engine-hours bounds (ADR-0036): integer TENTHS OF AN HOUR (deci-hours),
+// never a float — the FuelLog.litersMl integer-minor-units precedent. The
+// cap (10,000,000 tenths = 1,000,000 hours) mirrors the vehicles schema's
+// ENGINE_HOURS_MAX_TENTHS and is well past any real hour-meter; 0 lower
+// bound (negative hours are nonsensical). Integer matches Trip's Int? cols.
+const ENGINE_HOURS_MIN = 0;
+const ENGINE_HOURS_MAX = 10_000_000;
+
+const EngineHoursInt = z
+  .number()
+  .int("Engine hours must be an integer number of tenths-of-an-hour.")
+  .min(ENGINE_HOURS_MIN, `Engine hours must be ${ENGINE_HOURS_MIN} or greater.`)
+  .max(ENGINE_HOURS_MAX, `Engine hours must be ${ENGINE_HOURS_MAX} or less.`);
+
 // `superRefine` callback shared by the create and update schemas. It
 // receives the merged shape (for update: pre-fetched row + patch
 // applied; for create: just the body) and enforces the cross-field
@@ -231,6 +245,8 @@ export interface TripCrossFieldShape {
   endedAt?: string | Date | null | undefined;
   startOdometerKm?: number | null | undefined;
   endOdometerKm?: number | null | undefined;
+  startEngineHours?: number | null | undefined;
+  endEngineHours?: number | null | undefined;
 }
 
 /**
@@ -239,13 +255,21 @@ export interface TripCrossFieldShape {
  *
  * Rules:
  *   - IN_PROGRESS: startedAt and startOdometerKm MUST be set.
- *   - COMPLETED:   all four start/end fields MUST be set;
+ *   - COMPLETED:   all four start/end odometer+timing fields MUST be set;
  *                  endOdometerKm >= startOdometerKm;
- *                  endedAt >= startedAt.
+ *                  endedAt >= startedAt;
+ *                  endEngineHours >= startEngineHours WHEN BOTH are present.
  *   - PLANNED / CANCELLED: no constraint (a planned trip may have
  *     startedAt prefilled for scheduling; a cancelled trip may have
  *     been cancelled at any lifecycle stage and so any combination of
  *     timing fields is legitimate).
+ *
+ * Engine-hours (ADR-0036) are deliberately NOT required on COMPLETED here:
+ * they are meter-dependent (only ENGINE_HOURS/BOTH vehicles capture them),
+ * and the meterType-aware "hours required for an hour-metered asset" rule
+ * is the trip-stop capture surface's job (B2). This validator only enforces
+ * the meter-agnostic pair-invariant — end >= start when both readings are
+ * present — which keeps totalHoursLogged (Σ end − start) from going negative.
  *
  * The service calls this after merging a PATCH; the schema calls this
  * (via superRefine) on the body alone — for `create` that is also the
@@ -253,11 +277,21 @@ export interface TripCrossFieldShape {
  */
 export function validateTripCrossFields(shape: TripCrossFieldShape): string[] {
   const errors: string[] = [];
-  const { status, startedAt, endedAt, startOdometerKm, endOdometerKm } = shape;
+  const {
+    status,
+    startedAt,
+    endedAt,
+    startOdometerKm,
+    endOdometerKm,
+    startEngineHours,
+    endEngineHours,
+  } = shape;
   const hasStartedAt = startedAt !== null && startedAt !== undefined;
   const hasEndedAt = endedAt !== null && endedAt !== undefined;
   const hasStartOdo = startOdometerKm !== null && startOdometerKm !== undefined;
   const hasEndOdo = endOdometerKm !== null && endOdometerKm !== undefined;
+  const hasStartHours = startEngineHours !== null && startEngineHours !== undefined;
+  const hasEndHours = endEngineHours !== null && endEngineHours !== undefined;
 
   if (status === "IN_PROGRESS") {
     if (!hasStartedAt) {
@@ -277,6 +311,17 @@ export function validateTripCrossFields(shape: TripCrossFieldShape): string[] {
       const end = endOdometerKm as number;
       if (end < start) {
         errors.push("endOdometerKm must be greater than or equal to startOdometerKm.");
+      }
+    }
+    // Engine-hours pair-invariant (ADR-0036 c7), the hours rotation of the
+    // odometer end-≥-start rule. Checked only when BOTH are present — hours
+    // are not required on COMPLETED (see the docstring): an ODOMETER_KM
+    // vehicle's COMPLETED trip carries no hours and must still validate.
+    if (hasStartHours && hasEndHours) {
+      const start = startEngineHours as number;
+      const end = endEngineHours as number;
+      if (end < start) {
+        errors.push("endEngineHours must be greater than or equal to startEngineHours.");
       }
     }
     if (hasStartedAt && hasEndedAt) {
@@ -305,6 +350,12 @@ export const CreateTripSchema = z
     endedAt: TripDateTime.nullable().optional(),
     startOdometerKm: OdometerInt.nullable().optional(),
     endOdometerKm: OdometerInt.nullable().optional(),
+    // Engine-hours readings (ADR-0036) — nullable + optional, captured only
+    // for hour-metered vehicles. The meterType-aware "which reading to
+    // prompt for" branching is the trip-stop UI's job (B2); the wire shape
+    // accepts the readings when present.
+    startEngineHours: EngineHoursInt.nullable().optional(),
+    endEngineHours: EngineHoursInt.nullable().optional(),
     notes: z.string().max(NOTES_MAX, `notes must be at most ${NOTES_MAX} characters.`).optional(),
   })
   .strict()
@@ -333,6 +384,10 @@ export const UpdateTripSchema = z
     endedAt: TripDateTime.nullable(),
     startOdometerKm: OdometerInt.nullable(),
     endOdometerKm: OdometerInt.nullable(),
+    // Engine-hours readings (ADR-0036) — see CreateTripSchema. `.partial()`
+    // below makes every field optional for diff-PATCH semantics.
+    startEngineHours: EngineHoursInt.nullable(),
+    endEngineHours: EngineHoursInt.nullable(),
     notes: z.string().max(NOTES_MAX, `notes must be at most ${NOTES_MAX} characters.`),
   })
   .strict()

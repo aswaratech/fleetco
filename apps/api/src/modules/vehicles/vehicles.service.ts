@@ -1,5 +1,5 @@
 import { ConflictException, Injectable } from "@nestjs/common";
-import { Prisma, type Vehicle, type VehicleKind, VehicleStatus } from "@prisma/client";
+import { MeterType, Prisma, type Vehicle, type VehicleKind, VehicleStatus } from "@prisma/client";
 
 import type {
   CreateVehicleInput,
@@ -152,6 +152,14 @@ export class VehiclesService {
    */
   async create(input: CreateVehicleInput, createdById: string): Promise<Vehicle> {
     const startKm = input.odometerStartKm ?? 0;
+    // Engine-hours (ADR-0036): current defaults to start ("current at
+    // acquisition equals start"), the hours rotation of the odometer
+    // default-to-start rule. Both are nullable — null is the honest value
+    // for a km-only asset and for an hour-metered asset registered before
+    // its SMR is keyed in — so unlike odometer (which defaults to 0) there
+    // is no `?? 0`. meterType defaults to ODOMETER_KM so an existing km-only
+    // create call is unchanged.
+    const startHours = input.engineHoursStart ?? null;
     const data: Prisma.VehicleUncheckedCreateInput = {
       registrationNumber: input.registrationNumber,
       kind: input.kind,
@@ -161,6 +169,9 @@ export class VehiclesService {
       status: input.status ?? VehicleStatus.ACTIVE,
       odometerStartKm: startKm,
       odometerCurrentKm: input.odometerCurrentKm ?? startKm,
+      meterType: input.meterType ?? MeterType.ODOMETER_KM,
+      engineHoursStart: startHours,
+      engineHoursCurrent: input.engineHoursCurrent ?? startHours,
       acquiredAt: input.acquiredAt,
       // Compliance metadata (iter 14) — pure pass-through; absent fields
       // store null. No cross-field rules, no transitions.
@@ -244,6 +255,16 @@ export class VehiclesService {
       ...(input.odometerStartKm !== undefined && { odometerStartKm: input.odometerStartKm }),
       ...(input.odometerCurrentKm !== undefined && {
         odometerCurrentKm: input.odometerCurrentKm,
+      }),
+      // Engine-hours metering (ADR-0036) — conditional pass-through. The
+      // `!== undefined` guard means an explicit null clears a nullable hours
+      // column while an absent key leaves the stored value untouched (same
+      // posture as the compliance fields below). meterType is non-null, so
+      // only a real value is ever applied — it is reclassified, never cleared.
+      ...(input.meterType !== undefined && { meterType: input.meterType }),
+      ...(input.engineHoursStart !== undefined && { engineHoursStart: input.engineHoursStart }),
+      ...(input.engineHoursCurrent !== undefined && {
+        engineHoursCurrent: input.engineHoursCurrent,
       }),
       ...(input.acquiredAt !== undefined && { acquiredAt: input.acquiredAt }),
       ...(clientProvidedRetiredAt

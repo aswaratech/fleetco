@@ -5,7 +5,7 @@ import {
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
-import { Prisma, UserRole, type Trip, type TripStatus } from "@prisma/client";
+import { MeterType, Prisma, UserRole, type Trip, type TripStatus } from "@prisma/client";
 
 import type {
   CreateTripInput,
@@ -102,6 +102,14 @@ export type TripDetail = Prisma.TripGetPayload<{ include: typeof DETAIL_INCLUDE 
 export interface ListResult {
   items: TripListItem[];
   total: number;
+}
+
+// A vehicle is hour-metered — it captures engine-hours — when its meterType
+// is ENGINE_HOURS or BOTH; an ODOMETER_KM vehicle never has its engine-hours
+// columns touched (ADR-0036 commitment 1). Used by the COMPLETED-transition
+// bump to gate the engine-hours advance on the vehicle's meter classification.
+function meterIncludesHours(meterType: MeterType): boolean {
+  return meterType === MeterType.ENGINE_HOURS || meterType === MeterType.BOTH;
 }
 
 @Injectable()
@@ -294,6 +302,10 @@ export class TripsService {
       endedAt: input.endedAt ?? null,
       startOdometerKm: input.startOdometerKm ?? null,
       endOdometerKm: input.endOdometerKm ?? null,
+      // Engine-hours readings (ADR-0036) — pass-through, null when absent
+      // (a km-only vehicle's trip captures no hours).
+      startEngineHours: input.startEngineHours ?? null,
+      endEngineHours: input.endEngineHours ?? null,
       notes: input.notes ?? null,
       createdById,
     };
@@ -393,6 +405,12 @@ export class TripsService {
         ? (input.startOdometerKm ?? null)
         : existing.startOdometerKm,
       endOdometerKm: has("endOdometerKm") ? (input.endOdometerKm ?? null) : existing.endOdometerKm,
+      startEngineHours: has("startEngineHours")
+        ? (input.startEngineHours ?? null)
+        : existing.startEngineHours,
+      endEngineHours: has("endEngineHours")
+        ? (input.endEngineHours ?? null)
+        : existing.endEngineHours,
     };
 
     // Legal-status-transition guard. Only enforce when the patch
@@ -426,6 +444,8 @@ export class TripsService {
       ...(has("endedAt") && { endedAt: input.endedAt ?? null }),
       ...(has("startOdometerKm") && { startOdometerKm: input.startOdometerKm ?? null }),
       ...(has("endOdometerKm") && { endOdometerKm: input.endOdometerKm ?? null }),
+      ...(has("startEngineHours") && { startEngineHours: input.startEngineHours ?? null }),
+      ...(has("endEngineHours") && { endEngineHours: input.endEngineHours ?? null }),
       ...(has("notes") && { notes: input.notes ?? null }),
     };
 
@@ -460,11 +480,16 @@ export class TripsService {
     // odometer back. The compensating action is an operator
     // manually editing the Vehicle's odometerCurrentKm via the
     // Vehicle edit form; see the Odometer entry in docs/glossary.md.
-    const isCompletedTransition =
-      has("status") &&
-      input.status === "COMPLETED" &&
-      existing.status !== "COMPLETED" &&
-      merged.endOdometerKm !== null;
+    // ADR-0036 extends this beyond the odometer: the SAME transaction now
+    // advances up to two meters — odometer (km) always, engine-hours when the
+    // vehicle is hour-metered (meterType ENGINE_HOURS/BOTH) — each under the
+    // identical monotonic "once forward" (`>`) rule. We enter the bump branch
+    // when EITHER end reading is present (a pure ENGINE_HOURS trip carries
+    // hours but no odometer), then advance only the meters that move forward.
+    const transitionedToCompleted =
+      has("status") && input.status === "COMPLETED" && existing.status !== "COMPLETED";
+    const bumpEndOdo = transitionedToCompleted && merged.endOdometerKm !== null;
+    const bumpEndHours = transitionedToCompleted && merged.endEngineHours !== null;
 
     try {
       return await this.prisma.$transaction(async (tx) => {
@@ -474,25 +499,47 @@ export class TripsService {
           include: DETAIL_INCLUDE,
         });
 
-        if (isCompletedTransition && merged.endOdometerKm !== null) {
+        if (bumpEndOdo || bumpEndHours) {
           const vehicle = await tx.vehicle.findUniqueOrThrow({
             where: { id: updatedTrip.vehicleId },
-            select: { odometerCurrentKm: true },
+            select: { odometerCurrentKm: true, meterType: true, engineHoursCurrent: true },
           });
-          if (merged.endOdometerKm > vehicle.odometerCurrentKm) {
+
+          // Accumulate only the meter advances that actually move forward,
+          // then issue at most one vehicle UPDATE. The eager-included Vehicle
+          // on the returned trip is refreshed with the same patch so callers
+          // (controllers, tests) observe the bumped value(s) without a
+          // follow-up read — cheaper than a second findUnique.
+          const vehiclePatch: { odometerCurrentKm?: number; engineHoursCurrent?: number } = {};
+
+          // Odometer — unchanged behavior: advance only when the trip's end
+          // odometer is strictly greater than the vehicle's current km. The
+          // `>` (not `>=`) avoids a no-op write and blocks a backdated
+          // correction trip from moving the odometer backwards.
+          if (bumpEndOdo && (merged.endOdometerKm as number) > vehicle.odometerCurrentKm) {
+            vehiclePatch.odometerCurrentKm = merged.endOdometerKm as number;
+          }
+
+          // Engine-hours (ADR-0036 c5) — only for hour-metered vehicles
+          // (ENGINE_HOURS / BOTH; an ODOMETER_KM vehicle never has its hours
+          // touched), and only when the reading moves forward. A null current
+          // (an hour-metered asset whose SMR was never keyed in) is "behind
+          // any reading", so the first completed trip seeds engineHoursCurrent.
+          if (
+            bumpEndHours &&
+            meterIncludesHours(vehicle.meterType) &&
+            (vehicle.engineHoursCurrent === null ||
+              (merged.endEngineHours as number) > vehicle.engineHoursCurrent)
+          ) {
+            vehiclePatch.engineHoursCurrent = merged.endEngineHours as number;
+          }
+
+          if (Object.keys(vehiclePatch).length > 0) {
             await tx.vehicle.update({
               where: { id: updatedTrip.vehicleId },
-              data: { odometerCurrentKm: merged.endOdometerKm },
+              data: vehiclePatch,
             });
-            // Refresh the eager-included Vehicle on the returned
-            // trip so callers (controllers, tests) observe the
-            // newly bumped value without a follow-up read. Cheaper
-            // than a second `findUnique({ include: DETAIL_INCLUDE })`
-            // because we already know the new value.
-            updatedTrip.vehicle = {
-              ...updatedTrip.vehicle,
-              odometerCurrentKm: merged.endOdometerKm,
-            };
+            updatedTrip.vehicle = { ...updatedTrip.vehicle, ...vehiclePatch };
           }
         }
 
@@ -583,8 +630,9 @@ export class TripsService {
   }
 
   /**
-   * Per-vehicle lifetime stats — aggregates the trip history into three
-   * scalars the Vehicle detail page surfaces in iter 12. Called by
+   * Per-vehicle lifetime stats — aggregates the trip history into four
+   * scalars the Vehicle detail page surfaces (count + km from iter 12;
+   * engine-hours added by ADR-0036). Called by
    * VehiclesController via `TripsModule`'s export — the aggregation
    * lives here (next to `list` / `findById`) rather than on
    * VehiclesService because the underlying data is Trip rows.
@@ -597,6 +645,11 @@ export class TripsService {
    *     COMPLETED trips only. Both fields are non-null on COMPLETED
    *     rows (cross-field validation enforces it), so the subtraction
    *     is safe; `?? 0` defends against an empty result set.
+   *   - `totalHoursLogged` (ADR-0036) sums `endEngineHours −
+   *     startEngineHours` (integer tenths-of-an-hour) across COMPLETED
+   *     trips only — the hours rotation of `totalKmLogged`. It is 0 for a
+   *     km-only fleet (the hours columns are null, `?? 0` → 0); display
+   *     divides by 10. Computed in the same `$transaction` snapshot.
    *   - `mostRecentDriver` is the driver on the trip with the largest
    *     non-null `startedAt` — "who last actually drove this vehicle".
    *     Includes IN_PROGRESS, COMPLETED, and any CANCELLED-after-start.
@@ -610,6 +663,7 @@ export class TripsService {
   async statsForVehicle(vehicleId: string): Promise<{
     completedTripCount: number;
     totalKmLogged: number;
+    totalHoursLogged: number;
     mostRecentDriver: {
       id: string;
       fullName: string;
@@ -623,7 +677,12 @@ export class TripsService {
       }),
       this.prisma.trip.aggregate({
         where: { vehicleId, status: "COMPLETED" },
-        _sum: { endOdometerKm: true, startOdometerKm: true },
+        _sum: {
+          endOdometerKm: true,
+          startOdometerKm: true,
+          endEngineHours: true,
+          startEngineHours: true,
+        },
       }),
       this.prisma.trip.findFirst({
         where: { vehicleId, startedAt: { not: null } },
@@ -639,6 +698,9 @@ export class TripsService {
     const sumEnd = sumAggregate._sum.endOdometerKm ?? 0;
     const sumStart = sumAggregate._sum.startOdometerKm ?? 0;
     const totalKmLogged = sumEnd - sumStart;
+    const sumEndHours = sumAggregate._sum.endEngineHours ?? 0;
+    const sumStartHours = sumAggregate._sum.startEngineHours ?? 0;
+    const totalHoursLogged = sumEndHours - sumStartHours;
 
     const mostRecentDriver =
       mostRecentTrip && mostRecentTrip.startedAt
@@ -650,15 +712,16 @@ export class TripsService {
           }
         : null;
 
-    return { completedTripCount, totalKmLogged, mostRecentDriver };
+    return { completedTripCount, totalKmLogged, totalHoursLogged, mostRecentDriver };
   }
 
   /**
    * Per-driver lifetime stats — the symmetric mirror of
-   * `statsForVehicle`. Iter 13 surfaces the same three aggregations on
-   * the Driver detail page that iter 12 added to the Vehicle detail
-   * page, rotated 90° around the Trip aggregate (Drivers join Trips on
-   * `driverId` the same way Vehicles do on `vehicleId`).
+   * `statsForVehicle`. Iter 13 surfaced the same aggregations on the
+   * Driver detail page that iter 12 added to the Vehicle detail page,
+   * rotated 90° around the Trip aggregate (Drivers join Trips on
+   * `driverId` the same way Vehicles do on `vehicleId`); ADR-0036 adds
+   * `totalHoursLogged` to both in lockstep (commitment 6).
    *
    * Scope decisions mirror the vehicle variant exactly:
    *   - `completedTripCount` counts COMPLETED trips only. PLANNED and
@@ -667,6 +730,10 @@ export class TripsService {
    *     COMPLETED trips only. Both fields are non-null on COMPLETED
    *     rows (cross-field validation enforces it), so the subtraction
    *     is safe; `?? 0` defends against an empty result set.
+   *   - `totalHoursLogged` (ADR-0036) sums `endEngineHours −
+   *     startEngineHours` (integer tenths-of-an-hour) across COMPLETED
+   *     trips only — the hours rotation of `totalKmLogged`, 0 for a
+   *     km-only fleet. Computed in the same `$transaction` snapshot.
    *   - `mostRecentVehicle` is the vehicle on the trip with the largest
    *     non-null `startedAt` — "what was last paired with this driver".
    *     Includes IN_PROGRESS, COMPLETED, and any CANCELLED-after-start.
@@ -683,6 +750,7 @@ export class TripsService {
   async statsForDriver(driverId: string): Promise<{
     completedTripCount: number;
     totalKmLogged: number;
+    totalHoursLogged: number;
     mostRecentVehicle: {
       id: string;
       registrationNumber: string;
@@ -696,7 +764,12 @@ export class TripsService {
       }),
       this.prisma.trip.aggregate({
         where: { driverId, status: "COMPLETED" },
-        _sum: { endOdometerKm: true, startOdometerKm: true },
+        _sum: {
+          endOdometerKm: true,
+          startOdometerKm: true,
+          endEngineHours: true,
+          startEngineHours: true,
+        },
       }),
       this.prisma.trip.findFirst({
         where: { driverId, startedAt: { not: null } },
@@ -712,6 +785,9 @@ export class TripsService {
     const sumEnd = sumAggregate._sum.endOdometerKm ?? 0;
     const sumStart = sumAggregate._sum.startOdometerKm ?? 0;
     const totalKmLogged = sumEnd - sumStart;
+    const sumEndHours = sumAggregate._sum.endEngineHours ?? 0;
+    const sumStartHours = sumAggregate._sum.startEngineHours ?? 0;
+    const totalHoursLogged = sumEndHours - sumStartHours;
 
     const mostRecentVehicle =
       mostRecentTrip && mostRecentTrip.startedAt
@@ -723,6 +799,6 @@ export class TripsService {
           }
         : null;
 
-    return { completedTripCount, totalKmLogged, mostRecentVehicle };
+    return { completedTripCount, totalKmLogged, totalHoursLogged, mostRecentVehicle };
   }
 }

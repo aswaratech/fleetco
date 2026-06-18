@@ -361,6 +361,7 @@ describe("VehiclesController.getStats (iter-12 cross-slice read)", () => {
       vehicleId: vehicle.id,
       completedTripCount: 0,
       totalKmLogged: 0,
+      totalHoursLogged: 0,
       mostRecentDriver: null,
     });
   });
@@ -444,6 +445,9 @@ describe("VehiclesController.getStats (iter-12 cross-slice read)", () => {
     const stats = await controller.getStats(vehicle.id);
     expect(stats.completedTripCount).toBe(2);
     expect(stats.totalKmLogged).toBe(350);
+    // These COMPLETED trips carry no engine-hours (km-only fixtures), so the
+    // hours stat flows through the controller as 0 (ADR-0036).
+    expect(stats.totalHoursLogged).toBe(0);
     expect(stats.mostRecentDriver?.id).toBe(driver.id);
   });
 });

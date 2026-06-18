@@ -53,10 +53,12 @@ export interface DriversListResponse {
 }
 
 // Iter-13 wire shape for `GET /api/v1/drivers/:id/stats`. The route
-// surfaces three aggregations the Driver detail page renders in a
-// "Lifetime stats" section: count + km from COMPLETED trips, plus the
-// vehicle paired with the most-recently-started trip (any non-null
-// `startedAt`). Symmetric mirror of iter-12 VehicleStatsResponse.
+// surfaces four aggregations the Driver detail page renders in a
+// "Lifetime stats" section: count + km + engine-hours (ADR-0036) from
+// COMPLETED trips, plus the vehicle paired with the most-recently-started
+// trip (any non-null `startedAt`). Symmetric mirror of VehicleStatsResponse.
+// `totalHoursLogged` is integer tenths-of-an-hour (0 for a km-only fleet);
+// the web layer divides by 10 for display.
 //
 // The `startedAt` field is serialized as an ISO string for the wire
 // (the service returns a `Date`); the controller does the conversion
@@ -66,6 +68,7 @@ export interface DriverStatsResponse {
   driverId: string;
   completedTripCount: number;
   totalKmLogged: number;
+  totalHoursLogged: number;
   mostRecentVehicle: {
     id: string;
     registrationNumber: string;
@@ -173,6 +176,7 @@ export class DriversController {
       driverId: id,
       completedTripCount: stats.completedTripCount,
       totalKmLogged: stats.totalKmLogged,
+      totalHoursLogged: stats.totalHoursLogged,
       mostRecentVehicle: stats.mostRecentVehicle
         ? {
             id: stats.mostRecentVehicle.id,

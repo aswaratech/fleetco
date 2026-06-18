@@ -30,6 +30,10 @@ const VEHICLE_STATUSES = ["ACTIVE", "IN_MAINTENANCE", "RETIRED", "SOLD"] as cons
 // Added iter 14 alongside the compliance-metadata columns.
 const INSURANCE_TYPES = ["THIRD_PARTY", "COMPREHENSIVE"] as const;
 
+// Meter type enum — must mirror MeterType in prisma/schema.prisma. Added
+// by ADR-0036 (engine-hours tracking) alongside the engine-hours columns.
+const METER_TYPES = ["ODOMETER_KM", "ENGINE_HOURS", "BOTH"] as const;
+
 // Year window. Lower bound: 1980 (older fleet pieces are rare in Nepal;
 // a typo entering 1929 should be rejected). Upper bound: current year +1
 // to allow registering a new vehicle whose paperwork lists next year's
@@ -88,6 +92,28 @@ const InsuranceTypeEnum = z.enum(INSURANCE_TYPES, {
   error: () => `Insurance type must be one of: ${INSURANCE_TYPES.join(", ")}.`,
 });
 
+const MeterTypeEnum = z.enum(METER_TYPES, {
+  error: () => `Meter type must be one of: ${METER_TYPES.join(", ")}.`,
+});
+
+// Engine-hours readings are stored as integer TENTHS OF AN HOUR
+// (deci-hours) per ADR-0036 — never a float (CLAUDE.md's never-floats
+// rule, the FuelLog.litersMl integer-minor-units precedent). An hour-meter
+// reading of 1234.5 h is keyed by the UI as 12345. The cap (10,000,000
+// tenths = 1,000,000 hours) is well past any real hour-meter — heavy
+// equipment is scrapped well under 50,000 hours — and exists to reject
+// typos / guard integer overflow, exactly like ODOMETER_MAX_KM.
+const ENGINE_HOURS_MAX_TENTHS = 10_000_000;
+
+const EngineHoursTenths = z
+  .number()
+  .int("Engine hours must be an integer number of tenths-of-an-hour.")
+  .min(0, "Engine hours cannot be negative.")
+  .max(
+    ENGINE_HOURS_MAX_TENTHS,
+    `Engine hours cannot exceed ${ENGINE_HOURS_MAX_TENTHS.toLocaleString("en")} tenths-of-an-hour.`,
+  );
+
 // Compliance-metadata field fragments (iter 14). The three document
 // numbers are short identifier strings capped at 64 chars like make /
 // model / registrationNumber; the three expiry dates reuse DateInput.
@@ -111,6 +137,15 @@ export const CreateVehicleSchema = z
     status: VehicleStatusEnum.optional(),
     odometerStartKm: OdometerKm.optional(),
     odometerCurrentKm: OdometerKm.optional(),
+    // Engine-hours metering (ADR-0036). meterType is optional on create —
+    // the service defaults it to ODOMETER_KM so an existing km-only create
+    // call is unchanged. The two hours readings are optional + nullable (an
+    // hour-metered asset may be registered before its SMR is keyed in); the
+    // service defaults engineHoursCurrent to engineHoursStart ("current at
+    // acquisition equals start"), mirroring the odometer default-to-start rule.
+    meterType: MeterTypeEnum.optional(),
+    engineHoursStart: EngineHoursTenths.nullable().optional(),
+    engineHoursCurrent: EngineHoursTenths.nullable().optional(),
     acquiredAt: DateInput,
     // Compliance metadata (iter 14) — all optional; a vehicle may be
     // registered before its documents are scanned in. Dates are
@@ -147,6 +182,14 @@ export const UpdateVehicleSchema = z
     status: VehicleStatusEnum.optional(),
     odometerStartKm: OdometerKm.optional(),
     odometerCurrentKm: OdometerKm.optional(),
+    // Engine-hours metering (ADR-0036). meterType is a non-null column so it
+    // is optional-not-nullable (you reclassify a meter, you do not clear it);
+    // the two hours readings are nullable-optional so the operator can set,
+    // change, or clear (send null) a reading. Same conditional pass-through
+    // as the compliance fields below.
+    meterType: MeterTypeEnum.optional(),
+    engineHoursStart: EngineHoursTenths.nullable().optional(),
+    engineHoursCurrent: EngineHoursTenths.nullable().optional(),
     acquiredAt: DateInput.optional(),
     retiredAt: DateInput.nullable().optional(),
     // Compliance metadata (iter 14) — nullable-optional on PATCH so the

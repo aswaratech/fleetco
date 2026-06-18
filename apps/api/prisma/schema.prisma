@@ -161,6 +161,28 @@ enum InsuranceType {
   @@map("insurance_type")
 }
 
+// Meter-type discriminator per ADR-0036 (engine-hours tracking). Says
+// which meter(s) an asset has, INDEPENDENT of whether a reading has been
+// captured yet (a brand-new excavator with no SMR recorded is still an
+// ENGINE_HOURS asset — "tracks hours" and "has an hours reading yet" are
+// different facts, the same reason the iter-14 compliance columns are
+// nullable-but-present, ADR-0036 commitment 1). ODOMETER_KM is the
+// default so the migration is backward-compatible: every existing vehicle
+// keeps km-only behavior with no data change, and the operator flips
+// equipment to ENGINE_HOURS (excavators, loaders, graders, generators,
+// cranes — the earthmoving half whose wear tracks engine-hours, not
+// kilometers) or BOTH (the rare truck-mounted crane: chassis on km, boom
+// on hours) as they classify the fleet. An explicit column is preferred
+// over deriving the meter from vehicle.kind (a chassis taxonomy with an
+// OTHER escape hatch that cannot express BOTH) — see ADR-0036 Alternatives.
+enum MeterType {
+  ODOMETER_KM
+  ENGINE_HOURS
+  BOTH
+
+  @@map("meter_type")
+}
+
 model Vehicle {
   id                 String        @id @default(cuid())
   /// Tier 3 per ADR-0013 — Nepali commercial plate (loose validation in
@@ -182,11 +204,43 @@ model Vehicle {
   /// Updated by trip end events; tracked at vehicle level so reports
   /// can compute lifetime kilometers (current - start).
   odometerCurrentKm  Int           @default(0)
+
+  // Engine-hours metering — ADR-0036. The earthmoving half of the fleet
+  // (excavators, loaders, graders, generators, cranes) wears on
+  // engine-hours, not kilometers. `meterType` says which meter(s) this
+  // asset has; the two nullable columns below are the hours rotation of
+  // odometerStartKm/odometerCurrentKm. Additive + backward-compatible:
+  // meterType defaults to ODOMETER_KM and the hours columns are nullable,
+  // so every existing km-only row is unchanged with no data migration
+  // (the iter-14 nullable-compliance-columns posture).
+  /// Tier 3 per ADR-0013 — which meter(s) this asset has (ADR-0036 c1):
+  /// ODOMETER_KM (default; distance-metered trucks/tippers), ENGINE_HOURS
+  /// (hour-metered equipment), or BOTH. Drives which reading the trip-stop
+  /// UI prompts for and which stat the detail page shows.
+  meterType          MeterType @default(ODOMETER_KM)
+  /// Tier 3 per ADR-0013 — baseline hour-meter reading at acquisition,
+  /// stored as integer TENTHS OF AN HOUR (deci-hours) — never a float
+  /// (CLAUDE.md's never-floats rule, the FuelLog.litersMl integer-minor-
+  /// units precedent extended to engine-hours): 1234.5 h stores as 12345,
+  /// display divides by 10, cross-field math stays in integers. The hours
+  /// rotation of odometerStartKm. Nullable: null is the honest value for a
+  /// km-only asset (no hour-meter) and for an hour-metered asset registered
+  /// before its SMR is keyed in (ADR-0036 c2).
+  engineHoursStart   Int?
+  /// Tier 3 per ADR-0013 — current hour-meter reading, integer TENTHS OF
+  /// AN HOUR (deci-hours). The hours rotation of odometerCurrentKm:
+  /// advanced by the Trip→Vehicle hours auto-update on a COMPLETED
+  /// transition under the monotonic "once forward, stays forward" rule
+  /// (ADR-0036 c5), the same rule as the odometer. VehiclesService.create
+  /// defaults it to engineHoursStart ("current at acquisition equals
+  /// start"). Nullable, same rationale as engineHoursStart.
+  engineHoursCurrent Int?
+
   /// Tier 3 per ADR-0013 — date the vehicle joined the fleet.
-  acquiredAt         DateTime
+  acquiredAt DateTime
   /// Tier 3 per ADR-0013 — date the vehicle left the fleet (retired or
   /// sold). Nullable; populated when status transitions to RETIRED or SOLD.
-  retiredAt          DateTime?
+  retiredAt  DateTime?
 
   // Compliance metadata — Nepal-specific registration and document
   // tracking added in Phase 1 iter 14. All nullable: the Vehicle
@@ -376,7 +430,7 @@ enum TripStatus {
 }
 
 model Trip {
-  id              String     @id @default(cuid())
+  id               String     @id @default(cuid())
   /// FK to Vehicle. Indexed individually so list filters by vehicleId
   /// (the "trips for this vehicle" UI query) hit an index. onDelete:
   /// Restrict because trips reference vehicles by id throughout their
@@ -384,43 +438,58 @@ model Trip {
   /// corrupt per-vehicle profit-and-loss calculations later. See the
   /// tech-debt entry on the cross-aggregate concern for the planned
   /// P2003 → 409 service-layer translation.
-  vehicleId       String
-  vehicle         Vehicle    @relation("TripVehicle", fields: [vehicleId], references: [id], onDelete: Restrict)
+  vehicleId        String
+  vehicle          Vehicle    @relation("TripVehicle", fields: [vehicleId], references: [id], onDelete: Restrict)
   /// FK to Driver. Same indexing and onDelete rationale as vehicleId.
-  driverId        String
-  driver          Driver     @relation("TripDriver", fields: [driverId], references: [id], onDelete: Restrict)
-  status          TripStatus @default(PLANNED)
+  driverId         String
+  driver           Driver     @relation("TripDriver", fields: [driverId], references: [id], onDelete: Restrict)
+  status           TripStatus @default(PLANNED)
   /// Trip start time (when the driver leaves the depot / picks up the
   /// load). Nullable because a PLANNED trip has no start time yet —
   /// the iter-9 write path's status transition into IN_PROGRESS sets
   /// it. ISO/UTC per CLAUDE.md.
-  startedAt       DateTime?
+  startedAt        DateTime?
   /// Trip end time (when the driver returns the vehicle / drops the
   /// load). Nullable; only COMPLETED and CANCELLED trips carry an end
   /// time. ISO/UTC per CLAUDE.md.
-  endedAt         DateTime?
+  endedAt          DateTime?
   /// Odometer reading at the Vehicle when the trip started, in
   /// kilometers. Nullable because PLANNED trips have no start
   /// odometer reading yet. Integer per the Vehicle.odometer convention
   /// (no fractional kilometers at the trip-aggregate level; fractional
   /// distances belong on route-point data, a later slice).
-  startOdometerKm Int?
+  startOdometerKm  Int?
   /// Odometer reading at the Vehicle when the trip ended, in
   /// kilometers. Nullable until COMPLETED. The iter-9 write path's
   /// status transition into COMPLETED will also update
   /// Vehicle.odometerCurrentKm — explicitly out of scope for iter 8.
-  endOdometerKm   Int?
+  endOdometerKm    Int?
+  /// Engine-hours reading at the Vehicle when the trip STARTED, integer
+  /// TENTHS OF AN HOUR (deci-hours) — the hours rotation of
+  /// startOdometerKm (ADR-0036 c3), captured by the →IN_PROGRESS
+  /// transition alongside startedAt. Nullable: a PLANNED trip has none
+  /// yet, and a km-only (ODOMETER_KM) vehicle's trips never capture
+  /// hours. Integer minor units, never a float (the litersMl precedent).
+  startEngineHours Int?
+  /// Engine-hours reading at the Vehicle when the trip ENDED, integer
+  /// TENTHS OF AN HOUR (deci-hours) — the hours rotation of endOdometerKm,
+  /// captured by the →COMPLETED transition alongside endedAt. On a
+  /// COMPLETED transition, the same $transaction advances the referenced
+  /// Vehicle.engineHoursCurrent to this value when the vehicle is
+  /// hour-metered, under the monotonic "once forward" rule (ADR-0036 c5).
+  /// Nullable until COMPLETED on an hour-metered vehicle.
+  endEngineHours   Int?
   /// Free-form operator notes. Tier 3 operational data; not PII. The
   /// future write-path UI's helper text will direct operators not to
   /// enter PII here. Nullable; the empty case is null rather than "".
-  notes           String?
-  createdAt       DateTime   @default(now())
-  updatedAt       DateTime   @updatedAt
+  notes            String?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
   /// References the User who created the trip record (ADR-0021 admin
   /// user). Audit field; Restrict because the trip's audit chain
   /// should remain intact for the trip's lifetime.
-  createdById     String
-  createdBy       User       @relation("TripCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  createdById      String
+  createdBy        User       @relation("TripCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
 
   fuelLogs    FuelLog[]
   expenseLogs ExpenseLog[]
