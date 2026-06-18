@@ -38,14 +38,38 @@
  */
 export type ComplianceBadgeState = "none" | "expired" | "expiring-soon" | "ok";
 
-const MS_PER_DAY = 24 * 60 * 60 * 1000;
+// Exported so the maintenance due/overdue classifier (ADR-0037 c7,
+// apps/web/src/lib/maintenance.ts) reuses the SAME calendar-day arithmetic
+// rather than re-deriving date math — the ADR's "both helpers sit on one
+// primitive" instruction.
+export const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
 // Truncate a Date to the UTC midnight of its calendar day, as an epoch-ms
 // integer. Reads the UTC components (the same getUTC* accessors the BS
 // formatter uses to choose the rendered day), so the result is independent of
-// the server's local timezone.
-function utcStartOfDayMs(date: Date): number {
+// the server's local timezone. Exported as a shared primitive for the
+// maintenance CALENDAR_DAYS case (ADR-0037 c7).
+export function utcStartOfDayMs(date: Date): number {
   return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+}
+
+// The shared three-state threshold core (ADR-0037 c7). Classifies a "remaining"
+// quantity (how far until due — days, km, or tenths-of-an-hour) against an
+// inclusive due-soon `window`:
+//   - remaining < 0           → "past"   (overdue / expired)
+//   - 0 ≤ remaining ≤ window   → "within" (due-soon / expiring-soon)
+//   - remaining > window       → "beyond" (ok)
+// The names are deliberately neutral: `complianceBadgeState` maps them to
+// expired/expiring-soon/ok, and `serviceScheduleState` (maintenance.ts) maps
+// the SAME three states to overdue/due-soon/ok. One primitive, two labelings —
+// so the boundary semantics (strict `< 0` for past, inclusive `≤ window` for
+// the due-soon edge) can never drift between the two surfaces.
+export type ThresholdState = "past" | "within" | "beyond";
+
+export function thresholdState(remaining: number, window: number): ThresholdState {
+  if (remaining < 0) return "past";
+  if (remaining <= window) return "within";
+  return "beyond";
 }
 
 /**
@@ -72,11 +96,13 @@ export function complianceBadgeState(
   const expiry = new Date(expiryIso);
   if (Number.isNaN(expiry.getTime())) return "none";
 
-  const expiryDay = utcStartOfDayMs(expiry);
-  const today = utcStartOfDayMs(now);
-  if (expiryDay < today) return "expired";
-  if (expiryDay <= today + windowDays * MS_PER_DAY) return "expiring-soon";
-  return "ok";
+  // "Remaining" until expiry, in epoch-ms of whole UTC calendar days (both
+  // operands truncated to UTC midnight). The shared core applies the
+  // strict-past / inclusive-window rule, so this helper and the maintenance
+  // classifier share one definition of the boundary.
+  const remaining = utcStartOfDayMs(expiry) - utcStartOfDayMs(now);
+  const state = thresholdState(remaining, windowDays * MS_PER_DAY);
+  return state === "past" ? "expired" : state === "within" ? "expiring-soon" : "ok";
 }
 
 // Worst-of precedence across several compliance states: a roll-up's state is
