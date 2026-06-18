@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { BadRequestException, NotFoundException, type INestApplication } from "@nestjs/common";
 import { Test, type TestingModule } from "@nestjs/testing";
+import { ExpenseCategory } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 
 import { ZodValidationPipe } from "../src/common/zod-validation.pipe";
@@ -16,6 +17,7 @@ import {
 } from "../src/modules/maintenance/service-records.schemas";
 import { PrismaService } from "../src/modules/prisma/prisma.service";
 import { resetDb } from "./db";
+import { seedExpenseLog } from "./fixtures/expense-log";
 
 describe("ServiceRecordsController schemas (B3 contract)", () => {
   describe("ListServiceRecordsQuerySchema", () => {
@@ -78,6 +80,16 @@ describe("ServiceRecordsController schemas (B3 contract)", () => {
       ).toThrow(BadRequestException);
     });
 
+    test("non-cuid expenseLogId → BadRequestException", () => {
+      expect(() =>
+        pipe.transform({
+          vehicleId: "ckvehicle00000000",
+          performedAt: "2026-02-01",
+          expenseLogId: "nope",
+        }),
+      ).toThrow(BadRequestException);
+    });
+
     test("negative meter reading → BadRequestException", () => {
       expect(() =>
         pipe.transform({
@@ -93,6 +105,7 @@ describe("ServiceRecordsController schemas (B3 contract)", () => {
         vehicleId: "ckvehicle00000000",
         performedAt: "2026-02-01",
         serviceScheduleId: null,
+        expenseLogId: null,
         odometerKm: null,
         engineHours: null,
         notes: null,
@@ -100,6 +113,7 @@ describe("ServiceRecordsController schemas (B3 contract)", () => {
       expect(parsed.vehicleId).toBe("ckvehicle00000000");
       expect(parsed.performedAt).toBeInstanceOf(Date);
       expect(parsed.serviceScheduleId).toBeNull();
+      expect(parsed.expenseLogId).toBeNull();
     });
   });
 
@@ -210,6 +224,19 @@ describe("ServiceRecordsController (integration, real Prisma)", () => {
     expect(created.createdById).toBe(adminId);
     expect(created.serviceScheduleId).toBeNull();
     expect(created.odometerKm).toBe(75_000);
+  });
+
+  test("create with a linked same-vehicle MAINTENANCE expense persists expenseLogId", async () => {
+    const expense = await seedExpenseLog(prisma, {
+      createdById: adminId,
+      vehicleId,
+      category: ExpenseCategory.MAINTENANCE,
+    });
+    const created = await controller.create(
+      { vehicleId, performedAt: new Date("2026-02-01T00:00:00Z"), expenseLogId: expense.id },
+      fakeRequest,
+    );
+    expect(created.expenseLogId).toBe(expense.id);
   });
 
   test("create with a schedule on a different vehicle → BadRequestException (400 bubbles)", async () => {

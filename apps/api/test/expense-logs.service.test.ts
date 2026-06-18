@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { BadRequestException, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ConflictException, NotFoundException } from "@nestjs/common";
 import { Test, type TestingModule } from "@nestjs/testing";
 import { type Driver, ExpenseCategory, type Trip, type Vehicle } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
@@ -811,6 +811,33 @@ describe("ExpenseLogsService (integration, real Postgres)", () => {
       } catch (error) {
         expect(error).toBeInstanceOf(NotFoundException);
         expect((error as NotFoundException).message).toContain("ckmissingexpenselog12345");
+      }
+    });
+
+    test("on an expense referenced by a ServiceRecord throws ConflictException (409, ADR-0037 c6)", async () => {
+      // The B4 cost-link: a ServiceRecord.expenseLogId FK (onDelete: Restrict)
+      // means a linked maintenance expense cannot be deleted out from under the
+      // service record it documents the cost of. Closes the latent 500 the
+      // iter-22 docstring anticipated once a Restrict FK pointed at ExpenseLog.
+      const expense = await seedExpenseLog(prisma, {
+        createdById: adminId,
+        vehicleId: vehicleA.id,
+        category: ExpenseCategory.MAINTENANCE,
+      });
+      await prisma.serviceRecord.create({
+        data: {
+          vehicleId: vehicleA.id,
+          expenseLogId: expense.id,
+          performedAt: new Date("2026-02-16T00:00:00Z"),
+          createdById: adminId,
+        },
+      });
+      try {
+        await service.delete(expense.id);
+        throw new Error("expected ConflictException");
+      } catch (error) {
+        expect(error).toBeInstanceOf(ConflictException);
+        expect((error as ConflictException).message).toContain("referenced by other records");
       }
     });
   });

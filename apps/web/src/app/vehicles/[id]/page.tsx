@@ -14,8 +14,9 @@ import {
 } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
 import { complianceBadgeState } from "@/lib/compliance";
+import { nextDueForSchedule, serviceScheduleState } from "@/lib/maintenance";
 import { getServerSession } from "@/lib/session";
-import { formatHours } from "@/lib/units";
+import { formatHours, formatKm } from "@/lib/units";
 import {
   INSURANCE_TYPE_LABELS,
   meterIncludesHours,
@@ -68,6 +69,96 @@ interface VehicleStatsResponse {
     tripId: string;
     startedAt: string;
   } | null;
+}
+
+// Cross-slice read — B4 (ADR-0037). The "Service schedules" section fetches
+// this vehicle's ACTIVE service schedules and paints a per-schedule
+// due-soon/overdue <Badge> from `serviceScheduleState`. The wire shape is the
+// raw ServiceSchedule row the API returns (apps/api maintenance aggregate);
+// dates arrive as ISO strings, meter anchors as integers (km /
+// tenths-of-an-hour) or null. Inlined per the same convention as
+// TripsListResponse / VehicleStatsResponse — B5 (the maintenance web pages)
+// will promote it to a shared type when a second surface consumes it. The
+// shape is structurally assignable to maintenance.ts's `ServiceScheduleAnchor`
+// (the classifier input).
+interface ServiceScheduleRow {
+  id: string;
+  vehicleId: string;
+  name: string;
+  description: string | null;
+  intervalType: "DISTANCE_KM" | "ENGINE_HOURS" | "CALENDAR_DAYS";
+  intervalValue: number;
+  status: "ACTIVE" | "INACTIVE";
+  lastServiceAt: string;
+  lastServiceOdometerKm: number | null;
+  lastServiceEngineHours: number | null;
+  createdAt: string;
+  updatedAt: string;
+  createdById: string;
+}
+
+interface ServiceSchedulesResponse {
+  items: ServiceScheduleRow[];
+  total: number;
+  skip: number;
+  take: number;
+  sortBy: string;
+  sortDir: string;
+}
+
+// Human-readable interval label, e.g. "Every 5,000 km" / "Every 250.0 h" /
+// "Every 90 days". formatKm / formatHours come from lib/units (hours are
+// integer tenths, so formatHours(2500) → "250.0 h").
+function intervalLabel(schedule: ServiceScheduleRow): string {
+  switch (schedule.intervalType) {
+    case "DISTANCE_KM":
+      return `Every ${formatKm(schedule.intervalValue)}`;
+    case "ENGINE_HOURS":
+      return `Every ${formatHours(schedule.intervalValue)}`;
+    case "CALENDAR_DAYS":
+      return `Every ${schedule.intervalValue} ${schedule.intervalValue === 1 ? "day" : "days"}`;
+  }
+}
+
+// The schedule's derived "next due" value (ADR-0037 c7): a BS-rendered date for
+// the calendar dimension, a formatted km / hours reading for the meter
+// dimensions. formatKm / formatHours render the em-dash on a null reading (the
+// same inputs that make serviceScheduleState return "none").
+function NextDueCell({ schedule }: { schedule: ServiceScheduleRow }): React.ReactElement {
+  const nextDue = nextDueForSchedule(schedule);
+  switch (schedule.intervalType) {
+    case "CALENDAR_DAYS":
+      return nextDue.dateIso ? <NepaliDate iso={nextDue.dateIso} /> : <span>—</span>;
+    case "DISTANCE_KM":
+      return <span>{formatKm(nextDue.km)}</span>;
+    case "ENGINE_HOURS":
+      return <span>{formatHours(nextDue.engineHoursTenths)}</span>;
+  }
+}
+
+// The per-schedule status cell. `serviceScheduleState` rotates the compliance
+// badge state (ADR-0037 c7): overdue → red, due-soon → amber, ok → a quiet "On
+// track", none → em-dash (no reading yet to classify). The <Badge> is the
+// shipped status primitive — no new design token (the drift test stays green).
+function ServiceStatusCell({
+  schedule,
+  vehicle,
+}: {
+  schedule: ServiceScheduleRow;
+  vehicle: Vehicle;
+}): React.ReactElement {
+  const state = serviceScheduleState(
+    schedule,
+    {
+      odometerCurrentKm: vehicle.odometerCurrentKm,
+      engineHoursCurrent: vehicle.engineHoursCurrent,
+    },
+    new Date(),
+  );
+  if (state === "overdue") return <Badge variant="error">Service overdue</Badge>;
+  if (state === "due-soon") return <Badge variant="warning">Service due soon</Badge>;
+  if (state === "ok") return <span className="text-text-muted text-sm">On track</span>;
+  return <span className="text-text-muted text-sm">—</span>;
 }
 
 // Vehicle detail — iter 3 of the Vehicles slice. Server-rendered shell
@@ -181,12 +272,19 @@ export default async function VehicleDetailPage({
   // the worse outcome.
   let trips: TripsListResponse;
   let stats: VehicleStatsResponse;
+  let schedules: ServiceSchedulesResponse;
   try {
-    [trips, stats] = await Promise.all([
+    [trips, stats, schedules] = await Promise.all([
       apiFetch<TripsListResponse>(
         `/api/v1/trips?vehicleId=${encodeURIComponent(vehicle.id)}&sortBy=createdAt&sortDir=desc&take=${RECENT_TRIPS_LIMIT}`,
       ),
       apiFetch<VehicleStatsResponse>(`/api/v1/vehicles/${encodeURIComponent(vehicle.id)}/stats`),
+      // ACTIVE schedules only — INACTIVE schedules are excluded from the
+      // due/overdue surface (ADR-0037 c8f). take=200 is the list ceiling; a
+      // single vehicle never has that many concurrent schedules.
+      apiFetch<ServiceSchedulesResponse>(
+        `/api/v1/service-schedules?vehicleId=${encodeURIComponent(vehicle.id)}&status=ACTIVE&take=200&sortBy=name&sortDir=asc`,
+      ),
     ]);
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) {
@@ -324,6 +422,50 @@ export default async function VehicleDetailPage({
               value={<ComplianceExpiry iso={vehicle.routePermitExpiresAt} />}
             />
           </dl>
+        </section>
+
+        {/* B4 (ADR-0037 c7): preventive-maintenance schedules. Per-schedule
+            due-soon / overdue <Badge>, computed against this vehicle's current
+            meter reading (km / engine-hours) or the wall clock (calendar) by
+            `serviceScheduleState` — the rotation of the Compliance section's
+            badge pattern. ACTIVE schedules only. The worst-of-N roll-up for the
+            list / Home dashboard is a B5 follow-up. */}
+        <section className="border-border-subtle bg-surface-raised rounded border shadow-sm">
+          <header className="border-border-subtle flex items-center justify-between gap-4 border-b px-6 py-4">
+            <h2 className="text-text-muted text-xs font-medium uppercase tracking-wide">
+              Service schedules
+            </h2>
+          </header>
+          {schedules.items.length === 0 ? (
+            <p className="text-text-secondary px-6 py-6 text-sm">
+              No active service schedules for this vehicle.
+            </p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Schedule</TableHead>
+                  <TableHead>Interval</TableHead>
+                  <TableHead>Next due</TableHead>
+                  <TableHead>Status</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {schedules.items.map((s) => (
+                  <TableRow key={s.id}>
+                    <TableCell className="text-text-primary">{s.name}</TableCell>
+                    <TableCell className="text-text-secondary">{intervalLabel(s)}</TableCell>
+                    <TableCell className="text-text-secondary">
+                      <NextDueCell schedule={s} />
+                    </TableCell>
+                    <TableCell>
+                      <ServiceStatusCell schedule={s} vehicle={vehicle} />
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
         </section>
 
         {/* Iter 12: lifetime stats card. Three scalars from the new

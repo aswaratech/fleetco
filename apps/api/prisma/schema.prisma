@@ -953,6 +953,16 @@ model ExpenseLog {
   createdById   String
   createdBy     User            @relation("ExpenseLogCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
 
+  // Preventive-maintenance cost link (ADR-0037 c6, B4). A ServiceRecord may
+  // reference this expense as the cost of a maintenance/repair service via its
+  // nullable expenseLogId FK (onDelete: Restrict). This back-relation is the
+  // only change to ExpenseLog — Prisma requires both sides of a relation; there
+  // is NO new column on expense_log and no migration on existing rows. Because
+  // the FK is Restrict, ExpenseLogsService.delete now maps the P2003 a referenced
+  // expense raises to HTTP 409 (the latent-500 close its iter-22 docstring
+  // anticipated for exactly this case).
+  serviceRecords ServiceRecord[]
+
   @@index([vehicleId])
   @@index([tripId])
   @@index([category])
@@ -1349,6 +1359,21 @@ model ServiceRecord {
   /// in B4; B3 records are plain inserts).
   serviceScheduleId String?
   serviceSchedule   ServiceSchedule? @relation(fields: [serviceScheduleId], references: [id], onDelete: Restrict)
+  /// Nullable FK to the ExpenseLog that records this service's COST (ADR-0037
+  /// c6, B4). The authoritative maintenance spend lives in exactly ONE place —
+  /// an ExpenseLog row with category MAINTENANCE/REPAIR and its amountPaisa —
+  /// and a ServiceRecord REFERENCES that row rather than copying the amount
+  /// (there is deliberately no amountPaisa column here). Nullable because (a) a
+  /// warranty service has no cost and (b) a service may be recorded before its
+  /// invoice is keyed in. onDelete: Restrict so a linked expense cannot be
+  /// silently deleted out from under the record (ExpenseLogsService.delete maps
+  /// the resulting P2003 → 409). The FK lives on this NEW model pointing at the
+  /// shipped ExpenseLog, so ExpenseLog gains only the Prisma back-relation —
+  /// no data column, no migration on existing expense rows. A service-layer
+  /// consistency check (ServiceRecordsService) requires the referenced expense
+  /// to be MAINTENANCE/REPAIR and on the same vehicle as the record.
+  expenseLogId      String?
+  expenseLog        ExpenseLog?      @relation(fields: [expenseLogId], references: [id], onDelete: Restrict)
   /// When the service was performed (UTC). Indexed `(performedAt desc)` for the
   /// default "most recent service first" list sort. ISO/UTC per CLAUDE.md;
   /// rendered Bikram Sambat on the web side (B5).
@@ -1373,6 +1398,7 @@ model ServiceRecord {
 
   @@index([vehicleId])
   @@index([serviceScheduleId])
+  @@index([expenseLogId])
   @@index([performedAt(sort: Desc)])
   @@index([createdById])
   @@map("service_record")

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { BadRequestException } from "@nestjs/common";
 import { Test, type TestingModule } from "@nestjs/testing";
+import { ExpenseCategory } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 
 import { PrismaService } from "../src/modules/prisma/prisma.service";
@@ -9,6 +10,7 @@ import {
   type CreateServiceRecordInput,
 } from "../src/modules/maintenance/service-records.service";
 import { resetDb } from "./db";
+import { seedExpenseLog } from "./fixtures/expense-log";
 
 // Integration tests for ServiceRecordsService against a real Postgres (ADR-0037
 // B3). A ServiceRecord is a completed service event. Coverage: filter / sort /
@@ -79,11 +81,25 @@ describe("ServiceRecordsService (integration, real Postgres)", () => {
     return {
       vehicleId,
       serviceScheduleId: overrides.serviceScheduleId,
+      expenseLogId: overrides.expenseLogId,
       performedAt: overrides.performedAt ?? new Date("2026-02-01T00:00:00Z"),
       odometerKm: overrides.odometerKm,
       engineHours: overrides.engineHours,
       notes: overrides.notes,
     };
+  }
+
+  // Assert an async call rejects with a BadRequestException whose message
+  // contains `contains`. Terser than the inline try/catch the older cases use.
+  async function expectBadRequest(fn: () => Promise<unknown>, contains: string): Promise<void> {
+    let thrown: unknown;
+    try {
+      await fn();
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(BadRequestException);
+    expect((thrown as BadRequestException).message).toContain(contains);
   }
 
   describe("findById()", () => {
@@ -230,6 +246,242 @@ describe("ServiceRecordsService (integration, real Postgres)", () => {
       }
       expect(thrown).toBeInstanceOf(BadRequestException);
       expect((thrown as BadRequestException).message).toContain("does not exist");
+    });
+  });
+
+  // ADR-0037 c6: a ServiceRecord REFERENCES its cost via expenseLogId; the
+  // referenced ExpenseLog must be MAINTENANCE/REPAIR and on the same vehicle.
+  describe("create() — ExpenseLog cost-link (c6)", () => {
+    test("links a same-vehicle MAINTENANCE expense", async () => {
+      const v = await seedVehicle();
+      const expense = await seedExpenseLog(prisma, {
+        createdById: adminId,
+        vehicleId: v.id,
+        category: ExpenseCategory.MAINTENANCE,
+      });
+      const record = await service.create(makeInput(v.id, { expenseLogId: expense.id }), adminId);
+      expect(record.expenseLogId).toBe(expense.id);
+    });
+
+    test("links a same-vehicle REPAIR expense", async () => {
+      const v = await seedVehicle();
+      const expense = await seedExpenseLog(prisma, {
+        createdById: adminId,
+        vehicleId: v.id,
+        category: ExpenseCategory.REPAIR,
+      });
+      const record = await service.create(makeInput(v.id, { expenseLogId: expense.id }), adminId);
+      expect(record.expenseLogId).toBe(expense.id);
+    });
+
+    test("a non-maintenance category (TOLL) → BadRequestException (names the category)", async () => {
+      const v = await seedVehicle();
+      const expense = await seedExpenseLog(prisma, {
+        createdById: adminId,
+        vehicleId: v.id,
+        category: ExpenseCategory.TOLL,
+      });
+      await expectBadRequest(
+        () => service.create(makeInput(v.id, { expenseLogId: expense.id }), adminId),
+        "category",
+      );
+    });
+
+    test("an expense on a DIFFERENT vehicle → BadRequestException", async () => {
+      const v1 = await seedVehicle();
+      const v2 = await seedVehicle();
+      const expenseOnV2 = await seedExpenseLog(prisma, {
+        createdById: adminId,
+        vehicleId: v2.id,
+        category: ExpenseCategory.MAINTENANCE,
+      });
+      await expectBadRequest(
+        () => service.create(makeInput(v1.id, { expenseLogId: expenseOnV2.id }), adminId),
+        "not attributed to this vehicle",
+      );
+    });
+
+    test("a vehicle-agnostic (null-vehicle) expense → BadRequestException", async () => {
+      const v = await seedVehicle();
+      const agnostic = await seedExpenseLog(prisma, {
+        createdById: adminId,
+        vehicleId: null,
+        category: ExpenseCategory.MAINTENANCE,
+      });
+      await expectBadRequest(
+        () => service.create(makeInput(v.id, { expenseLogId: agnostic.id }), adminId),
+        "not attributed to this vehicle",
+      );
+    });
+
+    test("a nonexistent (cuid-shaped) expenseLogId → BadRequestException", async () => {
+      const v = await seedVehicle();
+      await expectBadRequest(
+        () =>
+          service.create(makeInput(v.id, { expenseLogId: "cknonexistentexpense0000" }), adminId),
+        "does not exist",
+      );
+    });
+
+    test("update() links then unlinks the expense, re-validating against the stored vehicle", async () => {
+      const v = await seedVehicle();
+      const expense = await seedExpenseLog(prisma, {
+        createdById: adminId,
+        vehicleId: v.id,
+        category: ExpenseCategory.MAINTENANCE,
+      });
+      const record = await service.create(makeInput(v.id), adminId); // no expense at first
+      const linked = await service.update(record.id, { expenseLogId: expense.id });
+      expect(linked?.expenseLogId).toBe(expense.id);
+      const unlinked = await service.update(record.id, { expenseLogId: null });
+      expect(unlinked?.expenseLogId).toBeNull();
+    });
+
+    test("update() to a different-vehicle expense → BadRequestException", async () => {
+      const v1 = await seedVehicle();
+      const v2 = await seedVehicle();
+      const expenseOnV2 = await seedExpenseLog(prisma, {
+        createdById: adminId,
+        vehicleId: v2.id,
+        category: ExpenseCategory.MAINTENANCE,
+      });
+      const record = await service.create(makeInput(v1.id), adminId);
+      await expectBadRequest(
+        () => service.update(record.id, { expenseLogId: expenseOnV2.id }),
+        "not attributed",
+      );
+    });
+  });
+
+  // ADR-0037 c5: recording a service against a schedule advances that schedule's
+  // last-service anchor forward, in the SAME $transaction as the record insert,
+  // under the monotonic "once forward, stays forward" rule.
+  describe("create() — schedule anchor-advance (c5)", () => {
+    // Seed a DISTANCE_KM schedule already advanced to a known anchor so the
+    // backward-movement cases have something to (not) move.
+    async function seedAdvancedSchedule(vehicleId: string) {
+      return prisma.serviceSchedule.create({
+        data: {
+          vehicleId,
+          name: "Oil change",
+          intervalType: "DISTANCE_KM",
+          intervalValue: 5000,
+          lastServiceAt: new Date("2026-03-01T00:00:00Z"),
+          lastServiceOdometerKm: 5000,
+          createdById: adminId,
+        },
+      });
+    }
+
+    test("a forward service advances the anchor (date + odometer), atomically with the record", async () => {
+      const v = await seedVehicle();
+      const sched = await seedSchedule(v.id); // anchor: 2026-01-01 / 0 km
+      const record = await service.create(
+        makeInput(v.id, {
+          serviceScheduleId: sched.id,
+          performedAt: new Date("2026-03-01T00:00:00Z"),
+          odometerKm: 5200,
+        }),
+        adminId,
+      );
+      const after = await prisma.serviceSchedule.findUniqueOrThrow({ where: { id: sched.id } });
+      expect(after.lastServiceAt.toISOString()).toBe("2026-03-01T00:00:00.000Z");
+      expect(after.lastServiceOdometerKm).toBe(5200);
+      // Atomic: the record itself also persisted in the same transaction.
+      expect(await prisma.serviceRecord.findUnique({ where: { id: record.id } })).not.toBeNull();
+    });
+
+    test("a backdated / lower-reading correction does NOT move the anchor backward", async () => {
+      const v = await seedVehicle();
+      const sched = await seedAdvancedSchedule(v.id); // anchor: 2026-03-01 / 5000 km
+      await service.create(
+        makeInput(v.id, {
+          serviceScheduleId: sched.id,
+          performedAt: new Date("2026-01-15T00:00:00Z"),
+          odometerKm: 4000,
+        }),
+        adminId,
+      );
+      const after = await prisma.serviceSchedule.findUniqueOrThrow({ where: { id: sched.id } });
+      expect(after.lastServiceAt.toISOString()).toBe("2026-03-01T00:00:00.000Z"); // unchanged
+      expect(after.lastServiceOdometerKm).toBe(5000); // unchanged
+    });
+
+    test("each anchor field is independent: a higher km but earlier date moves only km", async () => {
+      const v = await seedVehicle();
+      const sched = await seedAdvancedSchedule(v.id); // 2026-03-01 / 5000 km
+      await service.create(
+        makeInput(v.id, {
+          serviceScheduleId: sched.id,
+          performedAt: new Date("2026-02-01T00:00:00Z"), // earlier → date stays
+          odometerKm: 6000, // higher → km advances
+        }),
+        adminId,
+      );
+      const after = await prisma.serviceSchedule.findUniqueOrThrow({ where: { id: sched.id } });
+      expect(after.lastServiceAt.toISOString()).toBe("2026-03-01T00:00:00.000Z");
+      expect(after.lastServiceOdometerKm).toBe(6000);
+    });
+
+    test("a null meter anchor is seeded by the first recorded reading", async () => {
+      const v = await seedVehicle();
+      const sched = await prisma.serviceSchedule.create({
+        data: {
+          vehicleId: v.id,
+          name: "Oil change",
+          intervalType: "DISTANCE_KM",
+          intervalValue: 5000,
+          lastServiceAt: new Date("2026-01-01T00:00:00Z"),
+          lastServiceOdometerKm: null,
+          createdById: adminId,
+        },
+      });
+      await service.create(
+        makeInput(v.id, {
+          serviceScheduleId: sched.id,
+          performedAt: new Date("2026-02-01T00:00:00Z"),
+          odometerKm: 4200,
+        }),
+        adminId,
+      );
+      const after = await prisma.serviceSchedule.findUniqueOrThrow({ where: { id: sched.id } });
+      expect(after.lastServiceOdometerKm).toBe(4200);
+    });
+
+    test("an ENGINE_HOURS schedule's hours anchor advances forward", async () => {
+      const v = await seedVehicle();
+      const sched = await prisma.serviceSchedule.create({
+        data: {
+          vehicleId: v.id,
+          name: "Hydraulic service",
+          intervalType: "ENGINE_HOURS",
+          intervalValue: 2500,
+          lastServiceAt: new Date("2026-01-01T00:00:00Z"),
+          lastServiceEngineHours: 2000,
+          createdById: adminId,
+        },
+      });
+      await service.create(
+        makeInput(v.id, {
+          serviceScheduleId: sched.id,
+          performedAt: new Date("2026-02-01T00:00:00Z"),
+          engineHours: 2300,
+        }),
+        adminId,
+      );
+      const after = await prisma.serviceSchedule.findUniqueOrThrow({ where: { id: sched.id } });
+      expect(after.lastServiceEngineHours).toBe(2300);
+    });
+
+    test("an ad-hoc record (no schedule) touches no schedule and still persists", async () => {
+      const v = await seedVehicle();
+      const sched = await seedAdvancedSchedule(v.id);
+      const record = await service.create(makeInput(v.id, { odometerKm: 9999 }), adminId); // no scheduleId
+      expect(record.serviceScheduleId).toBeNull();
+      // The unrelated schedule's anchor is untouched.
+      const after = await prisma.serviceSchedule.findUniqueOrThrow({ where: { id: sched.id } });
+      expect(after.lastServiceOdometerKm).toBe(5000);
+      expect(after.lastServiceAt.toISOString()).toBe("2026-03-01T00:00:00.000Z");
     });
   });
 
