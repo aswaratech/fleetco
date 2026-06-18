@@ -12,4 +12,5 @@
 // unchanged; apps/api imports `@fleetco/shared` directly (the reminder scan and
 // the digest renderer, Program C).
 export * from "./compliance";
+export * from "./maintenance";
 export * from "./nepali-date";
