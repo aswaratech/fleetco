@@ -29,6 +29,23 @@ import {
 } from "./notification.constants";
 
 /**
+ * Combine the ADMIN users' emails with the optional comma-separated
+ * `NOTIFICATION_RECIPIENTS` override into the de-duplicated v1 recipient list
+ * (ADR-0038 c7). Pure (no Prisma, no env read) so the override parsing + dedup
+ * is unit-testable; the service supplies the admin emails + `env.NOTIFICATION_RECIPIENTS`.
+ */
+export function combineRecipients(
+  adminEmails: readonly string[],
+  envValue: string | null | undefined,
+): string[] {
+  const envList = (envValue ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+  return [...new Set([...adminEmails, ...envList])];
+}
+
+/**
  * Counts a scan run produces — all SAFE operational values (no addresses, no
  * document contents) so the worker can put them on its span (ADR-0038 c4).
  */
@@ -250,10 +267,9 @@ export class NotificationService implements OnApplicationBootstrap {
       where: { role: "ADMIN" },
       select: { email: true },
     });
-    const envList = (env.NOTIFICATION_RECIPIENTS ?? "")
-      .split(",")
-      .map((value) => value.trim())
-      .filter((value) => value.length > 0);
-    return [...new Set([...admins.map((admin) => admin.email), ...envList])];
+    return combineRecipients(
+      admins.map((admin) => admin.email),
+      env.NOTIFICATION_RECIPIENTS,
+    );
   }
 }

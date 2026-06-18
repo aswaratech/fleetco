@@ -27,6 +27,9 @@ import { PrismaClient } from "@prisma/client";
 // user). The actual TRUNCATE uses CASCADE so order has no effect on
 // correctness.
 const TABLES = [
+  // No FK into any other table (a scan is a background job, not a user action),
+  // so it truncates independently; listed first as a standalone leaf.
+  "notification_log",
   "service_record",
   "service_schedule",
   "geofence",
