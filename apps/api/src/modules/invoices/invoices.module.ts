@@ -1,6 +1,8 @@
 import { Module } from "@nestjs/common";
 
 import { AuthModule } from "../auth/auth.module";
+import { JobsModule } from "../jobs/jobs.module";
+import { TripsModule } from "../trips/trips.module";
 import { InvoiceNumberingService } from "./invoice-numbering.service";
 import { InvoiceSettingsService } from "./invoice-settings.service";
 import { InvoicesController } from "./invoices.controller";
@@ -19,11 +21,17 @@ import { InvoicesService } from "./invoices.service";
 // public service interface without a circular import through the controller.
 //
 // D1 ships the READ path only (list / detail). Later tickets layer the write
-// path, the issue lifecycle, the PDF/R2 storage, and the web surface on top; no
-// module changes are expected for the write path — the existing controller picks
-// up the additional routes and the service grows the create/issue/update methods.
+// path, the issue lifecycle, the PDF/R2 storage, and the web surface on top.
+//
+// D4 (build-from-job/trips) imports JobsModule + TripsModule so InvoicesService can
+// read the job (customer-consistency + the line-description fallback) and the trips
+// (their dates) through those modules' PUBLIC service interfaces — never their
+// tables (ADR-0039 c8 + the CLAUDE.md cross-module rule). No cycle: neither Jobs nor
+// Trips depends on Invoices. Both modules export their service (and import AuthModule,
+// which provides TripsService's DriverScopeService dependency), so the imports
+// resolve cleanly.
 @Module({
-  imports: [AuthModule],
+  imports: [AuthModule, JobsModule, TripsModule],
   controllers: [InvoicesController],
   // InvoiceNumberingService (gapless numbering) and InvoiceSettingsService
   // (FleetCo's supplier-PAN config) are the D3 issue-flow collaborators —

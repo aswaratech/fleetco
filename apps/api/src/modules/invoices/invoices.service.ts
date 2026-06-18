@@ -12,6 +12,10 @@ import {
 // literals ("DRAFT"), so the runtime enum object is never needed.
 import { Prisma } from "@prisma/client";
 import type { InvoiceStatus, DocumentType, InvoiceServiceType } from "@prisma/client";
+// The API reaches the Bikram Sambat calendar ONLY through @fleetco/shared (the
+// wrap-the-vendor discipline, ADR-0031) — same package InvoiceNumberingService
+// already imports bsFiscalYear from. D4 renders each built line's trip date in BS.
+import { formatNepaliDate } from "@fleetco/shared";
 
 import { computeInvoiceTax, type InvoiceTaxSnapshot } from "./invoice-tax";
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports
@@ -19,15 +23,34 @@ import { InvoiceNumberingService } from "./invoice-numbering.service";
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports
 import { InvoiceSettingsService } from "./invoice-settings.service";
 import type {
+  BuildFromJobInput,
   CreateInvoiceInput,
+  CreateInvoiceLineInput,
   InvoiceSortColumn,
   InvoiceSortDir,
   UpdateInvoiceInput,
+  UpdateInvoiceLineInput,
 } from "./invoices.schemas";
+// JobsService / TripsService are consumed through their PUBLIC service interfaces
+// (ADR-0039 c8 + the CLAUDE.md cross-module rule: never reach into another module's
+// table/repo). Value imports for NestJS DI (emitDecoratorMetadata), so the
+// consistent-type-imports lint rule is disabled the same way the numbering/settings
+// collaborators above are. InvoicesModule imports JobsModule + TripsModule (no
+// cycle — neither depends on invoices).
+// eslint-disable-next-line @typescript-eslint/consistent-type-imports
+import { JobsService } from "../jobs/jobs.service";
+// eslint-disable-next-line @typescript-eslint/consistent-type-imports
+import { TripsService } from "../trips/trips.service";
 
 // Re-export the schema-inferred input types so the controller and tests can pull
 // them from this module (the JobsService / CustomersService convention).
-export type { CreateInvoiceInput, UpdateInvoiceInput };
+export type {
+  BuildFromJobInput,
+  CreateInvoiceInput,
+  CreateInvoiceLineInput,
+  UpdateInvoiceInput,
+  UpdateInvoiceLineInput,
+};
 
 // PrismaService is injected by NestJS via TypeScript's emitDecoratorMetadata
 // (see apps/api/tsconfig.json); the class reference must remain a value import at
@@ -106,6 +129,11 @@ export class InvoicesService {
     private readonly prisma: PrismaService,
     private readonly numbering: InvoiceNumberingService,
     private readonly settings: InvoiceSettingsService,
+    // D4 cross-aggregate reads (ADR-0039 c8): the job (customer-consistency +
+    // description fallback) and the trips (their dates) are read through these
+    // PUBLIC interfaces, never their tables.
+    private readonly jobs: JobsService,
+    private readonly trips: TripsService,
   ) {}
 
   /**
@@ -499,6 +527,260 @@ export class InvoicesService {
       });
     });
   }
+
+  // -------------------------------------------------------------------------
+  // Line management (D4 / ADR-0039 c2, c8). lineAmountPaisa is ALWAYS derived
+  // here (never client-set), and every line write is gated to a DRAFT — an
+  // ISSUED/CANCELLED invoice's financial body is immutable, the same gate
+  // update()/cancel() enforce on the header, now extended to the lines.
+  // -------------------------------------------------------------------------
+
+  /** Postgres `INTEGER` ceiling — the line money/quantity columns are int4. */
+  private static readonly LINE_INT4_MAX = 2_147_483_647;
+
+  /**
+   * Derive `lineAmountPaisa = quantity * unitPricePaisa`, guarding the int4 column
+   * ceiling. The product of two int4-bounded operands can exceed BOTH int4 AND JS's
+   * safe-integer range, so a too-large product is rejected as 400 rather than
+   * silently overflowing the column (or losing precision). Integer in, integer out —
+   * never a float (CLAUDE.md money-as-integer-paisa).
+   */
+  private deriveLineAmountPaisa(quantity: number, unitPricePaisa: number): number {
+    const amount = quantity * unitPricePaisa;
+    if (!Number.isSafeInteger(amount) || amount > InvoicesService.LINE_INT4_MAX) {
+      throw new BadRequestException(
+        `Line amount (${quantity} × ${unitPricePaisa} paisa) exceeds the maximum a single line ` +
+          `can hold (${InvoicesService.LINE_INT4_MAX} paisa ≈ NPR 21.47M). Split it into multiple ` +
+          "lines or reduce the quantity / unit price.",
+      );
+    }
+    return amount;
+  }
+
+  /**
+   * Load an invoice and assert it is a DRAFT so its lines may be written. Throws
+   * NotFoundException (404) when missing, ConflictException (409) on a non-DRAFT row
+   * — an ISSUED/CANCELLED invoice's financial body is immutable and is corrected only
+   * by a credit note (ADR-0039 c5; the same gate update()/cancel() enforce on the
+   * header, here extended to the lines).
+   */
+  private async loadDraftForLineWrite(invoiceId: string) {
+    const invoice = await this.prisma.invoice.findUnique({ where: { id: invoiceId } });
+    if (!invoice) {
+      throw new NotFoundException(`Invoice ${invoiceId} not found`);
+    }
+    if (invoice.status !== "DRAFT") {
+      throw new ConflictException(
+        `Cannot modify lines on a ${invoice.status} invoice; an issued invoice's financial body ` +
+          "is immutable and is corrected only by a credit note (ADR-0039 c5).",
+      );
+    }
+    return invoice;
+  }
+
+  /**
+   * The rotated trip/job-consistency check (ADR-0039 c8 / the fuel-log
+   * `assertTripBelongsToVehicle` precedent, rotated 90°): a line's referenced JOB must
+   * belong to the invoice's CUSTOMER — billing customer A for customer B's job is a
+   * data-integrity error. Uses the REAL, existing Job->Customer relationship
+   * (`Job.customerId`), read through the JobsService PUBLIC interface (never the jobs
+   * table directly — the CLAUDE.md cross-module rule).
+   *
+   * FLAGGED, not guessed (ADR-0039 c9): the equivalent TRIP-level check ("a billed
+   * trip belongs to the customer's work") is NOT possible — a Trip has no customer or
+   * job link in the schema (the Trip->Job FK was never built; see the tech-debt
+   * entry). So trip-level customer ownership is left UNVERIFIED rather than guessing a
+   * Nepal-specific billing rule; the job-level check is the strongest consistency rule
+   * the current schema supports.
+   */
+  private async assertJobBelongsToCustomer(jobId: string, customerId: string) {
+    const job = await this.jobs.findByIdRaw(jobId);
+    if (!job) {
+      throw new BadRequestException(`Job ${jobId} does not exist.`);
+    }
+    if (job.customerId !== customerId) {
+      throw new BadRequestException(
+        `Job ${jobId} belongs to a different customer and cannot be billed on this invoice ` +
+          `(invoice customer ${customerId}).`,
+      );
+    }
+    return job;
+  }
+
+  /**
+   * Re-read the full invoice detail after a line write, asserting it is still present
+   * (guards a concurrent delete between the write and the read). The line write paths
+   * have already validated the invoice exists + is a DRAFT, so a miss here is the rare
+   * concurrent-delete race, surfaced as 404 rather than a null leak.
+   */
+  private async requireDetail(invoiceId: string): Promise<InvoiceDetail> {
+    const detail = await this.findById(invoiceId);
+    if (!detail) {
+      throw new NotFoundException(`Invoice ${invoiceId} not found`);
+    }
+    return detail;
+  }
+
+  /**
+   * Add ONE billable line to a DRAFT invoice (ADR-0039 c2). A MANUAL line omits
+   * tripId/jobId (a flat mobilization fee, an ad-hoc charge); a TRIP line sets tripId
+   * (+ optionally jobId) for provenance. `lineAmountPaisa` is derived (never
+   * client-set). A referenced job is checked against the invoice's customer; a stale
+   * tripId/jobId surfaces as 400 via mapInvoiceWriteError (P2003). Returns the updated
+   * detail so the caller re-renders the invoice + its lines in one round-trip.
+   */
+  async addLine(invoiceId: string, input: CreateInvoiceLineInput): Promise<InvoiceDetail> {
+    const invoice = await this.loadDraftForLineWrite(invoiceId);
+    if (input.jobId != null) {
+      await this.assertJobBelongsToCustomer(input.jobId, invoice.customerId);
+    }
+    const lineAmountPaisa = this.deriveLineAmountPaisa(input.quantity, input.unitPricePaisa);
+    try {
+      await this.prisma.invoiceLine.create({
+        data: {
+          invoiceId,
+          tripId: input.tripId ?? null,
+          jobId: input.jobId ?? null,
+          description: input.description,
+          quantity: input.quantity,
+          unitPricePaisa: input.unitPricePaisa,
+          lineAmountPaisa,
+        },
+      });
+    } catch (error) {
+      throw mapInvoiceWriteError(error, { tripId: input.tripId, jobId: input.jobId });
+    }
+    return this.requireDetail(invoiceId);
+  }
+
+  /**
+   * Edit a line on a DRAFT invoice. Re-derives `lineAmountPaisa` whenever quantity or
+   * unitPricePaisa changes (against the MERGED shape, so a PATCH touching only one of
+   * the pair recomputes against the stored other half). `null` clears a nullable
+   * provenance FK; an omitted key leaves it (the hasOwnProperty discipline). Throws
+   * 404 (invoice or line missing), 409 (non-DRAFT), or 400 (job-customer mismatch /
+   * stale FK / overflow).
+   */
+  async updateLine(
+    invoiceId: string,
+    lineId: string,
+    input: UpdateInvoiceLineInput,
+  ): Promise<InvoiceDetail> {
+    const invoice = await this.loadDraftForLineWrite(invoiceId);
+    const line = await this.prisma.invoiceLine.findUnique({ where: { id: lineId } });
+    if (!line || line.invoiceId !== invoiceId) {
+      throw new NotFoundException(`Invoice line ${lineId} not found on invoice ${invoiceId}`);
+    }
+
+    const has = (key: keyof UpdateInvoiceLineInput): boolean =>
+      Object.prototype.hasOwnProperty.call(input, key);
+
+    // A job being SET (to a non-null value) is re-checked against the invoice's
+    // customer; clearing it (null) or leaving it untouched needs no check.
+    if (has("jobId") && input.jobId != null) {
+      await this.assertJobBelongsToCustomer(input.jobId, invoice.customerId);
+    }
+
+    // The merged amount inputs, so a PATCH to only one of the pair re-derives against
+    // the stored other half (the merged-shape discipline the fuel/expense checks use).
+    const nextQuantity =
+      has("quantity") && input.quantity !== undefined ? input.quantity : line.quantity;
+    const nextUnitPrice =
+      has("unitPricePaisa") && input.unitPricePaisa !== undefined
+        ? input.unitPricePaisa
+        : line.unitPricePaisa;
+    const amountChanges = has("quantity") || has("unitPricePaisa");
+
+    const data: Prisma.InvoiceLineUncheckedUpdateInput = {
+      ...(has("description") && { description: input.description }),
+      ...(has("quantity") && { quantity: input.quantity }),
+      ...(has("unitPricePaisa") && { unitPricePaisa: input.unitPricePaisa }),
+      ...(has("tripId") && { tripId: input.tripId ?? null }),
+      ...(has("jobId") && { jobId: input.jobId ?? null }),
+      ...(amountChanges && {
+        lineAmountPaisa: this.deriveLineAmountPaisa(nextQuantity, nextUnitPrice),
+      }),
+    };
+
+    try {
+      await this.prisma.invoiceLine.update({ where: { id: lineId }, data });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2025") {
+        // Line vanished between the findUnique and the update (concurrent delete).
+        throw new NotFoundException(`Invoice line ${lineId} not found on invoice ${invoiceId}`);
+      }
+      throw mapInvoiceWriteError(error, { tripId: input.tripId, jobId: input.jobId });
+    }
+    return this.requireDetail(invoiceId);
+  }
+
+  /**
+   * Remove a line from a DRAFT invoice. Throws 404 (invoice or line missing) or 409
+   * (non-DRAFT). Returns void — the controller answers 204 (the aggregate-DELETE
+   * convention every prior slice uses; the web re-reads the invoice or relies on the
+   * next add/edit response to re-render).
+   */
+  async removeLine(invoiceId: string, lineId: string): Promise<void> {
+    await this.loadDraftForLineWrite(invoiceId);
+    const line = await this.prisma.invoiceLine.findUnique({ where: { id: lineId } });
+    if (!line || line.invoiceId !== invoiceId) {
+      throw new NotFoundException(`Invoice line ${lineId} not found on invoice ${invoiceId}`);
+    }
+    await this.prisma.invoiceLine.delete({ where: { id: lineId } });
+  }
+
+  /**
+   * Batch-build trip lines on a DRAFT invoice from operator-selected trips, tagged
+   * with a job for provenance (ADR-0039 c2/c8). ADDITIVE — appends to any existing
+   * lines (the operator removes unwanted ones). For each supplied trip it: reads the
+   * trip via the TripsService PUBLIC interface (missing -> 400), stamps the line
+   * description with the trip's date in Bikram Sambat (`formatNepaliDate`; the base
+   * text is the per-entry description or the job's description), and derives
+   * `lineAmountPaisa` from the operator-keyed quantity/unitPricePaisa.
+   *
+   * NOT a Job->Trip traversal: the schema has no Trip->Job link (see the
+   * BuildFromJobSchema comment + the tech-debt entry), so the OPERATOR chooses the
+   * trips. The job is verified to belong to the invoice's customer (the rotated
+   * consistency check) and stamped on each line as provenance. The lines feed D3's
+   * `issue()`, which sums `lineAmountPaisa` into the frozen `subtotalPaisa`.
+   */
+  async buildFromJob(invoiceId: string, input: BuildFromJobInput): Promise<InvoiceDetail> {
+    const invoice = await this.loadDraftForLineWrite(invoiceId);
+    // The customer-consistency check returns the loaded job, reused below for the
+    // per-line description fallback (job.description) — one read, through the
+    // JobsService public interface (ADR-0039 c8), never the jobs table.
+    const job = await this.assertJobBelongsToCustomer(input.jobId, invoice.customerId);
+
+    const data: Prisma.InvoiceLineCreateManyInput[] = [];
+    for (const entry of input.lines) {
+      const trip = await this.trips.findByIdRaw(entry.tripId);
+      if (!trip) {
+        throw new BadRequestException(`Trip ${entry.tripId} does not exist.`);
+      }
+      // The trip's billing date: prefer when the work happened (startedAt), then
+      // endedAt, then the record's createdAt (always set). Rendered Bikram Sambat
+      // (ADR-0031), e.g. "2083 Shrawan 3", appended to the base description so the
+      // line reads e.g. "Haul aggregate Kalimati -> Pokhara, 2083 Shrawan 3".
+      const tripDateIso = (trip.startedAt ?? trip.endedAt ?? trip.createdAt).toISOString();
+      const base = entry.description ?? job.description;
+      data.push({
+        invoiceId,
+        tripId: entry.tripId,
+        jobId: input.jobId,
+        description: `${base}, ${formatNepaliDate(tripDateIso, { format: "bs" })}`,
+        quantity: entry.quantity,
+        unitPricePaisa: entry.unitPricePaisa,
+        lineAmountPaisa: this.deriveLineAmountPaisa(entry.quantity, entry.unitPricePaisa),
+      });
+    }
+
+    try {
+      await this.prisma.invoiceLine.createMany({ data });
+    } catch (error) {
+      throw mapInvoiceWriteError(error, { jobId: input.jobId });
+    }
+    return this.requireDetail(invoiceId);
+  }
 }
 
 /**
@@ -509,11 +791,18 @@ export class InvoicesService {
  */
 function mapInvoiceWriteError(
   error: unknown,
-  ctx: { customerId?: string; jobId?: string | null },
+  ctx: { customerId?: string; jobId?: string | null; tripId?: string | null },
 ): unknown {
   if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2003") {
     const meta = error.meta as { field_name?: string; constraint?: string } | undefined;
     const fieldName = String(meta?.field_name ?? meta?.constraint ?? "").toLowerCase();
+    // `trip` first: the D4 InvoiceLine.tripId FK. A constraint name like
+    // `invoice_line_tripId_fkey` contains "trip" (and never "customer"/"job"), so the
+    // ordering is unambiguous. The single-line addLine path relies on this mapping
+    // for a stale tripId (build-from-job pre-checks each trip via TripsService).
+    if (fieldName.includes("trip")) {
+      return new BadRequestException(`Trip "${ctx.tripId}" does not exist.`);
+    }
     if (fieldName.includes("customer")) {
       return new BadRequestException(`Customer "${ctx.customerId}" does not exist.`);
     }

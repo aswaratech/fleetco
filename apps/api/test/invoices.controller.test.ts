@@ -13,6 +13,7 @@ import { ZodValidationPipe } from "../src/common/zod-validation.pipe";
 import { AuthGuard } from "../src/modules/auth/auth.guard";
 import { AUTH } from "../src/modules/auth/auth.tokens";
 import type { AuthenticatedRequest } from "../src/modules/auth/auth.types";
+import { DriverScopeService } from "../src/modules/auth/driver-scope.service";
 import { InvoiceNumberingService } from "../src/modules/invoices/invoice-numbering.service";
 import { InvoiceSettingsService } from "../src/modules/invoices/invoice-settings.service";
 import { InvoicesController } from "../src/modules/invoices/invoices.controller";
@@ -22,7 +23,9 @@ import {
   ListInvoicesQuerySchema,
   UpdateInvoiceSchema,
 } from "../src/modules/invoices/invoices.schemas";
+import { JobsService } from "../src/modules/jobs/jobs.service";
 import { PrismaService } from "../src/modules/prisma/prisma.service";
+import { TripsService } from "../src/modules/trips/trips.service";
 import { resetDb } from "./db";
 
 // Tests for InvoicesController, focused on the D1 read contract. Two-layer
@@ -132,6 +135,11 @@ describe("InvoicesController.list (integration, real Prisma)", () => {
         InvoicesService,
         InvoiceNumberingService,
         InvoiceSettingsService,
+        // D4: InvoicesService now reads jobs/trips through these public interfaces
+        // (TripsService needs DriverScopeService).
+        JobsService,
+        TripsService,
+        DriverScopeService,
         PrismaService,
         // AUTH is required by AuthGuard's constructor. The override below replaces
         // the guard itself, but Nest still resolves its dependencies — provide a
@@ -243,6 +251,10 @@ describe("InvoicesController.getById (integration, real Prisma)", () => {
         InvoicesService,
         InvoiceNumberingService,
         InvoiceSettingsService,
+        // D4 constructor deps (build-from-job/line reads + TripsService's scope dep).
+        JobsService,
+        TripsService,
+        DriverScopeService,
         PrismaService,
         { provide: AUTH, useValue: { api: { getSession: () => null } } },
       ],
@@ -403,6 +415,10 @@ describe("InvoicesController write path (integration, real Prisma)", () => {
         InvoicesService,
         InvoiceNumberingService,
         InvoiceSettingsService,
+        // D4 constructor deps (build-from-job/line reads + TripsService's scope dep).
+        JobsService,
+        TripsService,
+        DriverScopeService,
         PrismaService,
         { provide: AUTH, useValue: { api: { getSession: () => null } } },
       ],

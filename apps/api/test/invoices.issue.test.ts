@@ -7,12 +7,15 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest"
 import { AuthGuard } from "../src/modules/auth/auth.guard";
 import { AUTH } from "../src/modules/auth/auth.tokens";
 import type { AuthenticatedRequest } from "../src/modules/auth/auth.types";
+import { DriverScopeService } from "../src/modules/auth/driver-scope.service";
 import { InvoiceNumberingService } from "../src/modules/invoices/invoice-numbering.service";
 import { InvoiceSettingsService } from "../src/modules/invoices/invoice-settings.service";
 import { computeInvoiceTax } from "../src/modules/invoices/invoice-tax";
 import { InvoicesController } from "../src/modules/invoices/invoices.controller";
 import { InvoicesService } from "../src/modules/invoices/invoices.service";
+import { JobsService } from "../src/modules/jobs/jobs.service";
 import { PrismaService } from "../src/modules/prisma/prisma.service";
+import { TripsService } from "../src/modules/trips/trips.service";
 import { resetDb } from "./db";
 
 // The D3 issue lifecycle + credit-note seam (ADR-0039 c4–5) against real
@@ -46,6 +49,12 @@ describe("Invoice issue + credit-note (integration, real Postgres)", () => {
         InvoicesService,
         InvoiceNumberingService,
         PrismaService,
+        // D4: InvoicesService now reads jobs/trips through these public interfaces
+        // (TripsService needs DriverScopeService). The issue tests seed lines via
+        // Prisma directly, but the constructor deps must still resolve.
+        JobsService,
+        TripsService,
+        DriverScopeService,
         // The supplier-PAN config is stubbed so the issue precondition is
         // controllable (a TEST PAN by default; null in the "not configured" test).
         { provide: InvoiceSettingsService, useValue: { getSupplierPan: () => supplierPan } },

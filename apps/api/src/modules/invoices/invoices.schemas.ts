@@ -228,3 +228,116 @@ export const UpdateInvoiceSchema = CreateInvoiceSchema.partial()
   });
 
 export type UpdateInvoiceInput = z.infer<typeof UpdateInvoiceSchema>;
+
+// ---------------------------------------------------------------------------
+// Line management (D4) — add / edit / build the billable InvoiceLines.
+// ---------------------------------------------------------------------------
+//
+// ADR-0039 c2: an InvoiceLine carries the captured SELLING amount — the Trip has
+// no price (Phase-mismatch §4), so the line is the first place a billable amount is
+// recorded — plus nullable tripId/jobId PROVENANCE FKs. `lineAmountPaisa` is ALWAYS
+// derived server-side (`quantity * unitPricePaisa`); it never rides the wire, and
+// `.strict()` rejects a client-sent value (the totalCostPaisa-is-derived posture
+// the fuel-log schema took).
+//
+// THE int4 CEILING (load-bearing correctness rule). InvoiceLine.quantity /
+// unitPricePaisa / lineAmountPaisa are Postgres `INTEGER` columns (the D1 migration:
+// `INTEGER NOT NULL`) — signed 32-bit, max 2_147_483_647 (~NPR 21.47M). A field
+// above that overflows the column, and the DERIVED product can overflow both int4
+// AND JS's safe-integer range — so the individual fields are bounded here and the
+// *product* is guarded in the service (`deriveLineAmountPaisa`). This is a TIGHTER
+// bound than the header's `MONEY_MAX_PAISA` (1e10) on `discountPaisa`; that field's
+// own int4 overflow risk is a pre-existing header concern, out of scope for D4.
+const INVOICE_LINE_MAX_PAISA = 2_147_483_647;
+// Bound a single build-from-job batch so an unbounded request cannot be submitted.
+const BUILD_FROM_JOB_MAX_LINES = 500;
+
+const LineDescription = z
+  .string()
+  .trim()
+  .min(1, "description is required.")
+  .max(1000, "description is too long (max 1000 characters).");
+const LineQuantity = z
+  .number()
+  .int("quantity must be an integer.")
+  .min(1, "quantity must be at least 1.")
+  .max(INVOICE_LINE_MAX_PAISA, "quantity is too large.");
+const LineUnitPricePaisa = z
+  .number()
+  .int("unitPricePaisa must be an integer (paisa).")
+  .min(0, "unitPricePaisa must be 0 or greater.")
+  .max(INVOICE_LINE_MAX_PAISA, "unitPricePaisa is too large.");
+// tripId / jobId accept any non-empty trimmed id (not a strict cuid) — the same
+// "let the FK be the authority and map its P2003 to a 400" posture the header uses.
+const LineTripId = z.string().trim().min(1, "tripId must be a non-empty id.");
+const LineJobId = z.string().trim().min(1, "jobId must be a non-empty id.");
+
+// POST /api/v1/invoices/:id/lines — add ONE line to a DRAFT (ADR-0039 c2). A
+// MANUAL line (a flat mobilization fee, an ad-hoc charge) omits tripId/jobId; a
+// TRIP line sets tripId (+ optionally jobId) for provenance. `lineAmountPaisa` is
+// derived — absent here, and `.strict()` rejects it (and `createdById`, `status`,
+// or any typo'd key) with HTTP 400.
+export const CreateInvoiceLineSchema = z
+  .object({
+    description: LineDescription,
+    quantity: LineQuantity,
+    unitPricePaisa: LineUnitPricePaisa,
+    tripId: LineTripId.nullable().optional(),
+    jobId: LineJobId.nullable().optional(),
+  })
+  .strict();
+
+export type CreateInvoiceLineInput = z.infer<typeof CreateInvoiceLineSchema>;
+
+// PATCH /api/v1/invoices/:id/lines/:lineId — partial edit of a DRAFT's line. The
+// service re-derives `lineAmountPaisa` whenever quantity or unitPricePaisa changes
+// (against the merged shape). `null` clears a nullable provenance FK; an omitted key
+// leaves it. The at-least-one-field refine rejects a no-op PATCH (the header
+// precedent). `lineAmountPaisa` is still absent + `.strict()`-rejected.
+export const UpdateInvoiceLineSchema = CreateInvoiceLineSchema.partial()
+  .strict()
+  .refine((data) => Object.keys(data).length > 0, {
+    message: "At least one field is required.",
+  });
+
+export type UpdateInvoiceLineInput = z.infer<typeof UpdateInvoiceLineSchema>;
+
+// POST /api/v1/invoices/:id/build-from-job — batch-create trip lines from
+// operator-selected trips, tagged with a job for provenance (ADR-0039 c2/c8).
+//
+// THE D4 ARCHITECTURAL REALITY: there is NO Trip->Job link in the schema (Trip has
+// no `jobId`; JobsModule's own comment notes the link "lands when iter 19 adds
+// Trip.jobId" — iter 19 shipped Fuel logs instead, so it never did). ADR-0039's
+// "Customer -> Job -> Trip chain ... already modelled and navigable" is therefore
+// inaccurate, and ADR-0039 c2 forbids touching the central Trip aggregate in v1. So
+// this is NOT a server-side Job->Trip traversal: the OPERATOR supplies which trips
+// to bill + the per-trip amounts (the kickoff's "the request supplies the per-trip
+// amounts"); the job supplies provenance/context. The service stamps each line's
+// description with the trip's date in Bikram Sambat and verifies the job belongs to
+// the invoice's customer (the rotated fuel/expense trip-vehicle consistency check).
+// See the tech-debt entry "Trip is not linked to Job ...".
+const BuildFromJobLine = z
+  .object({
+    tripId: LineTripId,
+    quantity: LineQuantity,
+    unitPricePaisa: LineUnitPricePaisa,
+    // Optional per-trip base description; when omitted the service falls back to the
+    // job's description. Either way the service appends the trip's BS date.
+    description: LineDescription.optional(),
+  })
+  .strict();
+
+export const BuildFromJobSchema = z
+  .object({
+    jobId: LineJobId,
+    lines: z
+      .array(BuildFromJobLine)
+      .min(1, "Provide at least one trip line to build.")
+      .max(
+        BUILD_FROM_JOB_MAX_LINES,
+        `Too many lines in one build (max ${BUILD_FROM_JOB_MAX_LINES}).`,
+      ),
+  })
+  .strict();
+
+export type BuildFromJobInput = z.infer<typeof BuildFromJobSchema>;

@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
@@ -28,14 +29,20 @@ import {
   type InvoiceListItem,
 } from "./invoices.service";
 import {
+  BuildFromJobSchema,
+  CreateInvoiceLineSchema,
   CreateInvoiceSchema,
   ListInvoicesQuerySchema,
+  UpdateInvoiceLineSchema,
   UpdateInvoiceSchema,
+  type BuildFromJobInput,
   type CreateInvoiceInput,
+  type CreateInvoiceLineInput,
   type InvoiceSortColumn,
   type InvoiceSortDir,
   type ListInvoicesQuery,
   type UpdateInvoiceInput,
+  type UpdateInvoiceLineInput,
 } from "./invoices.schemas";
 
 export interface InvoicesListResponse {
@@ -201,5 +208,72 @@ export class InvoicesController {
     @Req() request: AuthenticatedRequest,
   ): Promise<InvoiceDetail> {
     return this.invoices.createCreditNote(id, request.session.user.id);
+  }
+
+  // -------------------------------------------------------------------------
+  // Line management (D4 / ADR-0039 c2, c8). Every line write is gated to a DRAFT
+  // (the service enforces 409 on a non-DRAFT — the issued-invoice immutability gate,
+  // extended from the header to the lines). `lineAmountPaisa` is always derived
+  // server-side; the `.strict()` schemas reject a client-sent amount. The service
+  // throws the right status itself, so these handlers are thin pass-throughs.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Add ONE billable line to a DRAFT invoice (ADR-0039 c2). A MANUAL line omits
+   * tripId/jobId (a flat fee / ad-hoc charge); a TRIP line sets tripId (+ optionally
+   * jobId) for provenance. The service throws 404 (invoice missing), 409 (not a
+   * DRAFT), or 400 (job-customer mismatch / stale FK / amount overflow). Returns the
+   * updated invoice detail so the web re-renders the lines + totals in one round-trip.
+   */
+  @Post(":id/lines")
+  @HttpCode(HttpStatus.CREATED)
+  async addLine(
+    @Param("id") id: string,
+    @Body(new ZodValidationPipe(CreateInvoiceLineSchema)) body: CreateInvoiceLineInput,
+  ): Promise<InvoiceDetail> {
+    return this.invoices.addLine(id, body);
+  }
+
+  /**
+   * Batch-build trip lines on a DRAFT invoice from operator-selected trips, tagged
+   * with a job for provenance (ADR-0039 c2/c8). Each line's description is stamped
+   * with the trip's date in Bikram Sambat. NOT a Job->Trip traversal — the schema has
+   * no Trip->Job link, so the request supplies the trips (see the service +
+   * tech-debt notes). The service throws 404 (invoice missing), 409 (not a DRAFT), or
+   * 400 (job-customer mismatch / stale trip / amount overflow).
+   */
+  @Post(":id/build-from-job")
+  @HttpCode(HttpStatus.CREATED)
+  async buildFromJob(
+    @Param("id") id: string,
+    @Body(new ZodValidationPipe(BuildFromJobSchema)) body: BuildFromJobInput,
+  ): Promise<InvoiceDetail> {
+    return this.invoices.buildFromJob(id, body);
+  }
+
+  /**
+   * Edit a line on a DRAFT invoice. `lineAmountPaisa` is re-derived whenever quantity
+   * or unitPricePaisa changes (against the merged shape). The service throws 404
+   * (invoice or line missing), 409 (not a DRAFT), or 400 (job-customer mismatch /
+   * stale FK / overflow). Returns the updated invoice detail.
+   */
+  @Patch(":id/lines/:lineId")
+  async updateLine(
+    @Param("id") id: string,
+    @Param("lineId") lineId: string,
+    @Body(new ZodValidationPipe(UpdateInvoiceLineSchema)) body: UpdateInvoiceLineInput,
+  ): Promise<InvoiceDetail> {
+    return this.invoices.updateLine(id, lineId, body);
+  }
+
+  /**
+   * Remove a line from a DRAFT invoice. 204 No Content (the aggregate-DELETE
+   * convention every prior slice uses). The service throws 404 (invoice or line
+   * missing) or 409 (not a DRAFT). The web re-reads the invoice afterwards.
+   */
+  @Delete(":id/lines/:lineId")
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async removeLine(@Param("id") id: string, @Param("lineId") lineId: string): Promise<void> {
+    await this.invoices.removeLine(id, lineId);
   }
 }

@@ -10,10 +10,13 @@ import {
 } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 
+import { DriverScopeService } from "../src/modules/auth/driver-scope.service";
 import { InvoiceNumberingService } from "../src/modules/invoices/invoice-numbering.service";
 import { InvoiceSettingsService } from "../src/modules/invoices/invoice-settings.service";
 import { InvoicesService } from "../src/modules/invoices/invoices.service";
+import { JobsService } from "../src/modules/jobs/jobs.service";
 import { PrismaService } from "../src/modules/prisma/prisma.service";
+import { TripsService } from "../src/modules/trips/trips.service";
 import { resetDb } from "./db";
 
 // Integration tests for InvoicesService against a real Postgres (ADR-0023). D1
@@ -37,10 +40,20 @@ describe("InvoicesService (integration, real Postgres)", () => {
   beforeAll(async () => {
     module = await Test.createTestingModule({
       // InvoicesService now depends on the numbering + settings collaborators
-      // (for issue(), exercised in invoices.issue.test.ts). These read-path /
+      // (for issue(), exercised in invoices.issue.test.ts) and, from D4, on
+      // JobsService + TripsService (build-from-job/line reads through their public
+      // interfaces); TripsService needs DriverScopeService. These read-path /
       // create-update-cancel tests never issue, so the real providers (settings
       // reads an unset env → null PAN) are fine here.
-      providers: [InvoicesService, InvoiceNumberingService, InvoiceSettingsService, PrismaService],
+      providers: [
+        InvoicesService,
+        InvoiceNumberingService,
+        InvoiceSettingsService,
+        JobsService,
+        TripsService,
+        DriverScopeService,
+        PrismaService,
+      ],
     }).compile();
     await module.init();
 
