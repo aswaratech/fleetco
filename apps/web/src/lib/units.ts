@@ -61,6 +61,59 @@ export function formatKm(km: number | null | undefined): string {
   return `${KM_FORMATTER.format(km)} km`;
 }
 
+// Engine-hours (ADR-0036). The wire stores engine-hours as integer TENTHS of an
+// hour (deci-hours) — never a float, the CLAUDE.md never-floats rule extended to
+// a physical quantity via the FuelLog.litersMl precedent. An hour-meter reads to
+// 0.1 h, so the operator enters a decimal number of hours (e.g. 1234.5) and the
+// wire stores 12345. These three helpers are the single place the web crosses
+// that boundary, the sibling of formatKm / litersToMl:
+//   - formatHours: display an integer-tenths value as a "1,234.5 h" string.
+//   - hoursToTenths: a decimal-hours form value → integer tenths for the wire.
+//   - tenthsToHoursInput: an integer-tenths wire value → decimal string for an
+//     edit form's pre-fill (no unit suffix — a <input type="number"> rejects it).
+// Round-trip note (matches formatNpr / formatLiters): display-only; engine-hours
+// stay integer tenths end-to-end in code, only stringified at render.
+const HOURS_FORMATTER = new Intl.NumberFormat("en-IN", {
+  minimumFractionDigits: 1,
+  maximumFractionDigits: 1,
+});
+
+/**
+ * Format an integer tenths-of-an-hour value as a human-readable hours string.
+ * Examples:
+ *   formatHours(0)     → "0.0 h"
+ *   formatHours(600)   → "60.0 h"
+ *   formatHours(12345) → "1,234.5 h"
+ *
+ * Null / undefined / non-finite renders as the em-dash (—), matching formatKm.
+ */
+export function formatHours(tenths: number | null | undefined): string {
+  if (tenths === null || tenths === undefined) return "—";
+  if (!Number.isFinite(tenths)) return "—";
+  // Tenths → hours inside the formatter call so the hours number is never bound
+  // to a variable — keeps the "engine-hours is integer tenths" invariant honest.
+  return `${HOURS_FORMATTER.format(tenths / 10)} h`;
+}
+
+/**
+ * Convert a decimal number of hours (e.g. 1234.5) to the integer tenths the wire
+ * stores. Math.round (half-up) mirrors litersToMl / the API's rounding so the
+ * stored integer matches what the operator typed. Example: 1234.5 → 12345.
+ */
+export function hoursToTenths(hours: number): number {
+  return Math.round(hours * 10);
+}
+
+/**
+ * Inverse of hoursToTenths for an edit form's defaultValues — turn the persisted
+ * integer tenths back into the one-decimal string the form input accepts.
+ * toFixed(1) preserves a trailing zero (12000 → "1200.0"), fine for a number
+ * input. Mirrors mlToLitersInput in fuel-logs-schema.ts.
+ */
+export function tenthsToHoursInput(tenths: number): string {
+  return (tenths / 10).toFixed(1);
+}
+
 // 2 decimal places: km/L for trucks and tippers sits in the low tens, so two
 // decimals is the precision an operator can act on without false significance.
 // The "km/L" unit lives in the table column HEADER (DESIGN.md §"Per-vehicle

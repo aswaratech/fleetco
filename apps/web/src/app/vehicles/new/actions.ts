@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 
 import { apiFetch, ApiError } from "@/lib/api";
+import { hoursToTenths } from "@/lib/units";
 import { CreateVehicleFormSchema, type CreateVehicleFormValues } from "@/lib/vehicles-schema";
 
 export interface CreateVehicleActionResult {
@@ -71,6 +72,16 @@ export async function createVehicleAction(
     }
   }
 
+  // Engine-hours (ADR-0036): convert the decimal-hours form value to integer
+  // tenths the API expects. Sent only when non-empty (an hour-metered asset may
+  // be registered before its SMR is keyed in). engineHoursCurrent is omitted
+  // like odometerCurrentKm — the API defaults current to start.
+  const engineHours: Record<string, number> = {};
+  const startHours = parsed.data.engineHoursStart;
+  if (typeof startHours === "string" && startHours.length > 0) {
+    engineHours.engineHoursStart = hoursToTenths(Number(startHours));
+  }
+
   try {
     await apiFetch<unknown>("/api/v1/vehicles", {
       method: "POST",
@@ -87,6 +98,8 @@ export async function createVehicleAction(
         // the kickoff rule and keeps the form one field shorter for
         // the common case of a vehicle joining the fleet at a known
         // odometer reading.
+        meterType: parsed.data.meterType,
+        ...engineHours,
         acquiredAt: parsed.data.acquiredAt,
         ...compliance,
       },

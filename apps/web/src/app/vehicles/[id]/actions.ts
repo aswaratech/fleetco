@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 
 import { apiFetch, ApiError } from "@/lib/api";
+import { hoursToTenths } from "@/lib/units";
 import { UpdateVehicleFormSchema, type UpdateVehicleFormValues } from "@/lib/vehicles-schema";
 
 // Server actions for the /vehicles/[id] surface — update and delete.
@@ -79,6 +80,20 @@ export async function updateVehicleAction(
   for (const key of complianceKeys) {
     if (wireBody[key] === "") {
       wireBody[key] = null;
+    }
+  }
+
+  // Engine-hours (ADR-0036): a changed hours field arrives in the diff as a
+  // decimal-hours string (e.g. "1234.5") or "" when cleared. Convert a non-empty
+  // value to the integer tenths the API stores; map "" to explicit null so the
+  // API clears the column (the OptionalHoursString accepts "", but the wire
+  // column is integer-or-null). meterType is a value (never cleared) and passes
+  // through untouched.
+  for (const key of ["engineHoursStart", "engineHoursCurrent"] as const) {
+    if (key in wireBody) {
+      const value = wireBody[key];
+      wireBody[key] =
+        typeof value === "string" && value.length > 0 ? hoursToTenths(Number(value)) : null;
     }
   }
 

@@ -20,10 +20,15 @@ import { z } from "zod";
 const VEHICLE_KINDS = ["TRUCK", "TIPPER", "EXCAVATOR", "LOADER", "GRADER", "OTHER"] as const;
 const VEHICLE_STATUSES = ["ACTIVE", "IN_MAINTENANCE", "RETIRED", "SOLD"] as const;
 const INSURANCE_TYPES = ["THIRD_PARTY", "COMPREHENSIVE"] as const;
+// Meter type (ADR-0036) — mirrors MeterType in the API's vehicles.schemas.ts.
+const METER_TYPES = ["ODOMETER_KM", "ENGINE_HOURS", "BOTH"] as const;
 
 const YEAR_MIN = 1980;
 const YEAR_MAX = new Date().getUTCFullYear() + 1;
 const ODOMETER_MAX_KM = 10_000_000;
+// Engine-hours decimal-hours ceiling: 1,000,000 h = the API's
+// ENGINE_HOURS_MAX_TENTHS (10,000,000 tenths) after the hours→tenths conversion.
+const ENGINE_HOURS_MAX_HOURS = 1_000_000;
 
 // Date inputs from <input type="date"> render as YYYY-MM-DD strings.
 // We accept that form and let the API coerce. An empty string from a
@@ -44,6 +49,22 @@ const OptionalDateString = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$|^$/, "Use the YYYY-MM-DD date format.")
   .optional();
+
+// Engine-hours (ADR-0036) entered as a DECIMAL number of hours (e.g. "1234.5"),
+// kept as a string in the form so an empty optional field round-trips as "" (no
+// 0-coercion). The action layer converts a non-empty value to integer tenths via
+// hoursToTenths (units.ts), mirroring the fuel form's litersToMl. At most one
+// decimal place — the hour-meter's native 0.1 h resolution; the API
+// authoritatively bounds the integer tenths. Empty = "not set" (null on the wire).
+const OptionalHoursString = z
+  .string()
+  .optional()
+  .refine((v) => v === undefined || v === "" || /^\d+(\.\d)?$/.test(v), {
+    message: "Enter hours as a number with at most one decimal (e.g. 1234.5).",
+  })
+  .refine((v) => v === undefined || v === "" || Number(v) <= ENGINE_HOURS_MAX_HOURS, {
+    message: `Engine hours cannot exceed ${ENGINE_HOURS_MAX_HOURS.toLocaleString("en")}.`,
+  });
 
 // Shared field shape used by both Create and Update forms. The Create
 // form requires every field (except odometerCurrentKm, which the API
@@ -84,6 +105,16 @@ export const VehicleFormSchema = z.object({
     .int("Odometer must be an integer kilometer value.")
     .min(0, "Odometer cannot be negative.")
     .max(ODOMETER_MAX_KM, `Odometer cannot exceed ${ODOMETER_MAX_KM.toLocaleString("en")} km.`),
+  // Engine-hours metering (ADR-0036). meterType drives which reading(s) the
+  // trip-stop UI prompts for and which lifetime stat the detail page shows; the
+  // two hours fields are decimal-hours strings (see OptionalHoursString), shown
+  // only when the meter includes hours. Both stay optional — an hour-metered
+  // asset may be registered before its SMR is keyed in (the columns are nullable).
+  meterType: z.enum(METER_TYPES, {
+    error: () => `Meter type must be one of: ${METER_TYPES.join(", ")}.`,
+  }),
+  engineHoursStart: OptionalHoursString,
+  engineHoursCurrent: OptionalHoursString,
   acquiredAt: DateString,
   // Compliance metadata (iter 14) — all optional. Empty values are
   // dropped from the wire body by the action layer; the API stores
@@ -100,11 +131,12 @@ export const VehicleFormSchema = z.object({
 
 export type VehicleFormValues = z.infer<typeof VehicleFormSchema>;
 
-// Create form: omit odometerCurrentKm (the API defaults it to
-// odometerStartKm when absent — see VehiclesService.create — and we
-// keep the form one field shorter for the common acquisition case).
+// Create form: omit odometerCurrentKm and engineHoursCurrent (the API defaults
+// each "current" to its "start" when absent — see VehiclesService.create — and
+// we keep the form one field shorter per meter for the common acquisition case).
 export const CreateVehicleFormSchema = VehicleFormSchema.omit({
   odometerCurrentKm: true,
+  engineHoursCurrent: true,
 });
 
 export type CreateVehicleFormValues = z.infer<typeof CreateVehicleFormSchema>;
@@ -181,3 +213,30 @@ export const INSURANCE_TYPE_OPTIONS: readonly {
 export const INSURANCE_TYPE_LABELS: Record<string, string> = Object.fromEntries(
   INSURANCE_TYPE_OPTIONS.map(({ value, label }) => [value, label]),
 );
+
+// Meter-type options + labels (ADR-0036). The create / edit form renders these
+// as a native <select>; the detail page uses the label map for friendly display.
+// Labels name the meter in the operator's terms (km vs engine-hours).
+export const METER_TYPE_OPTIONS: readonly {
+  value: (typeof METER_TYPES)[number];
+  label: string;
+}[] = [
+  { value: "ODOMETER_KM", label: "Odometer (km)" },
+  { value: "ENGINE_HOURS", label: "Engine hours" },
+  { value: "BOTH", label: "Both (km + hours)" },
+];
+
+export const METER_TYPE_LABELS: Record<string, string> = Object.fromEntries(
+  METER_TYPE_OPTIONS.map(({ value, label }) => [value, label]),
+);
+
+// Does this meter capture engine-hours? Used by the forms to show / hide the
+// hours inputs and by the detail page to show the hours stat (ADR-0036 c1).
+export function meterIncludesHours(meterType: string): boolean {
+  return meterType === "ENGINE_HOURS" || meterType === "BOTH";
+}
+
+// Does this meter capture odometer km? (ODOMETER_KM and BOTH.)
+export function meterIncludesOdometer(meterType: string): boolean {
+  return meterType === "ODOMETER_KM" || meterType === "BOTH";
+}

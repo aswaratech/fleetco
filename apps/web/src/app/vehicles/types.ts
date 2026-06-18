@@ -15,6 +15,14 @@ export interface Vehicle {
   status: "ACTIVE" | "IN_MAINTENANCE" | "RETIRED" | "SOLD";
   odometerStartKm: number;
   odometerCurrentKm: number;
+  // Engine-hours metering (ADR-0036). meterType says which meter(s) the asset
+  // has (ODOMETER_KM default for trucks/tippers, ENGINE_HOURS for the
+  // earthmoving half, BOTH for the rare dual-meter asset). The two hours
+  // columns are integer TENTHS of an hour (deci-hours) and nullable — null for
+  // a km-only asset and for an hour-metered asset whose SMR was not keyed in.
+  meterType: "ODOMETER_KM" | "ENGINE_HOURS" | "BOTH";
+  engineHoursStart: number | null;
+  engineHoursCurrent: number | null;
   acquiredAt: string;
   retiredAt: string | null;
   // Compliance metadata (iter 14). All nullable — existing rows predate

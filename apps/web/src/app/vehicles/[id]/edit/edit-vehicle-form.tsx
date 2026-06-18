@@ -16,10 +16,13 @@ import {
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { NepaliDatePicker } from "@/components/nepali-date-picker";
+import { tenthsToHoursInput } from "@/lib/units";
 import {
   VehicleFormSchema,
   type VehicleFormValues,
   INSURANCE_TYPE_OPTIONS,
+  meterIncludesHours,
+  METER_TYPE_OPTIONS,
   VEHICLE_KIND_OPTIONS,
   VEHICLE_STATUS_OPTIONS,
 } from "@/lib/vehicles-schema";
@@ -52,6 +55,12 @@ function nullableIsoToDateInput(iso: string | null): string {
   return iso ? isoToDateInput(iso) : "";
 }
 
+// Engine-hours (ADR-0036): integer tenths → decimal-hours string for pre-fill,
+// or "" when the column is null (a km-only asset, or hours not keyed in yet).
+function nullableTenthsToHoursInput(tenths: number | null): string {
+  return tenths === null ? "" : tenthsToHoursInput(tenths);
+}
+
 // Edit-vehicle form (iter 3). Mirrors the create form's input shape but
 // pre-fills every field from the server-fetched vehicle. On submit it
 // computes a diff against the initial values and only PATCHes the keys
@@ -76,6 +85,11 @@ export function EditVehicleForm({ vehicle }: EditVehicleFormProps): React.ReactE
       status: vehicle.status,
       odometerStartKm: vehicle.odometerStartKm,
       odometerCurrentKm: vehicle.odometerCurrentKm,
+      // Engine-hours metering (ADR-0036). meterType pre-fills from the row; the
+      // two hours columns pre-fill as decimal-hours strings (null → "").
+      meterType: vehicle.meterType,
+      engineHoursStart: nullableTenthsToHoursInput(vehicle.engineHoursStart),
+      engineHoursCurrent: nullableTenthsToHoursInput(vehicle.engineHoursCurrent),
       acquiredAt: isoToDateInput(vehicle.acquiredAt),
       // Compliance metadata (iter 14) — null → "" so the inputs are
       // controlled and the diff treats "unchanged null" as "".
@@ -95,6 +109,10 @@ export function EditVehicleForm({ vehicle }: EditVehicleFormProps): React.ReactE
     resolver: zodResolver(VehicleFormSchema),
     defaultValues: initialValues,
   });
+
+  // Show the engine-hours inputs only for an hour-metered classification
+  // (ADR-0036 c1). Changing the meter live re-renders this.
+  const hoursMetered = meterIncludesHours(form.watch("meterType"));
 
   async function onSubmit(values: VehicleFormValues): Promise<void> {
     setSubmitError(null);
@@ -308,6 +326,82 @@ export function EditVehicleForm({ vehicle }: EditVehicleFormProps): React.ReactE
             )}
           />
         </div>
+
+        {/* Metering (ADR-0036). The meter picker reclassifies the asset; the
+            hours start + current inputs appear only for an hour-metered
+            classification. Editing engineHoursCurrent is the documented manual
+            correction path for a wrong auto-bumped reading (ADR-0036 c5),
+            mirroring the odometer-current correction above. */}
+        <FormField
+          control={form.control}
+          name="meterType"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Meter type</FormLabel>
+              <FormControl>
+                <select
+                  className="border-input focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 h-9 w-full rounded-md border bg-transparent px-3 py-1 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:ring-[3px]"
+                  {...field}
+                >
+                  {METER_TYPE_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </FormControl>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+
+        {hoursMetered ? (
+          <div className="grid gap-4 sm:grid-cols-2">
+            <FormField
+              control={form.control}
+              name="engineHoursStart"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Engine hours at acquisition</FormLabel>
+                  <FormControl>
+                    <Input
+                      type="number"
+                      inputMode="decimal"
+                      min={0}
+                      step={0.1}
+                      placeholder="1234.5"
+                      className="tabular-nums"
+                      {...field}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="engineHoursCurrent"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Engine hours current</FormLabel>
+                  <FormControl>
+                    <Input
+                      type="number"
+                      inputMode="decimal"
+                      min={0}
+                      step={0.1}
+                      placeholder="1234.5"
+                      className="tabular-nums"
+                      {...field}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </div>
+        ) : null}
 
         {/* Compliance metadata (iter 14). Same section as the create
             form. Clearing a field (emptying the input) sends null to
