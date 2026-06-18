@@ -1,15 +1,27 @@
 import { randomUUID } from "node:crypto";
-import { BadRequestException, NotFoundException, type INestApplication } from "@nestjs/common";
+import {
+  BadRequestException,
+  ConflictException,
+  NotFoundException,
+  type INestApplication,
+} from "@nestjs/common";
 import { Test, type TestingModule } from "@nestjs/testing";
-import { CustomerStatus, DocumentType, InvoiceStatus } from "@prisma/client";
+import { CustomerStatus, DocumentType, InvoiceServiceType, InvoiceStatus } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 
 import { ZodValidationPipe } from "../src/common/zod-validation.pipe";
 import { AuthGuard } from "../src/modules/auth/auth.guard";
 import { AUTH } from "../src/modules/auth/auth.tokens";
+import type { AuthenticatedRequest } from "../src/modules/auth/auth.types";
+import { InvoiceNumberingService } from "../src/modules/invoices/invoice-numbering.service";
+import { InvoiceSettingsService } from "../src/modules/invoices/invoice-settings.service";
 import { InvoicesController } from "../src/modules/invoices/invoices.controller";
 import { InvoicesService } from "../src/modules/invoices/invoices.service";
-import { ListInvoicesQuerySchema } from "../src/modules/invoices/invoices.schemas";
+import {
+  CreateInvoiceSchema,
+  ListInvoicesQuerySchema,
+  UpdateInvoiceSchema,
+} from "../src/modules/invoices/invoices.schemas";
 import { PrismaService } from "../src/modules/prisma/prisma.service";
 import { resetDb } from "./db";
 
@@ -118,6 +130,8 @@ describe("InvoicesController.list (integration, real Prisma)", () => {
       controllers: [InvoicesController],
       providers: [
         InvoicesService,
+        InvoiceNumberingService,
+        InvoiceSettingsService,
         PrismaService,
         // AUTH is required by AuthGuard's constructor. The override below replaces
         // the guard itself, but Nest still resolves its dependencies — provide a
@@ -227,6 +241,8 @@ describe("InvoicesController.getById (integration, real Prisma)", () => {
       controllers: [InvoicesController],
       providers: [
         InvoicesService,
+        InvoiceNumberingService,
+        InvoiceSettingsService,
         PrismaService,
         { provide: AUTH, useValue: { api: { getSession: () => null } } },
       ],
@@ -290,5 +306,177 @@ describe("InvoicesController.getById (integration, real Prisma)", () => {
       expect(error).toBeInstanceOf(NotFoundException);
       expect((error as NotFoundException).message).toContain("nonexistent-invoice-id");
     }
+  });
+});
+
+// D3 write-path schema-pipe layer (pure — no Nest boot). The .strict() create /
+// update schemas are the FIRST line of the immutability defense: number, the
+// frozen tax amounts, status, and documentType are not in the shape, so a client
+// cannot set them on ANY invoice (the service then refuses any edit on a
+// non-DRAFT row — invoices.service.test.ts covers that half).
+describe("InvoicesController create/update schema (D3 write contract)", () => {
+  const createPipe = new ZodValidationPipe(CreateInvoiceSchema);
+  const updatePipe = new ZodValidationPipe(UpdateInvoiceSchema);
+
+  test("create: missing customerId → 400", () => {
+    expect(() => createPipe.transform({})).toThrow(BadRequestException);
+  });
+
+  test("create: a bogus key → 400 (.strict())", () => {
+    expect(() => createPipe.transform({ customerId: "c1", bogus: 1 })).toThrow(BadRequestException);
+  });
+
+  test("create: a client-set number is rejected (immutability — number is issue-only)", () => {
+    expect(() => createPipe.transform({ customerId: "c1", number: "INV-2082-83-00001" })).toThrow(
+      BadRequestException,
+    );
+  });
+
+  test("create: a client-set tax amount is rejected (the snapshot is frozen at issue)", () => {
+    expect(() => createPipe.transform({ customerId: "c1", grossPaisa: 1 })).toThrow(
+      BadRequestException,
+    );
+  });
+
+  test("create: a client-set status is rejected (status moves via issue/cancel only)", () => {
+    expect(() => createPipe.transform({ customerId: "c1", status: "ISSUED" })).toThrow(
+      BadRequestException,
+    );
+  });
+
+  test("create: an invalid serviceType → 400", () => {
+    expect(() => createPipe.transform({ customerId: "c1", serviceType: "AIR_FREIGHT" })).toThrow(
+      BadRequestException,
+    );
+  });
+
+  test("create: a non-integer / negative discount → 400", () => {
+    expect(() => createPipe.transform({ customerId: "c1", discountPaisa: 1.5 })).toThrow(
+      BadRequestException,
+    );
+    expect(() => createPipe.transform({ customerId: "c1", discountPaisa: -1 })).toThrow(
+      BadRequestException,
+    );
+  });
+
+  test("create: a valid header passes through", () => {
+    const result = createPipe.transform({
+      customerId: "c1",
+      jobId: "j1",
+      serviceType: "VEHICLE_HIRE",
+      discountPaisa: 5000,
+    });
+    expect(result).toEqual({
+      customerId: "c1",
+      jobId: "j1",
+      serviceType: "VEHICLE_HIRE",
+      discountPaisa: 5000,
+    });
+  });
+
+  test("update: an empty body → 400 (at least one field)", () => {
+    expect(() => updatePipe.transform({})).toThrow(BadRequestException);
+  });
+
+  test("update: a financial-but-frozen key is rejected (number / amounts / status)", () => {
+    expect(() => updatePipe.transform({ number: "X" })).toThrow(BadRequestException);
+    expect(() => updatePipe.transform({ subtotalPaisa: 1 })).toThrow(BadRequestException);
+    expect(() => updatePipe.transform({ status: "ISSUED" })).toThrow(BadRequestException);
+  });
+
+  test("update: a single DRAFT-editable field passes", () => {
+    expect(updatePipe.transform({ discountPaisa: 0 })).toEqual({ discountPaisa: 0 });
+  });
+});
+
+describe("InvoicesController write path (integration, real Prisma)", () => {
+  let module: TestingModule;
+  let app: INestApplication;
+  let prisma: PrismaService;
+  let controller: InvoicesController;
+  let adminId: string;
+
+  beforeAll(async () => {
+    module = await Test.createTestingModule({
+      controllers: [InvoicesController],
+      providers: [
+        InvoicesService,
+        InvoiceNumberingService,
+        InvoiceSettingsService,
+        PrismaService,
+        { provide: AUTH, useValue: { api: { getSession: () => null } } },
+      ],
+    })
+      .overrideGuard(AuthGuard)
+      .useValue({ canActivate: () => true })
+      .compile();
+
+    app = module.createNestApplication();
+    await app.init();
+    prisma = module.get(PrismaService);
+    controller = module.get(InvoicesController);
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  beforeEach(async () => {
+    await resetDb(prisma);
+    adminId = `user_${randomUUID()}`;
+    await prisma.user.create({
+      data: { id: adminId, email: `admin-${adminId}@fleetco.test`, name: "Test Admin" },
+    });
+  });
+
+  function requestAs(userId: string): AuthenticatedRequest {
+    return { session: { user: { id: userId } } } as unknown as AuthenticatedRequest;
+  }
+
+  async function seedCustomerRow(name: string) {
+    return prisma.customer.create({
+      data: { name, phone: "+977-9800000000", createdById: adminId },
+    });
+  }
+
+  test("create pulls createdById from the session (never the body) and returns a DRAFT", async () => {
+    const customer = await seedCustomerRow("Acme Builders");
+    const created = await controller.create(
+      { customerId: customer.id, serviceType: InvoiceServiceType.VEHICLE_HIRE },
+      requestAs(adminId),
+    );
+    expect(created.status).toBe(InvoiceStatus.DRAFT);
+    expect(created.createdById).toBe(adminId);
+    expect(created.number).toBeNull();
+  });
+
+  test("update on a missing row → NotFoundException (404)", async () => {
+    await expect(controller.update("nope", { discountPaisa: 1 })).rejects.toThrow(
+      NotFoundException,
+    );
+  });
+
+  test("update on an ISSUED row → ConflictException (409) bubbles from the service", async () => {
+    const customer = await seedCustomerRow("Acme");
+    const issued = await prisma.invoice.create({
+      data: {
+        customerId: customer.id,
+        createdById: adminId,
+        status: InvoiceStatus.ISSUED,
+        number: "INV-2082-83-00001",
+      },
+    });
+    await expect(controller.update(issued.id, { discountPaisa: 0 })).rejects.toThrow(
+      ConflictException,
+    );
+  });
+
+  test("cancel transitions a DRAFT to CANCELLED; cancel on a missing row → 404", async () => {
+    const customer = await seedCustomerRow("Acme");
+    const draft = await controller.create({ customerId: customer.id }, requestAs(adminId));
+    const cancelled = await controller.cancel(draft.id);
+    expect(cancelled.status).toBe(InvoiceStatus.CANCELLED);
+
+    await expect(controller.cancel("nope")).rejects.toThrow(NotFoundException);
   });
 });

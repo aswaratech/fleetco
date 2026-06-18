@@ -154,3 +154,68 @@ export function formatNepaliDate(
   if (format === "bs") return bs;
   return `${bs} (${en})`;
 }
+
+/** The Bikram Sambat fiscal year an ISO/UTC date falls in (see {@link bsFiscalYear}). */
+export interface BsFiscalYear {
+  /** The BS year the fiscal year STARTS in — the year of its Shrawan 1. */
+  startYear: number;
+  /** The BS year the fiscal year ENDS in (`startYear + 1`) — the year of its
+   * Ashadh end. */
+  endYear: number;
+  /** `"<startYear>-<endYear mod 100>"`, e.g. `"2082-83"` — the fiscal-year token
+   * embedded in the invoice number and used as the per-series counter key. */
+  label: string;
+}
+
+// The fiscal year begins at Shrawan, which is index 3 in BS_MONTHS
+// (Baishakh 0, Jestha 1, Ashadh 2, Shrawan 3). Months Shrawan(3)..Chaitra(11)
+// belong to the fiscal year that starts in the SAME BS calendar year;
+// Baishakh(0)..Ashadh(2) belong to the one that started the PREVIOUS Shrawan.
+const FISCAL_YEAR_START_MONTH = 3;
+
+/**
+ * The Bikram Sambat fiscal year an ISO/UTC date falls in. The Nepali fiscal
+ * year runs Shrawan 1 → Ashadh end (roughly mid-July to mid-July; see the
+ * glossary), so a date's fiscal year is NOT simply its BS calendar year: a date
+ * in Baishakh / Jestha / Ashadh belongs to the fiscal year that STARTED the
+ * previous Shrawan.
+ *
+ * Used by the invoice numbering (ADR-0039 commitment 4): the gapless invoice
+ * number is scoped to this fiscal year (e.g. `INV-2082-83-00001`), and the
+ * per-series counter is keyed by its `label`. Hosted HERE (not in apps/api) so
+ * the `nepali-date-converter` stays wrapped in ONE place (the wrap-the-vendor
+ * discipline, ADR-0031) — the API reaches the BS calendar only through
+ * `@fleetco/shared`, never the library directly.
+ *
+ * Worked boundary (verified against the converter): 2025-07-16 → BS 2082 Ashadh
+ * 32 → FY `2081-82` (the last day of that FY); 2025-07-17 → BS 2082 Shrawan 1 →
+ * FY `2082-83` (the first day of the next FY).
+ *
+ * Returns `null` when the input is absent / unparseable or falls outside the
+ * converter's BS table range (it throws past ~AD 2034 / BS 2090) — mirroring
+ * {@link formatNepaliDate}'s safe-degrade contract. The caller decides how to
+ * handle an out-of-range date (the invoice issue flow surfaces a clear error
+ * rather than fabricating a number).
+ */
+export function bsFiscalYear(iso: string | null | undefined): BsFiscalYear | null {
+  const parts = utcDayParts(iso);
+  if (parts === null) return null;
+
+  let bsYear: number;
+  let bsMonth: number;
+  try {
+    // Same UTC-calendar-day construction as toBikramSambat (the load-bearing
+    // rule documented there): build a Date from the ISO's UTC day components so
+    // the BS day is server-timezone-independent.
+    const bs = new NepaliDate(new Date(parts.y, parts.m, parts.d)).getBS();
+    bsYear = bs.year;
+    bsMonth = bs.month;
+  } catch {
+    return null; // outside the library's BS 2000–2090 table range
+  }
+
+  const startYear = bsMonth >= FISCAL_YEAR_START_MONTH ? bsYear : bsYear - 1;
+  const endYear = startYear + 1;
+  const label = `${startYear}-${String(endYear).slice(-2)}`;
+  return { startYear, endYear, label };
+}

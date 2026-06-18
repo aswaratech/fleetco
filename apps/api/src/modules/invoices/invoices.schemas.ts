@@ -1,11 +1,10 @@
 import { z } from "zod";
 
-// Zod schemas for the Invoices slice (Program D / ADR-0039). D1 ships the READ
-// path ONLY — `ListInvoicesQuerySchema`. The write path (create/issue/update/
-// cancel) is deliberately deferred: tax math is D2, the gapless fiscal-year
-// numbering + the DRAFT->ISSUED lifecycle is D3, build-from-trips is D4. So this
-// file carries no Create/Update schema yet, mirroring the Jobs iter-17 read-only
-// schema file (which added the write schemas in iter 18).
+// Zod schemas for the Invoices slice (Program D / ADR-0039). D1 shipped the READ
+// path (`ListInvoicesQuerySchema`); D3 (this slice) adds the write path —
+// `CreateInvoiceSchema` (a DRAFT header) and `UpdateInvoiceSchema` (a partial
+// DRAFT edit). Build-from-trips (the LINE assembly) is D4; the PDF/R2 is D5; the
+// web surface is D6. The mechanics mirror the Jobs iter-17 → iter-18 staging.
 //
 // Mirrors apps/api/src/modules/jobs/jobs.schemas.ts and
 // apps/api/src/modules/customers/customers.schemas.ts in shape and convention:
@@ -25,6 +24,12 @@ const INVOICE_STATUSES = ["DRAFT", "ISSUED", "CANCELLED"] as const;
 // filterable from D1 so the future web surface can show invoices vs credit notes
 // separately.
 const DOCUMENT_TYPES = ["INVOICE", "CREDIT_NOTE"] as const;
+
+// InvoiceServiceType enum — must mirror InvoiceServiceType in prisma/schema.prisma.
+// Selects the applicable TDS rate at issue (D2 calculator); nullable on a DRAFT,
+// required at issue. WHICH service maps to WHICH rate is the accountant-verified
+// detail the agent must not assume (ADR-0039 c9).
+const INVOICE_SERVICE_TYPES = ["VEHICLE_HIRE", "GOODS_TRANSPORT"] as const;
 
 // GET /api/v1/invoices query parameters (D1 — read path).
 // Filter / sort / pagination contract mirrors the Jobs and Customers list
@@ -160,3 +165,66 @@ export const ListInvoicesQuerySchema = z
   .strict();
 
 export type ListInvoicesQuery = z.infer<typeof ListInvoicesQuerySchema>;
+
+// ---------------------------------------------------------------------------
+// Write path (D3) — create / update a DRAFT invoice HEADER.
+// ---------------------------------------------------------------------------
+
+// Upper bound for a single money field, in integer paisa (CLAUDE.md money-as-
+// minor-units). Mirrors the cap the fuel/expense-log schemas use
+// (10_000_000_000 paisa = NPR 100M) — a single invoice's discount cannot
+// plausibly exceed it, and the bound keeps a fat-fingered value off the wire.
+const MONEY_MAX_PAISA = 10_000_000_000;
+
+// Reusable write-path field validators. customerId/jobId accept any non-empty
+// trimmed id (not a strict cuid) — the iter-8/15/17 precedent: let the FK be the
+// authority and map its P2003 to a clean 400, rather than duplicating cuid format
+// rules here (tightening would need an ADR per CLAUDE.md).
+const CustomerId = z.string().trim().min(1, "customerId is required.");
+const JobId = z.string().trim().min(1, "jobId must be a non-empty id.");
+const ServiceTypeEnum = z.enum(INVOICE_SERVICE_TYPES, {
+  error: () => `serviceType must be one of: ${INVOICE_SERVICE_TYPES.join(", ")}.`,
+});
+// Optional invoice-level discount in integer paisa; the discounted figure is the
+// taxable base (ADR-0039 c3). The "discount must not exceed the subtotal" rule is
+// enforced at issue by computeInvoiceTax against the actual line total — it cannot
+// be checked here (lines do not exist yet on a header-only DRAFT).
+const DiscountPaisa = z
+  .number()
+  .int("discountPaisa must be an integer (paisa).")
+  .min(0, "discountPaisa must be 0 or greater.")
+  .max(MONEY_MAX_PAISA, "discountPaisa is too large.");
+
+// POST /api/v1/invoices — create a DRAFT invoice HEADER (ADR-0039 c5). The LINES
+// are added in D4; the `number` and the frozen tax snapshot are assigned at issue
+// (D3 issue()); so none of those appear here. `documentType` is fixed to INVOICE
+// (a CREDIT_NOTE is created via the dedicated credit-note path, D3) and `status`
+// defaults to DRAFT — neither is client-settable. `createdById` comes from the
+// session, never the body. `.strict()` rejects `number`, any tax/amount field,
+// `status`, `documentType`, `createdById`, or any typo'd key with HTTP 400.
+export const CreateInvoiceSchema = z
+  .object({
+    customerId: CustomerId,
+    jobId: JobId.nullable().optional(),
+    serviceType: ServiceTypeEnum.nullable().optional(),
+    discountPaisa: DiscountPaisa.nullable().optional(),
+  })
+  .strict();
+
+export type CreateInvoiceInput = z.infer<typeof CreateInvoiceSchema>;
+
+// PATCH /api/v1/invoices/:id — partial update of a DRAFT (ADR-0039 c5). Only the
+// DRAFT-editable header fields appear; `number`, every frozen tax amount,
+// `status`, and `documentType` are deliberately ABSENT, so `.strict()` rejects
+// any attempt to set them on ANY invoice. The service additionally refuses the
+// WHOLE update on a non-DRAFT row (an ISSUED invoice's financial body is
+// immutable; corrected only by a credit note) — so between the schema and the
+// service every financial field is rejected on an issued invoice. The
+// at-least-one-field refine rejects a no-op PATCH (mirrors Customers/Jobs).
+export const UpdateInvoiceSchema = CreateInvoiceSchema.partial()
+  .strict()
+  .refine((data) => Object.keys(data).length > 0, {
+    message: "At least one field is required.",
+  });
+
+export type UpdateInvoiceInput = z.infer<typeof UpdateInvoiceSchema>;

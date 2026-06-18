@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { BadRequestException, ConflictException } from "@nestjs/common";
 import { Test, type TestingModule } from "@nestjs/testing";
 import {
   CustomerStatus,
@@ -9,6 +10,8 @@ import {
 } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 
+import { InvoiceNumberingService } from "../src/modules/invoices/invoice-numbering.service";
+import { InvoiceSettingsService } from "../src/modules/invoices/invoice-settings.service";
 import { InvoicesService } from "../src/modules/invoices/invoices.service";
 import { PrismaService } from "../src/modules/prisma/prisma.service";
 import { resetDb } from "./db";
@@ -33,7 +36,11 @@ describe("InvoicesService (integration, real Postgres)", () => {
 
   beforeAll(async () => {
     module = await Test.createTestingModule({
-      providers: [InvoicesService, PrismaService],
+      // InvoicesService now depends on the numbering + settings collaborators
+      // (for issue(), exercised in invoices.issue.test.ts). These read-path /
+      // create-update-cancel tests never issue, so the real providers (settings
+      // reads an unset env → null PAN) are fine here.
+      providers: [InvoicesService, InvoiceNumberingService, InvoiceSettingsService, PrismaService],
     }).compile();
     await module.init();
 
@@ -517,6 +524,160 @@ describe("InvoicesService (integration, real Postgres)", () => {
         code = (error as { code?: string }).code;
       }
       expect(code).toBe("P2003");
+    });
+  });
+
+  // D3 write path: create / update / cancel a DRAFT header + the immutability
+  // gate (ADR-0039 c5). issue() and the credit-note path have their own file
+  // (invoices.issue.test.ts) because they need the numbering + settings
+  // collaborators wired in.
+  describe("create() (D3 — DRAFT header)", () => {
+    test("creates a DRAFT with INVOICE documentType, no number, and null tax snapshot", async () => {
+      const customer = await seedCustomer();
+      const created = await service.create({ customerId: customer.id }, adminId);
+
+      expect(created.status).toBe(InvoiceStatus.DRAFT);
+      expect(created.documentType).toBe(DocumentType.INVOICE);
+      expect(created.number).toBeNull();
+      expect(created.subtotalPaisa).toBeNull();
+      expect(created.vatPaisa).toBeNull();
+      expect(created.grossPaisa).toBeNull();
+      expect(created.netReceivablePaisa).toBeNull();
+      expect(created.issuedAt).toBeNull();
+      expect(created.createdById).toBe(adminId);
+      expect(created.customer.id).toBe(customer.id);
+      // A freshly-created invoice has no lines (D4 adds the line path).
+      expect(created.lines).toEqual([]);
+    });
+
+    test("persists the optional job, serviceType, and discount on the draft", async () => {
+      const customer = await seedCustomer();
+      const job = await seedJob(customer.id);
+      const created = await service.create(
+        {
+          customerId: customer.id,
+          jobId: job.id,
+          serviceType: InvoiceServiceType.GOODS_TRANSPORT,
+          discountPaisa: 250_000,
+        },
+        adminId,
+      );
+
+      expect(created.jobId).toBe(job.id);
+      expect(created.serviceType).toBe(InvoiceServiceType.GOODS_TRANSPORT);
+      expect(created.discountPaisa).toBe(250_000);
+      // Still a DRAFT — serviceType/discount are inputs, not the frozen snapshot.
+      expect(created.status).toBe(InvoiceStatus.DRAFT);
+      expect(created.vatPaisa).toBeNull();
+    });
+
+    test("a stale customerId maps to BadRequestException (P2003 → 400)", async () => {
+      await expect(service.create({ customerId: "cust_does_not_exist" }, adminId)).rejects.toThrow(
+        BadRequestException,
+      );
+    });
+
+    test("a stale jobId maps to BadRequestException (P2003 → 400)", async () => {
+      const customer = await seedCustomer();
+      await expect(
+        service.create({ customerId: customer.id, jobId: "job_does_not_exist" }, adminId),
+      ).rejects.toThrow(BadRequestException);
+    });
+  });
+
+  describe("update() (D3 — DRAFT edit + immutability gate)", () => {
+    test("returns null for a missing row (controller maps to 404)", async () => {
+      const updated = await service.update("nonexistent-id", { discountPaisa: 1 });
+      expect(updated).toBeNull();
+    });
+
+    test("edits a DRAFT's serviceType and discount", async () => {
+      const customer = await seedCustomer();
+      const draft = await service.create({ customerId: customer.id }, adminId);
+
+      const updated = await service.update(draft.id, {
+        serviceType: InvoiceServiceType.VEHICLE_HIRE,
+        discountPaisa: 100_000,
+      });
+      expect(updated?.serviceType).toBe(InvoiceServiceType.VEHICLE_HIRE);
+      expect(updated?.discountPaisa).toBe(100_000);
+      expect(updated?.status).toBe(InvoiceStatus.DRAFT);
+    });
+
+    test("an explicit null clears a nullable field (jobId)", async () => {
+      const customer = await seedCustomer();
+      const job = await seedJob(customer.id);
+      const draft = await service.create({ customerId: customer.id, jobId: job.id }, adminId);
+      expect(draft.jobId).toBe(job.id);
+
+      const updated = await service.update(draft.id, { jobId: null });
+      expect(updated?.jobId).toBeNull();
+    });
+
+    test("rejects EVERY edit on an ISSUED invoice (immutable — corrected only by credit note)", async () => {
+      const customer = await seedCustomer();
+      const issued = await seedInvoice({
+        customerId: customer.id,
+        status: InvoiceStatus.ISSUED,
+        number: "INV-2082-83-00001",
+        frozen: {
+          subtotalPaisa: 1_000_000,
+          vatRateBp: 1300,
+          vatPaisa: 130_000,
+          grossPaisa: 1_130_000,
+          tdsRateBp: 150,
+          tdsPaisa: 15_000,
+          netReceivablePaisa: 1_115_000,
+          serviceType: InvoiceServiceType.VEHICLE_HIRE,
+          issuedAt: new Date("2026-06-19T00:00:00.000Z"),
+        },
+      });
+
+      await expect(service.update(issued.id, { discountPaisa: 0 })).rejects.toThrow(
+        ConflictException,
+      );
+      // The row is untouched — the immutability guard fired before any write.
+      const after = await service.findByIdRaw(issued.id);
+      expect(after?.discountPaisa).toBeNull();
+      expect(after?.grossPaisa).toBe(1_130_000);
+      expect(after?.number).toBe("INV-2082-83-00001");
+    });
+
+    test("rejects an edit on a CANCELLED invoice", async () => {
+      const customer = await seedCustomer();
+      const cancelled = await seedInvoice({
+        customerId: customer.id,
+        status: InvoiceStatus.CANCELLED,
+      });
+      await expect(service.update(cancelled.id, { discountPaisa: 0 })).rejects.toThrow(
+        ConflictException,
+      );
+    });
+  });
+
+  describe("cancel() (D3 — DRAFT-only lifecycle)", () => {
+    test("cancels a DRAFT (DRAFT → CANCELLED)", async () => {
+      const customer = await seedCustomer();
+      const draft = await service.create({ customerId: customer.id }, adminId);
+      const cancelled = await service.cancel(draft.id);
+      expect(cancelled?.status).toBe(InvoiceStatus.CANCELLED);
+    });
+
+    test("returns null for a missing row (controller maps to 404)", async () => {
+      expect(await service.cancel("nonexistent-id")).toBeNull();
+    });
+
+    test("refuses to cancel an ISSUED invoice (its number is permanent)", async () => {
+      const customer = await seedCustomer();
+      const issued = await seedInvoice({
+        customerId: customer.id,
+        status: InvoiceStatus.ISSUED,
+        number: "INV-2082-83-00002",
+      });
+      await expect(service.cancel(issued.id)).rejects.toThrow(ConflictException);
+      // Still ISSUED — not cancelled in place.
+      const after = await service.findByIdRaw(issued.id);
+      expect(after?.status).toBe(InvoiceStatus.ISSUED);
     });
   });
 });

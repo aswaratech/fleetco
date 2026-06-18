@@ -30,6 +30,11 @@ const TABLES = [
   // No FK into any other table (a scan is a background job, not a user action),
   // so it truncates independently; listed first as a standalone leaf.
   "notification_log",
+  // Program D (ADR-0039 c4): the gapless invoice-number counter. A standalone
+  // leaf — no FK into any other table (the natural key (documentType,
+  // bsFiscalYear) is its identity), so it truncates independently. Listed here
+  // so the per-test reset clears any counter rows an issue test created.
+  "invoice_number_sequence",
   "service_record",
   "service_schedule",
   "geofence",

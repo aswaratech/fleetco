@@ -84,6 +84,22 @@ const envSchema = z.object({
   // empty-string -> undefined, like CORS_ORIGIN's sibling optional vars. The
   // addresses are Tier-2 PII (ADR-0013) but, like ADMIN_EMAIL, never logged.
   NOTIFICATION_RECIPIENTS: z.preprocess(emptyStringAsUndefined, z.string().optional()),
+
+  // FleetCo's OWN supplier PAN/VAT number for invoicing (ADR-0039 commitment 9).
+  // This is the SELLER's tax identity printed on every tax invoice — DISTINCT
+  // from the buyer's Customer.panNumber. It is an OPERATOR-SUPPLIED settings
+  // value, empty until the operator fills it (exactly like RESEND_API_KEY and
+  // the future R2 creds), and is NEVER hardcoded to a fabricated PAN. The
+  // invoice issue flow (D3) treats it as a documented precondition: issuing is
+  // refused with a clear error until this is set, so a real tax invoice can
+  // never go out without FleetCo's own registration.
+  //
+  // ⚠️ PROPOSED / operator-supplied — the supplier PAN and the full IRD-required
+  // invoice field set remain operator/accountant-verify before real billing
+  // (ADR-0039 c9). Tier-3 business config per ADR-0013. Empty-string ->
+  // undefined, like SENTRY_DSN's siblings, so a blank line in .env means "not
+  // set" rather than an empty PAN.
+  INVOICE_SUPPLIER_PAN: z.preprocess(emptyStringAsUndefined, z.string().optional()),
 });
 
 export type Env = z.infer<typeof envSchema>;

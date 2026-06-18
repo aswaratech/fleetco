@@ -1763,3 +1763,42 @@ model InvoiceLine {
   @@index([jobId])
   @@map("invoice_line")
 }
+
+// Per-series gapless invoice-number counter (Program D / ADR-0039 commitment 4).
+// A DEDICATED counter row — deliberately NOT a Postgres SEQUENCE, because a
+// SEQUENCE advances even on a ROLLED-BACK transaction, so a failed issue would
+// burn a number and leave a gap; an IRD anti-tamper invoice number must be
+// gapless AND never-reused (ADR-0039 c4 / Alternatives). This row advances ONLY
+// when an issue COMMITS: the issue $transaction reads it `SELECT … FOR UPDATE`,
+// increments it, and formats the number — so two concurrent issues serialize on
+// the row (no holes, no reuse) and a discarded DRAFT consumes no number (it has
+// none until issue). The deliberate contrast with JobsService.nextJobNumber's
+// find-highest+1 (which leaves holes on delete and is keyed by the Gregorian
+// year): this HARDENS that precedent, it does not reuse it.
+//
+// Keyed by (documentType, bsFiscalYear) — the composite PRIMARY KEY: an INVOICE
+// and a CREDIT_NOTE each get an INDEPENDENT gapless series (ADR-0039 c5), and
+// the series resets per Nepali (Bikram Sambat) fiscal year (Shrawan→Ashadh),
+// derived from the issue date via the shared BS pipeline (bsFiscalYear,
+// ADR-0031). The natural key IS the identity — no surrogate id, no FKs (a
+// standalone counter, nothing references it).
+model InvoiceNumberSequence {
+  /// The document series this counter scopes: INVOICE / CREDIT_NOTE each have an
+  /// independent gapless sequence (ADR-0039 c5), so documentType is part of the key.
+  documentType DocumentType
+  /// The Bikram Sambat fiscal-year label (e.g. "2082-83"), the counter's
+  /// per-year scope and the token embedded in the formatted number.
+  bsFiscalYear String
+  /// The last sequence value handed out for this (documentType, bsFiscalYear); 0
+  /// before the first issue. Advances only on a COMMITTED issue — the gapless,
+  /// rollback-safe property a Postgres SEQUENCE cannot provide (ADR-0039 c4).
+  lastValue Int @default(0)
+  /// When this fiscal-year series row was first created (its first issue). No
+  /// updatedAt: the row is written via raw SQL inside the issue transaction
+  /// (`SELECT … FOR UPDATE` + UPDATE), where Prisma's @updatedAt would not be
+  /// managed; createdAt (a DB default) is the one timestamp worth keeping.
+  createdAt DateTime @default(now())
+
+  @@id([documentType, bsFiscalYear])
+  @@map("invoice_number_sequence")
+}
