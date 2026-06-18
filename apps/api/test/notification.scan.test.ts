@@ -186,4 +186,94 @@ describe("notification scan → send → dedup (live Redis + DB, ADR-0038 C2)", 
     expect(logged.recipient).toBe(admin.email);
     expect(logged.sentAt).not.toBeNull();
   });
+
+  // ── C3: the maintenance source folds into the SAME scan ──────────────────
+  // seedVehicle defaults odometerCurrentKm = 80000, so an ACTIVE DISTANCE_KM
+  // schedule with anchor 70000 + interval 5000 = next-due 75000 is OVERDUE.
+  async function seedOverdueDistanceSchedule(vehicleId: string): Promise<void> {
+    await prisma.serviceSchedule.create({
+      data: {
+        vehicleId,
+        createdById: adminId,
+        name: "10,000 km service",
+        intervalType: "DISTANCE_KM",
+        intervalValue: 5000,
+        status: "ACTIVE",
+        lastServiceAt: new Date("2026-01-01T00:00:00.000Z"),
+        lastServiceOdometerKm: 70000,
+        lastServiceEngineHours: null,
+      },
+    });
+  }
+
+  test("emails an overdue service schedule once, logged as SERVICE_SCHEDULE, deduped on re-scan", async () => {
+    const vehicle = await seedVehicle(prisma, adminId, { odometerCurrentKm: 80000 });
+    await seedOverdueDistanceSchedule(vehicle.id);
+
+    const first = await service.scan(NOW);
+    expect(first.itemsConsidered).toBe(1);
+    expect(first.remindersNewlyDue).toBe(1);
+    expect(first.sendJobsEnqueued).toBe(1);
+    await deliverEnqueuedSends();
+    expect(mailer.sent).toHaveLength(1);
+    expect(mailer.sent[0].text).toContain("Maintenance");
+    expect(mailer.sent[0].text).toContain("10,000 km service");
+
+    const log = await prisma.notificationLog.findFirstOrThrow();
+    expect(log.subjectType).toBe("SERVICE_SCHEDULE");
+    expect(log.reminderKind).toBe("SERVICE");
+    expect(log.state).toBe("overdue");
+    expect(log.occurrenceKey).toBe("75000");
+
+    // Re-scan the same day: still overdue, already logged → no second email.
+    const second = await service.scan(NOW);
+    expect(second.remindersNewlyDue).toBe(0);
+    await deliverEnqueuedSends();
+    expect(mailer.sent).toHaveLength(1);
+  });
+
+  test("an INACTIVE service schedule is never reminded (excluded at the fetch layer)", async () => {
+    const vehicle = await seedVehicle(prisma, adminId, { odometerCurrentKm: 80000 });
+    await prisma.serviceSchedule.create({
+      data: {
+        vehicleId: vehicle.id,
+        createdById: adminId,
+        name: "10,000 km service",
+        intervalType: "DISTANCE_KM",
+        intervalValue: 5000,
+        status: "INACTIVE",
+        lastServiceAt: new Date("2026-01-01T00:00:00.000Z"),
+        lastServiceOdometerKm: 70000,
+        lastServiceEngineHours: null,
+      },
+    });
+
+    const result = await service.scan(NOW);
+    expect(result.itemsConsidered).toBe(0);
+    await deliverEnqueuedSends();
+    expect(mailer.sent).toHaveLength(0);
+    expect(await prisma.notificationLog.count()).toBe(0);
+  });
+
+  test("batches a compliance lapse and a maintenance lapse into ONE digest, TWO log rows", async () => {
+    const vehicle = await seedVehicle(prisma, adminId, {
+      odometerCurrentKm: 80000,
+      bluebookExpiresAt: new Date(EXPIRED_ISO),
+    });
+    await seedOverdueDistanceSchedule(vehicle.id);
+
+    const result = await service.scan(NOW);
+    expect(result.itemsConsidered).toBe(2); // 1 compliance document + 1 schedule
+    expect(result.remindersNewlyDue).toBe(2);
+    expect(result.sendJobsEnqueued).toBe(1); // one recipient → one digest
+    await deliverEnqueuedSends();
+    expect(mailer.sent).toHaveLength(1);
+    expect(mailer.sent[0].text).toContain("Compliance");
+    expect(mailer.sent[0].text).toContain("Maintenance");
+
+    const types = (await prisma.notificationLog.findMany({ select: { subjectType: true } }))
+      .map((row) => row.subjectType)
+      .sort();
+    expect(types).toEqual(["SERVICE_SCHEDULE", "VEHICLE"]);
+  });
 });

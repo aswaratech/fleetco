@@ -14,12 +14,12 @@ import { PrismaService } from "../prisma/prisma.service";
 import { Mailer } from "./mailer";
 import { type MailMessage, type MailerSendResult } from "./mailer";
 import {
-  SUBJECT_TYPE_VEHICLE,
   collectVehicleComplianceReminders,
   notificationDedupKey,
   type ReminderItem,
 } from "./compliance-source";
-import { renderComplianceDigest } from "./digest";
+import { collectServiceMaintenanceReminders } from "./maintenance-source";
+import { renderReminderDigest } from "./digest";
 import {
   NOTIFICATION_QUEUE,
   REMINDER_SCAN_JOB_NAME,
@@ -139,7 +139,7 @@ export class NotificationService implements OnApplicationBootstrap {
       },
     });
 
-    const items = collectVehicleComplianceReminders(
+    const complianceItems = collectVehicleComplianceReminders(
       vehicles.map((v) => ({
         id: v.id,
         registrationNumber: v.registrationNumber,
@@ -149,6 +149,48 @@ export class NotificationService implements OnApplicationBootstrap {
       })),
       now,
     );
+
+    // The MAINTENANCE source (C3): every ACTIVE service schedule, classified by
+    // the SHARED `serviceScheduleState` against its vehicle's current meter
+    // reading (or the wall clock for a calendar schedule). INACTIVE schedules are
+    // excluded at the fetch layer (ADR-0037 c8f). lastServiceAt is converted to
+    // an ISO string so the pure source stays string-based, exactly as the
+    // compliance vehicles' expiry Dates are.
+    const schedules = await this.prisma.serviceSchedule.findMany({
+      where: { status: "ACTIVE" },
+      select: {
+        id: true,
+        name: true,
+        intervalType: true,
+        intervalValue: true,
+        lastServiceAt: true,
+        lastServiceOdometerKm: true,
+        lastServiceEngineHours: true,
+        vehicle: {
+          select: { registrationNumber: true, odometerCurrentKm: true, engineHoursCurrent: true },
+        },
+      },
+    });
+    const maintenanceItems = collectServiceMaintenanceReminders(
+      schedules.map((s) => ({
+        id: s.id,
+        name: s.name,
+        registrationNumber: s.vehicle.registrationNumber,
+        intervalType: s.intervalType,
+        intervalValue: s.intervalValue,
+        lastServiceAt: s.lastServiceAt.toISOString(),
+        lastServiceOdometerKm: s.lastServiceOdometerKm,
+        lastServiceEngineHours: s.lastServiceEngineHours,
+        odometerCurrentKm: s.vehicle.odometerCurrentKm,
+        engineHoursCurrent: s.vehicle.engineHoursCurrent,
+      })),
+      now,
+    );
+
+    // Both sources feed ONE scan → dedup → digest → send pipeline (ADR-0038 c4).
+    // The digest groups them by domain; the NotificationLog dedups them by the
+    // same tuple (distinct subjectTypes keep the keys from colliding).
+    const items = [...complianceItems, ...maintenanceItems];
     if (items.length === 0) {
       return { itemsConsidered: 0, remindersNewlyDue: 0, sendJobsEnqueued: 0 };
     }
@@ -170,7 +212,7 @@ export class NotificationService implements OnApplicationBootstrap {
       };
     }
 
-    const digest = renderComplianceDigest(newItems);
+    const digest = renderReminderDigest(newItems);
     const recipientLabel = recipients.join(", ");
     const logEntries: ReminderLogEntry[] = newItems.map((item) => ({
       subjectType: item.subjectType,
@@ -238,13 +280,29 @@ export class NotificationService implements OnApplicationBootstrap {
   /**
    * Keep only the items whose dedup key is ABSENT from the NotificationLog — the
    * newly-crossed lapses (ADR-0038 c5). One query fetches the existing keys for
-   * the candidate vehicles; the in-memory diff uses the same `notificationDedupKey`
+   * the candidate subjects; the in-memory diff uses the same `notificationDedupKey`
    * the DB's @@unique enforces.
+   *
+   * The lookup matches on the (subjectType, subjectId) PAIR via an OR per present
+   * subjectType — so VEHICLE compliance and SERVICE_SCHEDULE maintenance never
+   * cross-match (both ids are cuids), and a new subject type added later needs no
+   * change here. (C2 hardcoded subjectType=VEHICLE; C3 generalizes it now that the
+   * scan emits two subject types into the same ledger.)
    */
   private async filterNewlyDue(items: readonly ReminderItem[]): Promise<ReminderItem[]> {
-    const subjectIds = [...new Set(items.map((item) => item.subjectId))];
+    const idsByType = new Map<string, Set<string>>();
+    for (const item of items) {
+      const ids = idsByType.get(item.subjectType) ?? new Set<string>();
+      ids.add(item.subjectId);
+      idsByType.set(item.subjectType, ids);
+    }
     const existing = await this.prisma.notificationLog.findMany({
-      where: { subjectType: SUBJECT_TYPE_VEHICLE, subjectId: { in: subjectIds } },
+      where: {
+        OR: [...idsByType.entries()].map(([subjectType, ids]) => ({
+          subjectType,
+          subjectId: { in: [...ids] },
+        })),
+      },
       select: {
         subjectType: true,
         subjectId: true,
