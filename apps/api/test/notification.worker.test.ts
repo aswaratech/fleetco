@@ -129,6 +129,10 @@ describe("notification worker + scheduler (live Redis, ADR-0038 C2)", () => {
         subject: "FleetCo — 1 item needs attention",
         text: "Bluebook for BA 2 KHA 1234 expired.",
       },
+      // No lapses to record in this infra test — the scan→send compliance
+      // wiring is exercised by notification.scan.test.ts; here we only prove the
+      // worker delivers a SEND job via the injected Mailer.
+      logEntries: [],
     };
     await queue.add(REMINDER_SEND_JOB_NAME, payload);
 

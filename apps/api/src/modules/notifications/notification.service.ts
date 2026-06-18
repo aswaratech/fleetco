@@ -2,6 +2,7 @@ import { InjectQueue } from "@nestjs/bullmq";
 import { Injectable, type OnApplicationBootstrap } from "@nestjs/common";
 import { type Queue } from "bullmq";
 
+import { env } from "../../config/env";
 // PrismaService and Mailer are injected by NestJS via emitDecoratorMetadata (see
 // apps/api/tsconfig.json's experimentalDecorators+emitDecoratorMetadata pair);
 // their class references must remain VALUE imports at runtime so the DI
@@ -13,10 +14,18 @@ import { PrismaService } from "../prisma/prisma.service";
 import { Mailer } from "./mailer";
 import { type MailMessage, type MailerSendResult } from "./mailer";
 import {
+  SUBJECT_TYPE_VEHICLE,
+  collectVehicleComplianceReminders,
+  notificationDedupKey,
+  type ReminderItem,
+} from "./compliance-source";
+import { renderComplianceDigest } from "./digest";
+import {
   NOTIFICATION_QUEUE,
   REMINDER_SCAN_JOB_NAME,
   REMINDER_SCAN_CRON,
   REMINDER_SCAN_SCHEDULER_ID,
+  REMINDER_SEND_JOB_NAME,
 } from "./notification.constants";
 
 /**
@@ -33,29 +42,42 @@ export interface ReminderScanResult {
 }
 
 /**
- * The payload of a SEND job. The scan computes one of these per recipient and
- * enqueues it; the worker hands it to {@link NotificationService.send}. C2's
- * later checkpoints extend this with the NotificationLog row ids the send
- * completes with the provider result (ADR-0038 c5 — the dedup ledger written at
- * scan time, completed at send time).
+ * One lapse a SEND job records on success — the NotificationLog dedup row
+ * (ADR-0038 c5). `recipient` is the joined recipient list (the same for every
+ * per-recipient send of one digest, since dedup is per-lapse, not per-recipient).
+ */
+export interface ReminderLogEntry {
+  subjectType: string;
+  subjectId: string;
+  reminderKind: string;
+  state: string;
+  occurrenceKey: string;
+  recipient: string;
+}
+
+/**
+ * The payload of a SEND job: the digest addressed to ONE recipient, plus the
+ * lapses it covers (recorded in the NotificationLog when the send succeeds, so
+ * the next scan skips them — the dedup ledger, ADR-0038 c5).
  */
 export interface ReminderSendJobData {
   message: MailMessage;
+  logEntries: ReminderLogEntry[];
 }
 
 /**
  * NotificationService — the daily reminder SCAN scheduler + the SEND executor
- * (ADR-0038 commitments 3–4), modelled on RetentionService. It owns the boot-
- * time registration of the single keyed repeatable scan and the two units of
- * work the @Processor worker dispatches to: {@link scan} (read sources → enqueue
- * sends) and {@link send} (deliver one digest via the Mailer).
+ * (ADR-0038 commitments 3–7), modelled on RetentionService. It registers the
+ * single keyed repeatable scan at boot, runs the scan (read the compliance
+ * source → diff against the NotificationLog → enqueue one send per recipient),
+ * and executes each send (deliver one digest, then record the covered lapses).
  *
- * The compliance source, the NotificationLog dedup, the digest renderer, and the
- * per-recipient enqueue land in C2's later checkpoints (the NotificationLog
- * model + the source/digest/split). This checkpoint wires the module, the queue,
- * the scheduler, the worker, and the Mailer DI; `scan` therefore finds nothing
- * to send yet, which is the correct empty-digest behavior (ADR-0038 c4: an empty
- * digest enqueues nothing and sends nothing — no "all clear" email).
+ * The dedup is WRITE-AT-SEND-SUCCESS: a lapse's NotificationLog row is created
+ * only after its digest is delivered (`send` below), so a failed send is never
+ * recorded and the next scan retries it. BullMQ's durable jobs carry an enqueued
+ * send across a crash (no drop); the only edge is a rare double-send if the row
+ * write fails after a successful provider call, which the queue's bounded retry
+ * then repeats — acceptable for the v1 single-operator cadence (ADR-0038 c4/c5).
  */
 @Injectable()
 export class NotificationService implements OnApplicationBootstrap {
@@ -81,27 +103,157 @@ export class NotificationService implements OnApplicationBootstrap {
   }
 
   /**
-   * Run one reminder scan: read the due/overdue sources, diff them against the
-   * NotificationLog (send-once-per-lapse), build the digest, resolve recipients,
-   * and enqueue one SEND job per recipient — returning SAFE counts for the
-   * worker's span.
-   *
-   * The source/dedup/digest/enqueue body lands in C2's source+digest+split
-   * checkpoint (it also gains a `now` parameter then, so the boundary is
-   * deterministically testable); until then the scan has no wired source and
-   * correctly enqueues nothing — the empty-digest behavior (ADR-0038 c4).
+   * Run one reminder scan (ADR-0038 c4–c7): classify every vehicle's compliance
+   * expiries via the SHARED `complianceBadgeState`, diff the remind-worthy items
+   * against the NotificationLog (send-once-per-lapse), and — for the newly-due
+   * ones — render one digest and enqueue one send job per recipient. An empty
+   * result enqueues NOTHING (no "all-clear" email, §Voice). Returns SAFE counts
+   * for the worker's span. `now` is a parameter (default `new Date()`) so the
+   * worker calls it with no argument while tests pin a fixed instant.
    */
-  async scan(): Promise<ReminderScanResult> {
-    return Promise.resolve({ itemsConsidered: 0, remindersNewlyDue: 0, sendJobsEnqueued: 0 });
+  async scan(now: Date = new Date()): Promise<ReminderScanResult> {
+    const vehicles = await this.prisma.vehicle.findMany({
+      select: {
+        id: true,
+        registrationNumber: true,
+        bluebookExpiresAt: true,
+        insuranceExpiresAt: true,
+        routePermitExpiresAt: true,
+      },
+    });
+
+    const items = collectVehicleComplianceReminders(
+      vehicles.map((v) => ({
+        id: v.id,
+        registrationNumber: v.registrationNumber,
+        bluebookExpiresAt: v.bluebookExpiresAt?.toISOString() ?? null,
+        insuranceExpiresAt: v.insuranceExpiresAt?.toISOString() ?? null,
+        routePermitExpiresAt: v.routePermitExpiresAt?.toISOString() ?? null,
+      })),
+      now,
+    );
+    if (items.length === 0) {
+      return { itemsConsidered: 0, remindersNewlyDue: 0, sendJobsEnqueued: 0 };
+    }
+
+    const newItems = await this.filterNewlyDue(items);
+    if (newItems.length === 0) {
+      return { itemsConsidered: items.length, remindersNewlyDue: 0, sendJobsEnqueued: 0 };
+    }
+
+    const recipients = await this.resolveRecipients();
+    if (recipients.length === 0) {
+      // Newly-due items exist but no recipient is configured. Enqueue nothing;
+      // the items stay un-recorded so a later scan (once a recipient exists)
+      // still delivers them. (In production an ADMIN always has an email.)
+      return {
+        itemsConsidered: items.length,
+        remindersNewlyDue: newItems.length,
+        sendJobsEnqueued: 0,
+      };
+    }
+
+    const digest = renderComplianceDigest(newItems);
+    const recipientLabel = recipients.join(", ");
+    const logEntries: ReminderLogEntry[] = newItems.map((item) => ({
+      subjectType: item.subjectType,
+      subjectId: item.subjectId,
+      reminderKind: item.reminderKind,
+      state: item.state,
+      occurrenceKey: item.occurrenceKey,
+      recipient: recipientLabel,
+    }));
+
+    // The scan→send split (ADR-0038 c4): one send job per recipient, each
+    // independently retried by the queue's attempts:3 defaults. Same digest
+    // content; only the `to` differs.
+    for (const recipient of recipients) {
+      const data: ReminderSendJobData = {
+        message: {
+          to: [recipient],
+          subject: digest.subject,
+          text: digest.text,
+          html: digest.html,
+        },
+        logEntries,
+      };
+      await this.queue.add(REMINDER_SEND_JOB_NAME, data);
+    }
+
+    return {
+      itemsConsidered: items.length,
+      remindersNewlyDue: newItems.length,
+      sendJobsEnqueued: recipients.length,
+    };
   }
 
   /**
-   * Deliver one digest email to one recipient via the injected Mailer. Called by
-   * the worker for each SEND job. The Mailer REJECTS (never swallows) on a
-   * provider error so the queue's bounded retry fires and, later, the C3
-   * `reminder_delivery` SLI counts a failed attempt by the throw.
+   * Deliver one digest email, then record the lapses it covered as sent (the
+   * dedup ledger, ADR-0038 c5). The Mailer REJECTS on a provider error so the
+   * queue's bounded retry fires and the log is NOT written for a failed send;
+   * the C3 `reminder_delivery` SLI will count the attempt by the throw.
+   * `createMany` with `skipDuplicates` makes a second per-recipient send of the
+   * same digest a no-op on the rows the first send already wrote.
    */
   async send(data: ReminderSendJobData): Promise<MailerSendResult> {
-    return this.mailer.send(data.message);
+    const result = await this.mailer.send(data.message);
+
+    if (data.logEntries.length > 0) {
+      const sentAt = new Date();
+      await this.prisma.notificationLog.createMany({
+        data: data.logEntries.map((entry) => ({
+          subjectType: entry.subjectType,
+          subjectId: entry.subjectId,
+          reminderKind: entry.reminderKind,
+          state: entry.state,
+          occurrenceKey: entry.occurrenceKey,
+          recipient: entry.recipient,
+          sentAt,
+          providerMessageId: result.id ?? null,
+        })),
+        skipDuplicates: true,
+      });
+    }
+
+    return result;
+  }
+
+  /**
+   * Keep only the items whose dedup key is ABSENT from the NotificationLog — the
+   * newly-crossed lapses (ADR-0038 c5). One query fetches the existing keys for
+   * the candidate vehicles; the in-memory diff uses the same `notificationDedupKey`
+   * the DB's @@unique enforces.
+   */
+  private async filterNewlyDue(items: readonly ReminderItem[]): Promise<ReminderItem[]> {
+    const subjectIds = [...new Set(items.map((item) => item.subjectId))];
+    const existing = await this.prisma.notificationLog.findMany({
+      where: { subjectType: SUBJECT_TYPE_VEHICLE, subjectId: { in: subjectIds } },
+      select: {
+        subjectType: true,
+        subjectId: true,
+        reminderKind: true,
+        state: true,
+        occurrenceKey: true,
+      },
+    });
+    const seen = new Set(existing.map(notificationDedupKey));
+    return items.filter((item) => !seen.has(notificationDedupKey(item)));
+  }
+
+  /**
+   * The v1 recipients (ADR-0038 c7): every ADMIN user's email plus the optional
+   * comma-separated `NOTIFICATION_RECIPIENTS` env override, de-duplicated. The
+   * env list is the escape hatch for a shared inbox or a non-user address.
+   */
+  private async resolveRecipients(): Promise<string[]> {
+    const admins = await this.prisma.user.findMany({
+      where: { role: "ADMIN" },
+      select: { email: true },
+    });
+    const envList = (env.NOTIFICATION_RECIPIENTS ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0);
+    return [...new Set([...admins.map((admin) => admin.email), ...envList])];
   }
 }
