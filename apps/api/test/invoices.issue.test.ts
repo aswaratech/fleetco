@@ -316,6 +316,62 @@ describe("Invoice issue + credit-note (integration, real Postgres)", () => {
     });
   });
 
+  describe("end-to-end write path (create → addLine → set serviceType → issue)", () => {
+    // Every other issue test seeds the draft + its lines directly via Prisma; this
+    // one walks the REAL manual operator write path end to end — create() the DRAFT
+    // header, add lines through addLine() (which derives lineAmountPaisa
+    // server-side), set the serviceType via update(), then issue() against the
+    // configured supplier PAN + the (mock) R2 store — and asserts the ISSUED row
+    // carries the gapless number, the frozen snapshot built FROM the derived line
+    // amounts, AND the pdfR2Key. It is the only test that proves the whole manual
+    // write path composes through the service's own methods (ADR-0039 c2/c4/c5/c7).
+    test("a manually-built draft issues with the gapless number, frozen snapshot, and stored PDF key", async () => {
+      const customerId = await seedCustomer();
+
+      // 1. create() the DRAFT header — no number, no serviceType, no frozen totals.
+      const draft = await service.create({ customerId }, adminId);
+      expect(draft.status).toBe(InvoiceStatus.DRAFT);
+      expect(draft.documentType).toBe(DocumentType.INVOICE);
+      expect(draft.number).toBeNull();
+      expect(draft.lines).toHaveLength(0);
+
+      // 2. addLine() twice — the amounts are the D2 worked example so the frozen
+      //    snapshot below is the known one, now arrived-at through the real write path.
+      await service.addLine(draft.id, {
+        description: "Haul aggregate Kalimati to Pokhara",
+        quantity: 1,
+        unitPricePaisa: 1_000_000,
+      });
+      await service.addLine(draft.id, {
+        description: "Mobilization fee",
+        quantity: 1,
+        unitPricePaisa: 235_050,
+      });
+
+      // 3. set the serviceType via update() (it selects the TDS rate at issue).
+      const ready = await service.update(draft.id, {
+        serviceType: InvoiceServiceType.VEHICLE_HIRE,
+      });
+      expect(ready?.serviceType).toBe(InvoiceServiceType.VEHICLE_HIRE);
+
+      // 4. issue() — PAN + (mock) R2 are configured by the harness.
+      const issued = await service.issue(draft.id, FY_2082_83);
+
+      expect(issued.status).toBe(InvoiceStatus.ISSUED);
+      expect(issued.number).toBe("INV-2082-83-00001");
+      expect(issued.issuedAt).not.toBeNull();
+      // The frozen snapshot — built from the addLine-derived line amounts.
+      expect(issued.subtotalPaisa).toBe(1_235_050);
+      expect(issued.vatRateBp).toBe(1300);
+      expect(issued.vatPaisa).toBe(160_557);
+      expect(issued.grossPaisa).toBe(1_395_607);
+      expect(issued.tdsRateBp).toBe(150);
+      expect(issued.netReceivablePaisa).toBe(1_377_081);
+      // The PDF was rendered + stored at issue; the key is recorded on the row.
+      expect(issued.pdfR2Key).toBe(`invoices/${issued.id}.pdf`);
+    });
+  });
+
   describe("createCreditNote() — the correction seam + independent series", () => {
     test("creates a CREDIT_NOTE draft referencing the original and copying its lines", async () => {
       const origId = await seedDraftWithLines({

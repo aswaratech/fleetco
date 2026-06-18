@@ -126,6 +126,25 @@ describe("computeInvoiceTaxPreview", () => {
       computeInvoiceTaxPreview({ lineAmountsPaisa: [-100], serviceType: "VEHICLE_HIRE" }),
     ).toBeNull();
   });
+
+  test("a negative or non-integer discount previews as null", () => {
+    // The discount-validity branch (distinct from discount > subtotal above): a
+    // negative or fractional discount is not yet valid, so the preview is withheld.
+    expect(
+      computeInvoiceTaxPreview({
+        lineAmountsPaisa: [100_000],
+        discountPaisa: -1,
+        serviceType: "VEHICLE_HIRE",
+      }),
+    ).toBeNull();
+    expect(
+      computeInvoiceTaxPreview({
+        lineAmountsPaisa: [100_000],
+        discountPaisa: 10.5,
+        serviceType: "VEHICLE_HIRE",
+      }),
+    ).toBeNull();
+  });
 });
 
 describe("formatRateBpPercent", () => {
@@ -137,5 +156,9 @@ describe("formatRateBpPercent", () => {
   test("null / undefined renders the em-dash", () => {
     expect(formatRateBpPercent(null)).toBe("—");
     expect(formatRateBpPercent(undefined)).toBe("—");
+  });
+  test("a non-finite rate (NaN / Infinity) renders the em-dash", () => {
+    expect(formatRateBpPercent(Number.NaN)).toBe("—");
+    expect(formatRateBpPercent(Number.POSITIVE_INFINITY)).toBe("—");
   });
 });

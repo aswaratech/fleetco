@@ -22,6 +22,11 @@ import { resetDb } from "./db";
 //   2026-08-01 → BS 2083 Shrawan → FY 2083-84
 const FY_2082_83 = new Date("2025-08-01T00:00:00.000Z");
 const FY_2083_84 = new Date("2026-08-01T00:00:00.000Z");
+// The EXACT adjacent-day fiscal-year boundary (the same pair invoice-fiscal-year.ts
+// pins for the pure derivation): 2025-07-16 → BS 2082 Ashadh 32, the LAST day of FY
+// 2081-82; 2025-07-17 → BS 2082 Shrawan 1, the FIRST day of FY 2082-83.
+const ASHADH_END_FY_2081_82 = new Date("2025-07-16T00:00:00.000Z");
+const SHRAWAN_1_FY_2082_83 = new Date("2025-07-17T00:00:00.000Z");
 
 describe("formatInvoiceNumber (pure)", () => {
   test("INVOICE → INV prefix, 5-digit zero-padded sequence", () => {
@@ -133,6 +138,20 @@ describe("InvoiceNumberingService (integration, real Postgres)", () => {
     expect(await issueOne("INVOICE", FY_2083_84)).toBe("INV-2083-84-00001");
     // …and the prior fiscal year resumes where it left off.
     expect(await issueOne("INVOICE", FY_2082_83)).toBe("INV-2082-83-00003");
+  });
+
+  test("the series rolls to a fresh …-00001 across the EXACT Shrawan-1 boundary", async () => {
+    // Two issues ONE calendar day apart but in DIFFERENT fiscal years: the last day
+    // of FY 2081-82 (Ashadh 32) and the first day of FY 2082-83 (Shrawan 1). The
+    // counter keys off the BS FISCAL year, not the calendar day, so the second starts
+    // a fresh series — the boundary the year-apart test above does not pin (it uses
+    // dates a full year apart). This is the gapless-numbering compliance property at
+    // the one instant it is most fragile.
+    expect(await issueOne("INVOICE", ASHADH_END_FY_2081_82)).toBe("INV-2081-82-00001");
+    expect(await issueOne("INVOICE", SHRAWAN_1_FY_2082_83)).toBe("INV-2082-83-00001");
+    // The just-closed fiscal year resumes its own series independently — a
+    // late-arriving Ashadh-dated issue does NOT collide with the new year's 00001.
+    expect(await issueOne("INVOICE", ASHADH_END_FY_2081_82)).toBe("INV-2081-82-00002");
   });
 
   test("INVOICE and CREDIT_NOTE keep independent series for the same fiscal year", async () => {
