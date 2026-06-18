@@ -1,0 +1,19 @@
+{
+  // Build config for the COMMONJS `dist/` that the `require` export condition
+  // serves (package.json). Tools that transpile TS themselves (vitest+SWC,
+  // Next via transpilePackages, tsc typecheck) consume `src/` directly and
+  // never need this output; it exists ONLY so the production NestJS API —
+  // built by `nest build` (plain tsc) and run as `node dist/main.js`, a
+  // CommonJS process — can `require("@fleetco/shared")` at runtime (Node cannot
+  // load the ESM-syntax `.ts` source directly). Emits plain JS, no declarations
+  // (types come from `src/index.ts` via the `types` export condition) and no
+  // sourcemaps.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "noEmit": false,
+    "declaration": false,
+    "sourceMap": false
+  }
+}
