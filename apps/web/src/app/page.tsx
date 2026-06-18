@@ -11,6 +11,7 @@ import { FleetCountsCard } from "./_dashboard/fleet-counts-card";
 import { QuickLinks } from "./_dashboard/quick-links";
 import { RecentExpensesCard } from "./_dashboard/recent-expenses-card";
 import { RecentFuelCard } from "./_dashboard/recent-fuel-card";
+import { ServicesDueCard } from "./_dashboard/services-due-card";
 import { ThisMonthCostCard } from "./_dashboard/this-month-cost-card";
 import { SignOutButton } from "./sign-out-button";
 
@@ -73,6 +74,7 @@ export default async function HomePage(): Promise<React.ReactElement> {
 
         <section aria-label="Fleet overview" className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           <ComplianceCard compliance={data.compliance} />
+          <ServicesDueCard services={data.services} />
           <ActiveTripsCard activeTrips={data.activeTrips} />
           <ThisMonthCostCard cost={data.thisMonthCost} />
           <RecentFuelCard items={data.recentFuel} />
