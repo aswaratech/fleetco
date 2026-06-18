@@ -40,6 +40,14 @@ export type Capability =
   // boundaries are operational *configuration* at the users:manage tier.
   | "geofences:read"
   | "geofences:write"
+  // Notification/reminder-delivery audit history (ADR-0038 C4). READ-ONLY (the
+  // NotificationLog is an append-only ledger; there is no :write). ADMIN-only:
+  // "who we emailed about which lapse, and when" is operational AUDIT data at
+  // the observability / users:manage tier, NOT operational data entry the office
+  // staff touch — so it sits in the ADMIN set below, NOT the shared operational
+  // floor (the same calculus as observability:read). A single read token, not a
+  // read/write split, because the surface is read-only by construction.
+  | "notifications:read"
   | "gps:ingest"
   | "gps:read-derived"
   | "gps:read-raw"
@@ -99,6 +107,11 @@ export const ROLE_CAPABILITY_MAP: Record<UserRole, ReadonlySet<Capability>> = {
     // an OFFICE_STAFF session reads fences (the floor's geofences:read) but does
     // not redraw them.
     "geofences:write",
+    // Reading the reminder-delivery audit history (ADR-0038 C4). ADMIN-only:
+    // it is operational audit data (the NotificationLog ledger), above the
+    // operational floor — an OFFICE_STAFF session does the data entry but does
+    // not inspect what the compliance/maintenance reminder channel sent and when.
+    "notifications:read",
     "users:manage",
     "roles:assign",
   ]),
