@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { ConflictException } from "@nestjs/common";
 import { Test, type TestingModule } from "@nestjs/testing";
-import { VehicleKind, VehicleStatus } from "@prisma/client";
+import { MeterType, VehicleKind, VehicleStatus } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 
 import { PrismaService } from "../src/modules/prisma/prisma.service";
@@ -41,6 +41,12 @@ function makeCreateInput(overrides: Partial<CreateVehicleInput> = {}): CreateVeh
     status: overrides.status,
     odometerStartKm: overrides.odometerStartKm,
     odometerCurrentKm: overrides.odometerCurrentKm,
+    // Engine-hours metering (ADR-0036) — pass-through from overrides;
+    // undefined when not set so the service applies its defaults
+    // (meterType → ODOMETER_KM, engineHoursCurrent → engineHoursStart).
+    meterType: overrides.meterType,
+    engineHoursStart: overrides.engineHoursStart,
+    engineHoursCurrent: overrides.engineHoursCurrent,
     acquiredAt: overrides.acquiredAt ?? new Date("2024-01-15"),
     // Compliance metadata (iter 14) — pass-through from overrides;
     // undefined when not set (the service maps that to null on create).
@@ -548,6 +554,108 @@ describe("VehiclesService (integration, real Postgres)", () => {
 
       const updated = await service.update(created.id, { bluebookExpiresAt: null });
       expect(updated?.bluebookExpiresAt).toBeNull();
+    });
+  });
+
+  describe("engine-hours metering (ADR-0036)", () => {
+    // Engine-hours are stored as integer TENTHS OF AN HOUR (deci-hours).
+    // meterType defaults to ODOMETER_KM (backward-compat); the two hours
+    // columns are nullable and engineHoursCurrent defaults to engineHoursStart
+    // ("current at acquisition equals start"), the hours rotation of the
+    // odometer default-to-start rule encoded in the service.
+
+    test("create() defaults meterType to ODOMETER_KM and leaves hours null when omitted", async () => {
+      // The backward-compatible default: an existing km-only create call is
+      // unchanged — every truck/tipper is ODOMETER_KM with no hour-meter.
+      const created = await service.create(makeCreateInput(), adminId);
+      expect(created.meterType).toBe(MeterType.ODOMETER_KM);
+      expect(created.engineHoursStart).toBeNull();
+      expect(created.engineHoursCurrent).toBeNull();
+    });
+
+    test("create() persists an ENGINE_HOURS asset with integer tenths-of-an-hour readings", async () => {
+      // An excavator with a 1234.5 h hour-meter is keyed as 12345 tenths.
+      // The value persists as an exact integer — never a float (the
+      // FuelLog.litersMl integer-minor-units precedent extended to hours).
+      const created = await service.create(
+        makeCreateInput({
+          kind: VehicleKind.EXCAVATOR,
+          meterType: MeterType.ENGINE_HOURS,
+          engineHoursStart: 12345,
+          engineHoursCurrent: 12345,
+        }),
+        adminId,
+      );
+      expect(created.meterType).toBe(MeterType.ENGINE_HOURS);
+      expect(created.engineHoursStart).toBe(12345);
+      expect(created.engineHoursCurrent).toBe(12345);
+      expect(Number.isInteger(created.engineHoursCurrent)).toBe(true);
+    });
+
+    test("create() defaults engineHoursCurrent to engineHoursStart when only start is provided", async () => {
+      // The hours rotation of the odometer "current at acquisition equals
+      // start" rule, encoded in the service (not the schema). A regression
+      // would flip current to null silently.
+      const created = await service.create(
+        makeCreateInput({ meterType: MeterType.ENGINE_HOURS, engineHoursStart: 5000 }),
+        adminId,
+      );
+      expect(created.engineHoursStart).toBe(5000);
+      expect(created.engineHoursCurrent).toBe(5000);
+    });
+
+    test("explicit engineHoursCurrent wins over the default-to-start rule", async () => {
+      const created = await service.create(
+        makeCreateInput({
+          meterType: MeterType.BOTH,
+          engineHoursStart: 5000,
+          engineHoursCurrent: 7200,
+        }),
+        adminId,
+      );
+      expect(created.engineHoursStart).toBe(5000);
+      expect(created.engineHoursCurrent).toBe(7200);
+    });
+
+    test("create() leaves hours null for an ENGINE_HOURS asset registered before its SMR is keyed in", async () => {
+      // "tracks hours" and "has an hours reading yet" are different facts
+      // (ADR-0036 c1): a brand-new excavator is ENGINE_HOURS with null
+      // readings until the operator keys the hour-meter in.
+      const created = await service.create(
+        makeCreateInput({ kind: VehicleKind.LOADER, meterType: MeterType.ENGINE_HOURS }),
+        adminId,
+      );
+      expect(created.meterType).toBe(MeterType.ENGINE_HOURS);
+      expect(created.engineHoursStart).toBeNull();
+      expect(created.engineHoursCurrent).toBeNull();
+    });
+
+    test("update() reclassifies meterType and sets engine-hours readings", async () => {
+      const created = await service.create(makeCreateInput(), adminId);
+      expect(created.meterType).toBe(MeterType.ODOMETER_KM);
+
+      const updated = await service.update(created.id, {
+        meterType: MeterType.BOTH,
+        engineHoursStart: 100,
+        engineHoursCurrent: 250,
+      });
+      expect(updated?.meterType).toBe(MeterType.BOTH);
+      expect(updated?.engineHoursStart).toBe(100);
+      expect(updated?.engineHoursCurrent).toBe(250);
+    });
+
+    test("update() clears engineHoursCurrent when the client passes null", async () => {
+      const created = await service.create(
+        makeCreateInput({ meterType: MeterType.ENGINE_HOURS, engineHoursStart: 4000 }),
+        adminId,
+      );
+      expect(created.engineHoursCurrent).toBe(4000);
+
+      const cleared = await service.update(created.id, { engineHoursCurrent: null });
+      expect(cleared?.engineHoursCurrent).toBeNull();
+      // The start reading and meterType are untouched by the targeted PATCH.
+      expect(cleared?.engineHoursStart).toBe(4000);
+      expect(cleared?.meterType).toBe(MeterType.ENGINE_HOURS);
     });
   });
 });

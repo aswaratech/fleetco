@@ -4,6 +4,7 @@ import {
   type Trip,
   type Vehicle,
   type Driver,
+  MeterType,
   TripStatus,
   type UserRole,
   VehicleKind,
@@ -67,6 +68,12 @@ export async function seedVehicle(
       year: overrides.year ?? 2018,
       odometerStartKm: overrides.odometerStartKm ?? 0,
       odometerCurrentKm: overrides.odometerCurrentKm ?? 80000,
+      // Engine-hours metering (ADR-0036). Default ODOMETER_KM + null hours
+      // so the existing trip/odometer tests seed km-only vehicles unchanged;
+      // the engine-hours tests override meterType + engineHoursCurrent.
+      meterType: overrides.meterType ?? MeterType.ODOMETER_KM,
+      engineHoursStart: overrides.engineHoursStart ?? null,
+      engineHoursCurrent: overrides.engineHoursCurrent ?? null,
       acquiredAt: overrides.acquiredAt ?? new Date("2018-06-01"),
       retiredAt: overrides.retiredAt ?? null,
       status: overrides.status ?? VehicleStatus.ACTIVE,
@@ -131,6 +138,10 @@ export interface SeedTripParams {
   endedAt?: Date | null;
   startOdometerKm?: number | null;
   endOdometerKm?: number | null;
+  // Engine-hours readings (ADR-0036), integer tenths-of-an-hour. Captured
+  // only for hour-metered vehicles; null for km-only trips (the default).
+  startEngineHours?: number | null;
+  endEngineHours?: number | null;
   notes?: string | null;
 }
 
@@ -145,6 +156,8 @@ export async function seedTrip(prisma: PrismaClient, params: SeedTripParams): Pr
       endedAt: params.endedAt ?? null,
       startOdometerKm: params.startOdometerKm ?? null,
       endOdometerKm: params.endOdometerKm ?? null,
+      startEngineHours: params.startEngineHours ?? null,
+      endEngineHours: params.endEngineHours ?? null,
       notes: params.notes ?? null,
     },
   });

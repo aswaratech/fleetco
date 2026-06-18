@@ -5,7 +5,14 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { Test, type TestingModule } from "@nestjs/testing";
-import { TripStatus, UserRole, type Vehicle, type Driver } from "@prisma/client";
+import {
+  MeterType,
+  TripStatus,
+  UserRole,
+  VehicleKind,
+  type Vehicle,
+  type Driver,
+} from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 
 import { DriverScopeService, type Actor } from "../src/modules/auth/driver-scope.service";
@@ -1190,6 +1197,238 @@ describe("TripsService (integration, real Postgres)", () => {
     });
   });
 
+  describe("update() — engine-hours auto-update on COMPLETED (ADR-0036)", () => {
+    // The hours rotation of the odometer auto-update above: on a transition
+    // INTO COMPLETED, the SAME $transaction advances the vehicle's
+    // engineHoursCurrent to the trip's endEngineHours — but ONLY when the
+    // vehicle is hour-metered (meterType ENGINE_HOURS / BOTH) AND the reading
+    // moves forward (the monotonic ">", a null current seeding the first
+    // reading). The km path is unchanged; an ODOMETER_KM vehicle never has
+    // its hours touched.
+    //
+    // The B1 cross-field rule still requires odometer readings on a COMPLETED
+    // transition (the meter-aware "hours instead of km for an ENGINE_HOURS
+    // asset" relaxation is B2), so every trip below also carries odometer
+    // values to satisfy validation, and asserts on the hours dimension.
+
+    test("BOTH vehicle: IN_PROGRESS → COMPLETED bumps odometer AND engineHoursCurrent in one transaction", async () => {
+      const both = await seedVehicle(prisma, adminId, {
+        meterType: MeterType.BOTH,
+        odometerCurrentKm: 80000,
+        engineHoursCurrent: 10000, // 1000.0 h
+      });
+      const created = await seedTrip(prisma, {
+        vehicleId: both.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.IN_PROGRESS,
+        startedAt: new Date("2026-01-10T08:00:00Z"),
+        startOdometerKm: 80000,
+        startEngineHours: 10000,
+      });
+
+      const result = await service.update(
+        created.id,
+        {
+          status: TripStatus.COMPLETED,
+          endedAt: "2026-01-10T17:00:00Z",
+          endOdometerKm: 80250,
+          endEngineHours: 10080, // 1008.0 h — +8.0 h of run time
+        },
+        STAFF_ACTOR,
+      );
+
+      // The returned eager Vehicle reflects BOTH bumped meters.
+      expect(result.vehicle.odometerCurrentKm).toBe(80250);
+      expect(result.vehicle.engineHoursCurrent).toBe(10080);
+
+      const persisted = await prisma.vehicle.findUniqueOrThrow({ where: { id: both.id } });
+      expect(persisted.odometerCurrentKm).toBe(80250);
+      expect(persisted.engineHoursCurrent).toBe(10080);
+    });
+
+    test("ENGINE_HOURS vehicle: endEngineHours advances engineHoursCurrent on COMPLETED", async () => {
+      const excavator = await seedVehicle(prisma, adminId, {
+        kind: VehicleKind.EXCAVATOR,
+        meterType: MeterType.ENGINE_HOURS,
+        odometerCurrentKm: 5000,
+        engineHoursCurrent: 25000, // 2500.0 h
+      });
+      const created = await seedTrip(prisma, {
+        vehicleId: excavator.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.IN_PROGRESS,
+        startedAt: new Date("2026-02-01T07:00:00Z"),
+        startOdometerKm: 5000,
+        startEngineHours: 25000,
+      });
+
+      const result = await service.update(
+        created.id,
+        {
+          status: TripStatus.COMPLETED,
+          endedAt: "2026-02-01T16:30:00Z",
+          endOdometerKm: 5001,
+          endEngineHours: 25095, // +9.5 h
+        },
+        STAFF_ACTOR,
+      );
+      expect(result.vehicle.engineHoursCurrent).toBe(25095);
+
+      const persisted = await prisma.vehicle.findUniqueOrThrow({ where: { id: excavator.id } });
+      expect(persisted.engineHoursCurrent).toBe(25095);
+    });
+
+    test("ODOMETER_KM vehicle: endEngineHours on the trip does NOT touch engineHoursCurrent (meterType gate)", async () => {
+      // Defensive: even if a trip somehow carries endEngineHours, a km-only
+      // vehicle's hours column must stay null — the meterType gate blocks the
+      // hours bump. The odometer still bumps as usual.
+      const truck = await seedVehicle(prisma, adminId, {
+        meterType: MeterType.ODOMETER_KM,
+        odometerCurrentKm: 80000,
+        // engineHoursCurrent defaults to null
+      });
+      const created = await seedTrip(prisma, {
+        vehicleId: truck.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.IN_PROGRESS,
+        startedAt: new Date("2026-01-10T08:00:00Z"),
+        startOdometerKm: 80000,
+        startEngineHours: 1000,
+      });
+
+      const result = await service.update(
+        created.id,
+        {
+          status: TripStatus.COMPLETED,
+          endedAt: "2026-01-10T17:00:00Z",
+          endOdometerKm: 80250,
+          endEngineHours: 1080,
+        },
+        STAFF_ACTOR,
+      );
+      expect(result.vehicle.odometerCurrentKm).toBe(80250);
+      expect(result.vehicle.engineHoursCurrent).toBeNull();
+
+      const persisted = await prisma.vehicle.findUniqueOrThrow({ where: { id: truck.id } });
+      expect(persisted.odometerCurrentKm).toBe(80250);
+      expect(persisted.engineHoursCurrent).toBeNull();
+    });
+
+    test("hours monotonic: endEngineHours <= engineHoursCurrent leaves the hours unchanged (even when the odometer moves forward)", async () => {
+      const both = await seedVehicle(prisma, adminId, {
+        meterType: MeterType.BOTH,
+        odometerCurrentKm: 80000,
+        engineHoursCurrent: 10000,
+      });
+      const created = await seedTrip(prisma, {
+        vehicleId: both.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.IN_PROGRESS,
+        startedAt: new Date("2026-01-10T08:00:00Z"),
+        startOdometerKm: 80000,
+        startEngineHours: 9000,
+      });
+
+      // Odometer moves forward (80250 > 80000) but the end hours (9800) are
+      // BELOW the vehicle's current (10000) — a backdated/short hours reading.
+      // The "once forward" rule moves the odometer but NOT the hours.
+      const result = await service.update(
+        created.id,
+        {
+          status: TripStatus.COMPLETED,
+          endedAt: "2026-01-10T17:00:00Z",
+          endOdometerKm: 80250,
+          endEngineHours: 9800,
+        },
+        STAFF_ACTOR,
+      );
+      expect(result.vehicle.odometerCurrentKm).toBe(80250);
+      expect(result.vehicle.engineHoursCurrent).toBe(10000);
+
+      const persisted = await prisma.vehicle.findUniqueOrThrow({ where: { id: both.id } });
+      expect(persisted.engineHoursCurrent).toBe(10000);
+    });
+
+    test("null engineHoursCurrent is seeded by the first COMPLETED trip on an hour-metered vehicle", async () => {
+      // An hour-metered asset registered before its SMR was keyed in has
+      // engineHoursCurrent = null. A null current is "behind any reading", so
+      // the first completed trip seeds it (ADR-0036 c5).
+      const loader = await seedVehicle(prisma, adminId, {
+        kind: VehicleKind.LOADER,
+        meterType: MeterType.ENGINE_HOURS,
+        odometerCurrentKm: 100,
+        engineHoursStart: null,
+        engineHoursCurrent: null,
+      });
+      const created = await seedTrip(prisma, {
+        vehicleId: loader.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.IN_PROGRESS,
+        startedAt: new Date("2026-03-01T06:00:00Z"),
+        startOdometerKm: 100,
+        startEngineHours: 5000,
+      });
+
+      const result = await service.update(
+        created.id,
+        {
+          status: TripStatus.COMPLETED,
+          endedAt: "2026-03-01T14:00:00Z",
+          endOdometerKm: 101,
+          endEngineHours: 5300, // 530.0 h
+        },
+        STAFF_ACTOR,
+      );
+      expect(result.vehicle.engineHoursCurrent).toBe(5300);
+
+      const persisted = await prisma.vehicle.findUniqueOrThrow({ where: { id: loader.id } });
+      expect(persisted.engineHoursCurrent).toBe(5300);
+    });
+
+    test("cross-field: a COMPLETED transition with endEngineHours < startEngineHours is rejected and bumps nothing", async () => {
+      const both = await seedVehicle(prisma, adminId, {
+        meterType: MeterType.BOTH,
+        odometerCurrentKm: 80000,
+        engineHoursCurrent: 10000,
+      });
+      const created = await seedTrip(prisma, {
+        vehicleId: both.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.IN_PROGRESS,
+        startedAt: new Date("2026-01-10T08:00:00Z"),
+        startOdometerKm: 80000,
+        startEngineHours: 5000,
+      });
+
+      await expect(
+        service.update(
+          created.id,
+          {
+            status: TripStatus.COMPLETED,
+            endedAt: "2026-01-10T17:00:00Z",
+            endOdometerKm: 80250, // odometer is fine (>= start)
+            endEngineHours: 4000, // but hours regress (4000 < 5000)
+          },
+          STAFF_ACTOR,
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+
+      // The rejected patch never reached the transaction: the trip is still
+      // IN_PROGRESS and the vehicle's meters are untouched.
+      const tripAfter = await prisma.trip.findUniqueOrThrow({ where: { id: created.id } });
+      expect(tripAfter.status).toBe(TripStatus.IN_PROGRESS);
+      const vehicleAfter = await prisma.vehicle.findUniqueOrThrow({ where: { id: both.id } });
+      expect(vehicleAfter.odometerCurrentKm).toBe(80000);
+      expect(vehicleAfter.engineHoursCurrent).toBe(10000);
+    });
+  });
+
   describe("delete()", () => {
     test("happy path: row gone from the database", async () => {
       const created = await seedTrip(prisma, {
@@ -1645,6 +1884,131 @@ describe("TripsService (integration, real Postgres)", () => {
       expect(stats.completedTripCount).toBe(2);
       // 300 + 100 = 400.
       expect(stats.totalKmLogged).toBe(400);
+    });
+  });
+
+  describe("totalHoursLogged — engine-hours lifetime stats (ADR-0036)", () => {
+    // totalHoursLogged is the hours rotation of totalKmLogged: Σ
+    // (endEngineHours − startEngineHours) over COMPLETED trips, integer
+    // tenths-of-an-hour. Added to BOTH statsForVehicle and statsForDriver
+    // (ADR-0036 c6). It is 0 for a km-only fleet (the hours columns are
+    // null, `?? 0` → 0). seedTrip writes raw rows, so these seed COMPLETED
+    // trips with hours directly (no service round-trip / cross-field gate).
+
+    test("statsForVehicle: totalHoursLogged is 0 for a km-only fleet", async () => {
+      // A km-only COMPLETED trip → totalKmLogged > 0 but totalHoursLogged 0.
+      await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.COMPLETED,
+        startedAt: new Date("2026-04-01T08:00:00Z"),
+        endedAt: new Date("2026-04-01T18:00:00Z"),
+        startOdometerKm: 1000,
+        endOdometerKm: 1250,
+      });
+      const stats = await service.statsForVehicle(vehicle.id);
+      expect(stats.totalKmLogged).toBe(250);
+      expect(stats.totalHoursLogged).toBe(0);
+    });
+
+    test("statsForVehicle: totalHoursLogged sums endEngineHours − startEngineHours over COMPLETED trips", async () => {
+      const excavator = await seedVehicle(prisma, adminId, {
+        kind: VehicleKind.EXCAVATOR,
+        meterType: MeterType.ENGINE_HOURS,
+        engineHoursCurrent: 20000,
+      });
+      // Two COMPLETED trips: (10250 − 10000) + (10600 − 10250) = 250 + 350 = 600.
+      await seedTrip(prisma, {
+        vehicleId: excavator.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.COMPLETED,
+        startedAt: new Date("2026-04-01T08:00:00Z"),
+        endedAt: new Date("2026-04-01T18:00:00Z"),
+        startEngineHours: 10000,
+        endEngineHours: 10250,
+      });
+      await seedTrip(prisma, {
+        vehicleId: excavator.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.COMPLETED,
+        startedAt: new Date("2026-04-02T08:00:00Z"),
+        endedAt: new Date("2026-04-02T18:00:00Z"),
+        startEngineHours: 10250,
+        endEngineHours: 10600,
+      });
+
+      const stats = await service.statsForVehicle(excavator.id);
+      expect(stats.completedTripCount).toBe(2);
+      expect(stats.totalHoursLogged).toBe(600); // 60.0 h
+    });
+
+    test("statsForVehicle: only COMPLETED trips contribute to totalHoursLogged", async () => {
+      const both = await seedVehicle(prisma, adminId, {
+        meterType: MeterType.BOTH,
+        engineHoursCurrent: 20000,
+      });
+      // One COMPLETED contributes; one IN_PROGRESS (start hours, no end) does not.
+      await seedTrip(prisma, {
+        vehicleId: both.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.COMPLETED,
+        startedAt: new Date("2026-04-01T08:00:00Z"),
+        endedAt: new Date("2026-04-01T18:00:00Z"),
+        startOdometerKm: 1000,
+        endOdometerKm: 1100,
+        startEngineHours: 4000,
+        endEngineHours: 4150,
+      });
+      await seedTrip(prisma, {
+        vehicleId: both.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.IN_PROGRESS,
+        startedAt: new Date("2026-04-03T08:00:00Z"),
+        startOdometerKm: 1100,
+        startEngineHours: 4150,
+      });
+
+      const stats = await service.statsForVehicle(both.id);
+      expect(stats.completedTripCount).toBe(1);
+      expect(stats.totalHoursLogged).toBe(150); // only the COMPLETED trip's 15.0 h
+    });
+
+    test("statsForDriver: totalHoursLogged sums over the driver's COMPLETED trips (ADR-0036 c6 — symmetric)", async () => {
+      const grader = await seedVehicle(prisma, adminId, {
+        kind: VehicleKind.GRADER,
+        meterType: MeterType.ENGINE_HOURS,
+        engineHoursCurrent: 30000,
+      });
+      // The default `driver` runs two COMPLETED trips: 200 + 300 = 500 tenths.
+      await seedTrip(prisma, {
+        vehicleId: grader.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.COMPLETED,
+        startedAt: new Date("2026-05-01T08:00:00Z"),
+        endedAt: new Date("2026-05-01T18:00:00Z"),
+        startEngineHours: 15000,
+        endEngineHours: 15200,
+      });
+      await seedTrip(prisma, {
+        vehicleId: grader.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.COMPLETED,
+        startedAt: new Date("2026-05-02T08:00:00Z"),
+        endedAt: new Date("2026-05-02T18:00:00Z"),
+        startEngineHours: 15200,
+        endEngineHours: 15500,
+      });
+
+      const stats = await service.statsForDriver(driver.id);
+      expect(stats.completedTripCount).toBe(2);
+      expect(stats.totalHoursLogged).toBe(500); // 50.0 h
     });
   });
 });
