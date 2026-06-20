@@ -1,7 +1,7 @@
 // Money formatting for the web. The API stores money as integer paisa
 // (CLAUDE.md §"Money & units"); this module is the single place the web
 // converts paisa → human-readable NPR string. Centralising the
-// formatter keeps the rupee glyph, thousands separator, and
+// formatter keeps the `Rs.` prefix, Nepali lakh grouping, and
 // fractional-paisa rounding policy consistent across every page that
 // renders money (today: Fuel logs iter 19; future: Expense logs, the
 // per-vehicle cost reports).
@@ -11,25 +11,28 @@
 // only stringify at render. Same discipline the units helper uses for
 // liters.
 
-const NPR_FORMATTER = new Intl.NumberFormat("en-IN", {
-  style: "currency",
-  currency: "NPR",
-  // NPR has 2-paisa-place subunits; the en-IN locale renders the rupee
-  // glyph and an Indian-grouping thousands separator (lakh / crore),
-  // which is the convention the operator base reads day-to-day. The
-  // CURRENCY style emits "NPR 1,234.56" by default in the Node ICU
-  // build; if a future iter wants the ₨ glyph we'll switch to a manual
-  // template.
+// A PLAIN en-IN number formatter — NOT `{ style: "currency" }`. The
+// en-IN locale gives the Nepali lakh grouping ("1,25,500.25", not
+// "125,500.25"); the min/max fraction pinning keeps paisa visible even
+// when zero. FleetCo always renders the literal "Rs. " prefix by hand
+// (DESIGN.md §"NPR / paisa display"; anti-pattern #11): the en-IN
+// CURRENCY style would emit "NPR …", and the ₹/₨ glyphs are INR, which
+// never appears in this product. The prefix and the parenthesised-
+// negative wrap are applied in formatNpr below.
+const NPR_NUMBER_FORMATTER = new Intl.NumberFormat("en-IN", {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,
 });
 
 /**
- * Format an integer paisa value as a human-readable NPR string.
- * Examples:
- *   formatNpr(0)        → "NPR 0.00"
- *   formatNpr(15000)    → "NPR 150.00"   (15000 paisa = 150 rupees)
- *   formatNpr(12345678) → "NPR 1,23,456.78"  (Indian grouping)
+ * Format an integer paisa value as the FleetCo NPR display string:
+ * `Rs. ` + Nepali lakh-grouped rupees + 2-digit paisa, with negatives
+ * in parentheses (DESIGN.md §"NPR / paisa display"). Examples:
+ *   formatNpr(0)        → "Rs. 0.00"
+ *   formatNpr(100)      → "Rs. 1.00"        (100 paisa = 1 rupee)
+ *   formatNpr(15000)    → "Rs. 150.00"
+ *   formatNpr(12550025) → "Rs. 1,25,500.25" (Nepali lakh grouping)
+ *   formatNpr(-125000)  → "(Rs. 1,250.00)"  (negative in parentheses)
  *
  * Null / undefined / non-finite input renders as the em-dash (—) the
  * detail pages use for absent values. The dash keeps tables aligned
@@ -38,11 +41,13 @@ const NPR_FORMATTER = new Intl.NumberFormat("en-IN", {
 export function formatNpr(paisa: number | null | undefined): string {
   if (paisa === null || paisa === undefined) return "—";
   if (!Number.isFinite(paisa)) return "—";
-  // Paisa → rupees as a decimal. The 100 divisor stays inside the
-  // formatter call so the rupees number is never bound to a variable
-  // anywhere — keeps the "money is paisa" invariant honest in code
-  // review.
-  return NPR_FORMATTER.format(paisa / 100);
+  // Negatives render in parentheses, never with a leading "-" (DESIGN.md
+  // §"NPR / paisa display"). `paisa < 0` is false for -0, so -0 renders
+  // "Rs. 0.00", not "(Rs. 0.00)". The 100 divisor stays inside the
+  // formatter call so the rupees number is never bound to a variable —
+  // keeps the "money is paisa" invariant honest in code review.
+  const body = `Rs. ${NPR_NUMBER_FORMATTER.format(Math.abs(paisa) / 100)}`;
+  return paisa < 0 ? `(${body})` : body;
 }
 
 // ---------------------------------------------------------------------
