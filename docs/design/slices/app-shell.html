@@ -1,0 +1,1356 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>FleetCo — Authenticated app shell (locked mockup)</title>
+
+    <!--
+      ============================================================================
+      FleetCo — Authenticated app shell · LOCKED MOCKUP (Phase 1, ticket T1)
+      ============================================================================
+
+      WHAT THIS IS
+      A locked HTML mockup of FleetCo's authenticated navigation shell: the
+      sectioned sidebar + top bar + content area that will wrap every signed-in
+      page. Per ADR-0007/0008 the mockup leads and is PO-ratified-by-merge BEFORE
+      any shell code is written; after the implementing slice (T3) merges, this
+      file moves to docs/design/slices/_archive/. This is the first concrete
+      expression of two surfaces DESIGN.md marks "Contract only": the Navigation
+      shell (sidebar / top bar) and Breadcrumb.
+
+      SPEC SOURCE (consumed, never invented)
+      Built strictly from docs/design/DESIGN.md §Navigation + the color / spacing /
+      radius / focus-ring tokens. Every colour below is a CSS variable copied
+      verbatim from the @theme block in apps/web/src/app/globals.css, so the
+      mockup and the shipped tokens cannot drift. No new token is introduced.
+        · Sidebar: 240px expanded / 64px icon-only collapsed (DESIGN.md L241).
+        · Sidebar item: 20px icon (size.icon.default) + text-sm font-medium label
+          (L242). ACTIVE item = color.accent.primary background (#059669) +
+          color.accent.foreground text (#ffffff).
+        · Top bar: user menu + global actions (L241).
+        · Breadcrumbs above the page title for nested resources, e.g.
+          "Vehicles › K-1-1234 › Trips › 2026-05-20" (L243).
+        · Page header: title text-2xl font-semibold, optional text-sm
+          color.text.muted description, right-aligned action row (L244).
+        · Surfaces: chrome (sidebar, top bar) = color.surface.raised (#ffffff)
+          with color.border.subtle (#e4e4e7) edges; content canvas =
+          color.surface.canvas (#fafafa); table header band = color.surface.muted.
+
+      IA — NAVIGATION GROUPING (PO-ratified this session)
+      Five groups feeding ONE shared nav source (lib/nav.ts, ticket T2), which
+      also feeds the home quick-links strip and the ⌘K palette:
+        · Operations  — Vehicles, Drivers, Trips, Customers, Jobs
+        · Money       — Invoices, Fuel logs, Expense logs
+        · Maintenance — Service schedules, Services due, Service history
+        · Reports     — Cost report, Fuel efficiency
+        · Logs        — Geofences, Reminder history
+      A top-level "Home" item (the daily-ops dashboard at /) sits above the groups.
+      Group headings are title-case, not ALL-CAPS, honouring DESIGN.md's
+      "lowercase reads as instrument; uppercase reads as marketing" voice.
+
+      DEFAULTS DEPICTED (PO may veto here at ratification)
+        · Sign-out lives in the top-bar user menu (Frame 1 dropdown). This
+          SUPERSEDES the home dashboard's inline header sign-out — DESIGN.md
+          §"Home dashboard" is updated by the implementing slice so there are not
+          two sign-outs.
+        · A ⌘K command palette affordance sits in the top bar; the palette
+          (Frame 2) sources its destinations from the same shared nav.
+        · The sidebar collapses 240px → 64px via the top-bar toggle; the chosen
+          state persists (localStorage) in the implementation.
+
+      ACCEPTANCE BAR (carried from Phase 0, shown here)
+        · The primary "New customer" button computes a non-transparent emerald
+          background (rgb(5,150,105)) and a visible 3px emerald focus ring
+          (--focus-ring-width). It is rendered in its focused state in Frame 1 to
+          demonstrate both.
+        · Inputs / native selects show a color.border.strong (#d4d4d8) border.
+        · Money renders "Rs. …" (see the Money / Reports surfaces; this list
+          surface carries no money column).
+
+      TWO FRAMES
+        · Frame 1 — expanded shell (240px sidebar), user menu open, content = the
+          Customers list (a representative list surface, faithful to
+          apps/web/src/app/customers/page.tsx).
+        · Frame 2 — collapsed shell (64px icon-only sidebar) with the ⌘K command
+          palette open over a dimmed content area.
+
+      Icons are Lucide React (the shipped icon library, lucide-react), inlined
+      here as an SVG sprite at 20px / stroke-width 1.5 per §Iconography. The
+      footer legend restates the token → spec mapping.
+      ============================================================================
+    -->
+
+    <style>
+      /* ----------------------------------------------------------------------
+         Design tokens — copied verbatim from apps/web/src/app/globals.css @theme.
+         The mockup consumes the design system; it does not redefine it.
+         ---------------------------------------------------------------------- */
+      :root {
+        --color-surface-canvas: #fafafa;
+        --color-surface-raised: #ffffff;
+        --color-surface-elevated: #ffffff;
+        --color-surface-muted: #f4f4f5;
+        --color-text-primary: #18181b;
+        --color-text-secondary: #3f3f46;
+        --color-text-muted: #71717a;
+        --color-text-inverse: #fafafa;
+        --color-text-accent: #047857;
+        --color-border-subtle: #e4e4e7;
+        --color-border-strong: #d4d4d8;
+        --color-border-focus: #10b981;
+        --color-accent-primary: #059669;
+        --color-accent-primary-hover: #047857;
+        --color-accent-foreground: #ffffff;
+        --color-status-success: #059669;
+        --color-status-warning: #f59e0b;
+        --color-status-error: #dc2626;
+        --color-status-info: #2563eb;
+        --focus-ring-width: 3px;
+        --font-sans: "Inter", "Noto Sans Devanagari", system-ui, -apple-system, sans-serif;
+        --font-mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, monospace;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--color-surface-canvas);
+        color: var(--color-text-primary);
+        font-family: var(--font-sans);
+        font-size: 14px;
+        line-height: 1.45;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      .doc {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 40px 24px 64px;
+      }
+
+      .doc-head {
+        margin-bottom: 28px;
+      }
+      .doc-head h1 {
+        font-size: 20px;
+        font-weight: 600;
+        margin: 0 0 6px;
+        color: var(--color-text-primary);
+      }
+      .doc-head p {
+        margin: 0;
+        font-size: 14px;
+        color: var(--color-text-muted);
+      }
+
+      .frame-caption {
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--color-text-muted);
+        margin: 28px 0 8px;
+      }
+
+      /* The "window" each frame is shown in — purely a presentation device for
+         this reference doc, not part of the shell. */
+      .frame {
+        position: relative;
+        height: 640px;
+        border: 1px solid var(--color-border-subtle);
+        border-radius: 8px;
+        overflow: hidden;
+        box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.06);
+        background: var(--color-surface-canvas);
+        display: flex;
+      }
+
+      /* ---------------------------------------------------------------- Sidebar */
+      .sidebar {
+        width: 240px;
+        flex: 0 0 240px;
+        background: var(--color-surface-raised);
+        border-right: 1px solid var(--color-border-subtle);
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+      }
+      .sidebar.collapsed {
+        width: 64px;
+        flex-basis: 64px;
+      }
+
+      .brand {
+        height: 56px;
+        flex: 0 0 56px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 0 16px;
+        border-bottom: 1px solid var(--color-border-subtle);
+      }
+      .sidebar.collapsed .brand {
+        justify-content: center;
+        padding: 0;
+      }
+      .brand-chip {
+        width: 28px;
+        height: 28px;
+        flex: 0 0 28px;
+        border-radius: 4px;
+        background: var(--color-accent-primary);
+        color: var(--color-accent-foreground);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 600;
+        font-size: 15px;
+      }
+      .brand-word {
+        font-weight: 600;
+        font-size: 15px;
+        color: var(--color-text-primary);
+        letter-spacing: -0.01em;
+      }
+
+      .nav {
+        flex: 1 1 auto;
+        overflow-y: auto;
+        padding: 12px 12px 16px;
+      }
+      .sidebar.collapsed .nav {
+        padding: 12px 8px 16px;
+      }
+
+      .nav-group-label {
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--color-text-muted);
+        padding: 0 12px;
+        margin: 16px 0 6px;
+      }
+      .nav-group:first-child .nav-group-label {
+        margin-top: 4px;
+      }
+
+      /* Collapsed: replace group labels with a thin divider so the icon column
+         stays uncluttered. */
+      .nav-divider {
+        display: none;
+      }
+      .sidebar.collapsed .nav-group-label {
+        display: none;
+      }
+      .sidebar.collapsed .nav-divider {
+        display: block;
+        height: 1px;
+        background: var(--color-border-subtle);
+        margin: 10px 8px;
+      }
+
+      .nav-item {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        height: 36px;
+        padding: 0 12px;
+        border-radius: 4px;
+        color: var(--color-text-secondary);
+        font-size: 14px;
+        font-weight: 500;
+        text-decoration: none;
+        white-space: nowrap;
+      }
+      .nav-item + .nav-item {
+        margin-top: 2px;
+      }
+      .nav-item:hover {
+        background: var(--color-surface-muted);
+        color: var(--color-text-primary);
+      }
+      .nav-item.active {
+        background: var(--color-accent-primary);
+        color: var(--color-accent-foreground);
+      }
+      .sidebar.collapsed .nav-item {
+        justify-content: center;
+        padding: 0;
+        width: 48px;
+        height: 40px;
+        margin: 0 auto;
+      }
+      .sidebar.collapsed .nav-item + .nav-item {
+        margin-top: 4px;
+      }
+      .nav-item .label {
+        flex: 1 1 auto;
+      }
+      .sidebar.collapsed .nav-item .label {
+        display: none;
+      }
+
+      /* ----------------------------------------------------------------- Pane */
+      .pane {
+        flex: 1 1 auto;
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+        height: 100%;
+      }
+
+      /* --------------------------------------------------------------- Top bar */
+      .topbar {
+        height: 56px;
+        flex: 0 0 56px;
+        background: var(--color-surface-raised);
+        border-bottom: 1px solid var(--color-border-subtle);
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 0 16px;
+      }
+      .icon-btn {
+        width: 36px;
+        height: 36px;
+        border-radius: 4px;
+        border: none;
+        background: transparent;
+        color: var(--color-text-secondary);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+      }
+      .icon-btn:hover {
+        background: var(--color-surface-muted);
+        color: var(--color-text-primary);
+      }
+
+      /* ⌘K affordance — styled as a quiet, muted search field. */
+      .cmdk {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        height: 36px;
+        width: 280px;
+        padding: 0 10px;
+        border: 1px solid var(--color-border-strong);
+        border-radius: 4px;
+        background: var(--color-surface-canvas);
+        color: var(--color-text-muted);
+        font-size: 14px;
+        cursor: text;
+      }
+      .cmdk .kbd {
+        margin-left: auto;
+        display: inline-flex;
+        gap: 2px;
+      }
+      .kbd kbd {
+        font-family: var(--font-sans);
+        font-size: 11px;
+        line-height: 1;
+        padding: 3px 5px;
+        border: 1px solid var(--color-border-subtle);
+        border-radius: 4px;
+        background: var(--color-surface-muted);
+        color: var(--color-text-muted);
+      }
+
+      .topbar-spacer {
+        flex: 1 1 auto;
+      }
+
+      .user-trigger {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        height: 36px;
+        padding: 0 8px 0 6px;
+        border-radius: 4px;
+        background: transparent;
+        border: none;
+        cursor: pointer;
+        color: var(--color-text-secondary);
+      }
+      .user-trigger:hover {
+        background: var(--color-surface-muted);
+      }
+      .avatar {
+        width: 28px;
+        height: 28px;
+        flex: 0 0 28px;
+        border-radius: 9999px;
+        background: var(--color-surface-muted);
+        border: 1px solid var(--color-border-subtle);
+        color: var(--color-text-secondary);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .user-trigger .uname {
+        font-size: 13px;
+        color: var(--color-text-secondary);
+        max-width: 180px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      /* User dropdown (Radix DropdownMenu in the build) — popover surface. */
+      .menu {
+        position: absolute;
+        top: 52px;
+        right: 16px;
+        width: 240px;
+        background: var(--color-surface-elevated);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: 8px;
+        box-shadow:
+          0 4px 6px -1px rgb(0 0 0 / 0.1),
+          0 2px 4px -2px rgb(0 0 0 / 0.1);
+        padding: 6px;
+        z-index: 30;
+      }
+      .menu-head {
+        padding: 8px 10px 10px;
+      }
+      .menu-head .lbl {
+        font-size: 11px;
+        color: var(--color-text-muted);
+      }
+      .menu-head .eml {
+        font-size: 13px;
+        color: var(--color-text-primary);
+        font-weight: 500;
+        margin-top: 2px;
+      }
+      .menu-sep {
+        height: 1px;
+        background: var(--color-border-subtle);
+        margin: 4px -6px;
+      }
+      .menu-item {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        height: 34px;
+        padding: 0 10px;
+        border-radius: 4px;
+        font-size: 14px;
+        color: var(--color-text-secondary);
+        text-decoration: none;
+        cursor: pointer;
+      }
+      .menu-item:hover {
+        background: var(--color-surface-muted);
+        color: var(--color-text-primary);
+      }
+
+      /* --------------------------------------------------------------- Content */
+      .content {
+        flex: 1 1 auto;
+        overflow-y: auto;
+        background: var(--color-surface-canvas);
+      }
+      .content-inner {
+        max-width: 1152px; /* max-w-6xl */
+        margin: 0 auto;
+        padding: 32px; /* px-8 py-8 */
+        display: flex;
+        flex-direction: column;
+        gap: 24px; /* space-y-6 */
+      }
+
+      .breadcrumb {
+        font-size: 14px;
+        color: var(--color-text-muted);
+      }
+      .breadcrumb a {
+        color: var(--color-text-muted);
+        text-decoration: none;
+      }
+      .breadcrumb a:hover {
+        color: var(--color-text-primary);
+      }
+      .breadcrumb .sep {
+        color: var(--color-text-muted);
+      }
+      .breadcrumb .current {
+        color: var(--color-text-secondary);
+      }
+
+      .page-header {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 16px;
+      }
+      .page-header .htitle {
+        font-size: 24px;
+        line-height: 32px;
+        font-weight: 600;
+        color: var(--color-text-primary);
+        margin: 6px 0 2px;
+      }
+      .page-header .hsub {
+        font-size: 14px;
+        color: var(--color-text-muted);
+        margin: 0;
+      }
+
+      .btn-primary {
+        height: 36px;
+        padding: 0 16px;
+        border-radius: 4px;
+        background: var(--color-accent-primary);
+        color: var(--color-accent-foreground);
+        border: none;
+        font-size: 14px;
+        font-weight: 500;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .btn-primary:hover {
+        background: var(--color-accent-primary-hover);
+      }
+      /* Focus-ring demonstration (the one deliberate 3px exception). Shown
+         persistently here to evidence the Phase-0 acceptance bar; in the app it
+         appears only on :focus-visible. */
+      .btn-primary.is-focus {
+        outline: none;
+        box-shadow: 0 0 0 var(--focus-ring-width)
+          color-mix(in srgb, var(--color-border-focus) 50%, transparent);
+      }
+
+      /* Filters toolbar */
+      .filters {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .select {
+        height: 36px;
+        padding: 0 30px 0 10px;
+        border: 1px solid var(--color-border-strong);
+        border-radius: 4px;
+        background: var(--color-surface-raised);
+        color: var(--color-text-secondary);
+        font-size: 14px;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        position: relative;
+      }
+      .select .chev {
+        position: absolute;
+        right: 8px;
+        color: var(--color-text-muted);
+      }
+
+      /* Table section */
+      .section {
+        border: 1px solid var(--color-border-subtle);
+        background: var(--color-surface-raised);
+        border-radius: 4px;
+        box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.06);
+        overflow: hidden;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 14px;
+      }
+      thead th {
+        text-align: left;
+        font-weight: 500;
+        color: var(--color-text-secondary);
+        background: var(--color-surface-muted);
+        padding: 12px;
+        border-bottom: 1px solid var(--color-border-subtle);
+        white-space: nowrap;
+      }
+      thead th.num {
+        text-align: right;
+      }
+      .th-sort {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .th-sort .sort-ico {
+        width: 12px;
+        height: 12px;
+      }
+      tbody td {
+        padding: 12px;
+        border-bottom: 1px solid var(--color-border-subtle);
+        color: var(--color-text-secondary);
+        vertical-align: middle;
+      }
+      tbody tr:last-child td {
+        border-bottom: none;
+      }
+      tbody tr:hover td {
+        background: var(--color-surface-muted);
+      }
+      td.name a {
+        color: var(--color-text-primary);
+        text-decoration: none;
+        font-weight: 500;
+      }
+      td.mono {
+        font-family: var(--font-mono);
+      }
+      td.num {
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* Pagination footer */
+      .pagination {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        border-top: 1px solid var(--color-border-subtle);
+        padding: 8px 12px;
+        font-size: 14px;
+      }
+      .pagination .count {
+        color: var(--color-text-muted);
+      }
+      .pg-btns {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .pg {
+        height: 32px;
+        min-width: 32px;
+        padding: 0 10px;
+        border-radius: 4px;
+        border: none;
+        background: transparent;
+        color: var(--color-text-muted);
+        font-size: 14px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .pg.current {
+        border: 1px solid var(--color-border-strong);
+        color: var(--color-text-primary);
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* ------------------------------------------------------- Command palette */
+      .palette-backdrop {
+        position: absolute;
+        inset: 0;
+        background: rgb(0 0 0 / 0.4);
+        z-index: 40;
+      }
+      .palette {
+        position: absolute;
+        top: 96px;
+        left: 50%;
+        transform: translateX(-50%);
+        width: 560px;
+        max-width: calc(100% - 48px);
+        background: var(--color-surface-elevated);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: 8px;
+        box-shadow:
+          0 10px 15px -3px rgb(0 0 0 / 0.1),
+          0 4px 6px -4px rgb(0 0 0 / 0.1);
+        overflow: hidden;
+        z-index: 50;
+      }
+      .palette-input {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        height: 48px;
+        padding: 0 14px;
+        border-bottom: 1px solid var(--color-border-subtle);
+        color: var(--color-text-muted);
+        font-size: 15px;
+      }
+      .palette-list {
+        max-height: 320px;
+        overflow-y: auto;
+        padding: 6px;
+      }
+      .palette-group-label {
+        font-size: 11px;
+        font-weight: 500;
+        color: var(--color-text-muted);
+        padding: 8px 10px 4px;
+      }
+      .palette-item {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        height: 38px;
+        padding: 0 10px;
+        border-radius: 4px;
+        font-size: 14px;
+        color: var(--color-text-secondary);
+      }
+      .palette-item.active {
+        background: var(--color-surface-muted);
+        color: var(--color-text-primary);
+      }
+      .palette-foot {
+        display: flex;
+        gap: 16px;
+        border-top: 1px solid var(--color-border-subtle);
+        padding: 8px 14px;
+        font-size: 11px;
+        color: var(--color-text-muted);
+      }
+      .content.dim {
+        filter: saturate(0.9);
+      }
+
+      .icon {
+        width: 20px;
+        height: 20px;
+        flex: 0 0 20px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.5;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+      .icon.sm {
+        width: 16px;
+        height: 16px;
+        flex-basis: 16px;
+      }
+
+      /* --------------------------------------------------------------- Legend */
+      .legend {
+        margin-top: 36px;
+        border: 1px solid var(--color-border-subtle);
+        background: var(--color-surface-raised);
+        border-radius: 8px;
+        padding: 20px 24px;
+      }
+      .legend h2 {
+        font-size: 14px;
+        font-weight: 600;
+        margin: 0 0 10px;
+      }
+      .legend ul {
+        margin: 0;
+        padding-left: 18px;
+        color: var(--color-text-secondary);
+        font-size: 13px;
+      }
+      .legend li {
+        margin: 4px 0;
+      }
+      .legend code {
+        font-family: var(--font-mono);
+        font-size: 12px;
+        color: var(--color-text-accent);
+      }
+      .swatches {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 12px;
+      }
+      .sw {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12px;
+        color: var(--color-text-muted);
+      }
+      .sw .chip {
+        width: 16px;
+        height: 16px;
+        border-radius: 3px;
+        border: 1px solid var(--color-border-subtle);
+      }
+    </style>
+  </head>
+
+  <body>
+    <!-- Lucide icon sprite (lucide-react path data, drawn at 20px / stroke 1.5). -->
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+      <defs>
+        <symbol id="i-home" viewBox="0 0 24 24">
+          <rect x="3" y="3" width="7" height="9" rx="1" />
+          <rect x="14" y="3" width="7" height="5" rx="1" />
+          <rect x="14" y="12" width="7" height="9" rx="1" />
+          <rect x="3" y="16" width="7" height="5" rx="1" />
+        </symbol>
+        <symbol id="i-truck" viewBox="0 0 24 24">
+          <path d="M14 18V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v11a1 1 0 0 0 1 1h2" />
+          <path d="M15 18H9" />
+          <path
+            d="M19 18h2a1 1 0 0 0 1-1v-3.65a1 1 0 0 0-.22-.624l-3.48-4.35A1 1 0 0 0 17.52 8H14"
+          />
+          <circle cx="17" cy="18" r="2" />
+          <circle cx="7" cy="18" r="2" />
+        </symbol>
+        <symbol id="i-users" viewBox="0 0 24 24">
+          <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+          <circle cx="9" cy="7" r="4" />
+          <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+          <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+        </symbol>
+        <symbol id="i-route" viewBox="0 0 24 24">
+          <circle cx="6" cy="19" r="3" />
+          <path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15" />
+          <circle cx="18" cy="5" r="3" />
+        </symbol>
+        <symbol id="i-building" viewBox="0 0 24 24">
+          <path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z" />
+          <path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2" />
+          <path d="M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2" />
+          <path d="M10 6h4" />
+          <path d="M10 10h4" />
+          <path d="M10 14h4" />
+          <path d="M10 18h4" />
+        </symbol>
+        <symbol id="i-clipboard" viewBox="0 0 24 24">
+          <rect x="8" y="2" width="8" height="4" rx="1" />
+          <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
+          <path d="M12 11h4" />
+          <path d="M12 16h4" />
+          <path d="M8 11h.01" />
+          <path d="M8 16h.01" />
+        </symbol>
+        <symbol id="i-receipt" viewBox="0 0 24 24">
+          <path d="M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1Z" />
+          <path d="M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8" />
+          <path d="M12 17.5v-11" />
+        </symbol>
+        <symbol id="i-fuel" viewBox="0 0 24 24">
+          <line x1="3" x2="15" y1="22" y2="22" />
+          <line x1="4" x2="14" y1="9" y2="9" />
+          <path d="M14 22V4a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v18" />
+          <path
+            d="M14 13h2a2 2 0 0 1 2 2v2a2 2 0 0 0 2 2 2 2 0 0 0 2-2V9.83a2 2 0 0 0-.59-1.42L18 5"
+          />
+        </symbol>
+        <symbol id="i-wallet" viewBox="0 0 24 24">
+          <path d="M21 12V7H5a2 2 0 0 1 0-4h14v4" />
+          <path d="M3 5v14a2 2 0 0 0 2 2h16v-5" />
+          <path d="M18 12a2 2 0 0 0 0 4h4v-4Z" />
+        </symbol>
+        <symbol id="i-calendar-clock" viewBox="0 0 24 24">
+          <path d="M21 7.5V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h3.5" />
+          <path d="M16 2v4" />
+          <path d="M8 2v4" />
+          <path d="M3 10h5" />
+          <path d="M17.5 17.5 16 16.25V14" />
+          <circle cx="16" cy="16" r="6" />
+        </symbol>
+        <symbol id="i-alert-triangle" viewBox="0 0 24 24">
+          <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z" />
+          <path d="M12 9v4" />
+          <path d="M12 17h.01" />
+        </symbol>
+        <symbol id="i-wrench" viewBox="0 0 24 24">
+          <path
+            d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"
+          />
+        </symbol>
+        <symbol id="i-trending-up" viewBox="0 0 24 24">
+          <polyline points="22 7 13.5 15.5 8.5 10.5 2 17" />
+          <polyline points="16 7 22 7 22 13" />
+        </symbol>
+        <symbol id="i-gauge" viewBox="0 0 24 24">
+          <path d="m12 14 4-4" />
+          <path d="M3.34 19a10 10 0 1 1 17.32 0" />
+        </symbol>
+        <symbol id="i-map-pin" viewBox="0 0 24 24">
+          <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z" />
+          <circle cx="12" cy="10" r="3" />
+        </symbol>
+        <symbol id="i-bell" viewBox="0 0 24 24">
+          <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
+          <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
+        </symbol>
+        <symbol id="i-search" viewBox="0 0 24 24">
+          <circle cx="11" cy="11" r="8" />
+          <path d="m21 21-4.3-4.3" />
+        </symbol>
+        <symbol id="i-panel-left" viewBox="0 0 24 24">
+          <rect x="3" y="3" width="18" height="18" rx="2" />
+          <path d="M9 3v18" />
+        </symbol>
+        <symbol id="i-chevron-down" viewBox="0 0 24 24">
+          <path d="m6 9 6 6 6-6" />
+        </symbol>
+        <symbol id="i-chevrons-up-down" viewBox="0 0 24 24">
+          <path d="m7 15 5 5 5-5" />
+          <path d="m7 9 5-5 5 5" />
+        </symbol>
+        <symbol id="i-log-out" viewBox="0 0 24 24">
+          <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+          <polyline points="16 17 21 12 16 7" />
+          <line x1="21" x2="9" y1="12" y2="12" />
+        </symbol>
+        <symbol id="i-sort-asc" viewBox="0 0 24 24">
+          <path d="m18 15-6-6-6 6" />
+        </symbol>
+      </defs>
+    </svg>
+
+    <div class="doc">
+      <div class="doc-head">
+        <h1>FleetCo — Authenticated app shell</h1>
+        <p>
+          Locked mockup · Phase 1 ticket T1 · built from DESIGN.md §Navigation + globals.css tokens
+          · PO-ratified-by-merge before shell code (ADR-0007 / ADR-0008).
+        </p>
+      </div>
+
+      <!-- =============================== FRAME 1 =============================== -->
+      <p class="frame-caption">
+        Frame 1 — Expanded sidebar (240px) · user menu open · content = Customers list
+      </p>
+      <div class="frame">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+          <div class="brand">
+            <span class="brand-chip">F</span>
+            <span class="brand-word">FleetCo</span>
+          </div>
+          <nav class="nav">
+            <div class="nav-group">
+              <a class="nav-item" href="#"
+                ><svg class="icon"><use href="#i-home" /></svg><span class="label">Home</span></a
+              >
+            </div>
+
+            <div class="nav-group">
+              <div class="nav-group-label">Operations</div>
+              <div class="nav-divider"></div>
+              <a class="nav-item" href="#"
+                ><svg class="icon"><use href="#i-truck" /></svg
+                ><span class="label">Vehicles</span></a
+              >
+              <a class="nav-item" href="#"
+                ><svg class="icon"><use href="#i-users" /></svg
+                ><span class="label">Drivers</span></a
+              >
+              <a class="nav-item" href="#"
+                ><svg class="icon"><use href="#i-route" /></svg><span class="label">Trips</span></a
+              >
+              <a class="nav-item active" href="#"
+                ><svg class="icon"><use href="#i-building" /></svg
+                ><span class="label">Customers</span></a
+              >
+              <a class="nav-item" href="#"
+                ><svg class="icon"><use href="#i-clipboard" /></svg
+                ><span class="label">Jobs</span></a
+              >
+            </div>
+
+            <div class="nav-group">
+              <div class="nav-group-label">Money</div>
+              <div class="nav-divider"></div>
+              <a class="nav-item" href="#"
+                ><svg class="icon"><use href="#i-receipt" /></svg
+                ><span class="label">Invoices</span></a
+              >
+              <a class="nav-item" href="#"
+                ><svg class="icon"><use href="#i-fuel" /></svg
+                ><span class="label">Fuel logs</span></a
+              >
+              <a class="nav-item" href="#"
+                ><svg class="icon"><use href="#i-wallet" /></svg
+                ><span class="label">Expense logs</span></a
+              >
+            </div>
+
+            <div class="nav-group">
+              <div class="nav-group-label">Maintenance</div>
+              <div class="nav-divider"></div>
+              <a class="nav-item" href="#"
+                ><svg class="icon"><use href="#i-calendar-clock" /></svg
+                ><span class="label">Service schedules</span></a
+              >
+              <a class="nav-item" href="#"
+                ><svg class="icon"><use href="#i-alert-triangle" /></svg
+                ><span class="label">Services due</span></a
+              >
+              <a class="nav-item" href="#"
+                ><svg class="icon"><use href="#i-wrench" /></svg
+                ><span class="label">Service history</span></a
+              >
+            </div>
+
+            <div class="nav-group">
+              <div class="nav-group-label">Reports</div>
+              <div class="nav-divider"></div>
+              <a class="nav-item" href="#"
+                ><svg class="icon"><use href="#i-trending-up" /></svg
+                ><span class="label">Cost report</span></a
+              >
+              <a class="nav-item" href="#"
+                ><svg class="icon"><use href="#i-gauge" /></svg
+                ><span class="label">Fuel efficiency</span></a
+              >
+            </div>
+
+            <div class="nav-group">
+              <div class="nav-group-label">Logs</div>
+              <div class="nav-divider"></div>
+              <a class="nav-item" href="#"
+                ><svg class="icon"><use href="#i-map-pin" /></svg
+                ><span class="label">Geofences</span></a
+              >
+              <a class="nav-item" href="#"
+                ><svg class="icon"><use href="#i-bell" /></svg
+                ><span class="label">Reminder history</span></a
+              >
+            </div>
+          </nav>
+        </aside>
+
+        <!-- Pane: top bar + content -->
+        <div class="pane">
+          <div class="topbar">
+            <button class="icon-btn" title="Collapse sidebar" aria-label="Collapse sidebar">
+              <svg class="icon"><use href="#i-panel-left" /></svg>
+            </button>
+            <div class="cmdk">
+              <svg class="icon sm"><use href="#i-search" /></svg>
+              <span>Search…</span>
+              <span class="kbd"><kbd>⌘</kbd><kbd>K</kbd></span>
+            </div>
+            <div class="topbar-spacer"></div>
+            <button class="user-trigger" aria-label="User menu">
+              <span class="avatar">A</span>
+              <span class="uname">admin@fleetco.local</span>
+              <svg class="icon sm"><use href="#i-chevrons-up-down" /></svg>
+            </button>
+          </div>
+
+          <!-- User dropdown (open) -->
+          <div class="menu">
+            <div class="menu-head">
+              <div class="lbl">Signed in as</div>
+              <div class="eml">admin@fleetco.local</div>
+            </div>
+            <div class="menu-sep"></div>
+            <a class="menu-item" href="#"
+              ><svg class="icon sm"><use href="#i-log-out" /></svg>Sign out</a
+            >
+          </div>
+
+          <main class="content">
+            <div class="content-inner">
+              <!-- Breadcrumb + page header -->
+              <div>
+                <nav class="breadcrumb" aria-label="Breadcrumb">
+                  <a href="#">FleetCo</a>
+                  <span class="sep" aria-hidden="true"> › </span>
+                  <span class="current">Customers</span>
+                </nav>
+                <div class="page-header">
+                  <div>
+                    <h1 class="htitle">Customers</h1>
+                    <p class="hsub">3 registered.</p>
+                  </div>
+                  <!-- Primary action, right-aligned. Shown focused to evidence the
+                       emerald background + 3px focus ring acceptance bar. -->
+                  <button class="btn-primary is-focus">New customer</button>
+                </div>
+              </div>
+
+              <!-- Filters toolbar -->
+              <div class="filters">
+                <span class="select"
+                  >All statuses <svg class="icon sm chev"><use href="#i-chevron-down" /></svg
+                ></span>
+              </div>
+
+              <!-- Table -->
+              <div class="section">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>
+                        <span class="th-sort"
+                          >Name <svg class="icon sort-ico"><use href="#i-sort-asc" /></svg
+                        ></span>
+                      </th>
+                      <th>Contact</th>
+                      <th>Phone</th>
+                      <th>Status</th>
+                      <th class="num">Created</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td class="name"><a href="#">Annapurna Builders Pvt. Ltd.</a></td>
+                      <td>Bikash Shrestha</td>
+                      <td class="mono">9802233445</td>
+                      <td>Inactive</td>
+                      <td class="num">2083 Baishakh 12</td>
+                    </tr>
+                    <tr>
+                      <td class="name"><a href="#">Everest Cement Works</a></td>
+                      <td>Sita Gurung</td>
+                      <td class="mono">9841098765</td>
+                      <td>Active</td>
+                      <td class="num">2083 Baishakh 28</td>
+                    </tr>
+                    <tr>
+                      <td class="name"><a href="#">Himalayan Stone Suppliers</a></td>
+                      <td>Ramesh Thapa</td>
+                      <td class="mono">9851012345</td>
+                      <td>Active</td>
+                      <td class="num">2083 Jestha 6</td>
+                    </tr>
+                  </tbody>
+                </table>
+                <nav class="pagination" aria-label="Pagination">
+                  <span class="count">Showing 1–3 of 3.</span>
+                  <div class="pg-btns">
+                    <span class="pg">Previous</span>
+                    <span class="pg current">1</span>
+                    <span class="pg">Next</span>
+                  </div>
+                </nav>
+              </div>
+            </div>
+          </main>
+        </div>
+      </div>
+
+      <!-- =============================== FRAME 2 =============================== -->
+      <p class="frame-caption">
+        Frame 2 — Collapsed sidebar (64px, icon-only) · ⌘K command palette open
+      </p>
+      <div class="frame">
+        <!-- Collapsed sidebar -->
+        <aside class="sidebar collapsed">
+          <div class="brand"><span class="brand-chip">F</span></div>
+          <nav class="nav">
+            <a class="nav-item" href="#" title="Home"
+              ><svg class="icon"><use href="#i-home" /></svg
+            ></a>
+            <div class="nav-divider"></div>
+            <a class="nav-item" href="#" title="Vehicles"
+              ><svg class="icon"><use href="#i-truck" /></svg
+            ></a>
+            <a class="nav-item" href="#" title="Drivers"
+              ><svg class="icon"><use href="#i-users" /></svg
+            ></a>
+            <a class="nav-item" href="#" title="Trips"
+              ><svg class="icon"><use href="#i-route" /></svg
+            ></a>
+            <a class="nav-item active" href="#" title="Customers"
+              ><svg class="icon"><use href="#i-building" /></svg
+            ></a>
+            <a class="nav-item" href="#" title="Jobs"
+              ><svg class="icon"><use href="#i-clipboard" /></svg
+            ></a>
+            <div class="nav-divider"></div>
+            <a class="nav-item" href="#" title="Invoices"
+              ><svg class="icon"><use href="#i-receipt" /></svg
+            ></a>
+            <a class="nav-item" href="#" title="Fuel logs"
+              ><svg class="icon"><use href="#i-fuel" /></svg
+            ></a>
+            <a class="nav-item" href="#" title="Expense logs"
+              ><svg class="icon"><use href="#i-wallet" /></svg
+            ></a>
+            <div class="nav-divider"></div>
+            <a class="nav-item" href="#" title="Service schedules"
+              ><svg class="icon"><use href="#i-calendar-clock" /></svg
+            ></a>
+            <a class="nav-item" href="#" title="Services due"
+              ><svg class="icon"><use href="#i-alert-triangle" /></svg
+            ></a>
+            <a class="nav-item" href="#" title="Service history"
+              ><svg class="icon"><use href="#i-wrench" /></svg
+            ></a>
+            <div class="nav-divider"></div>
+            <a class="nav-item" href="#" title="Cost report"
+              ><svg class="icon"><use href="#i-trending-up" /></svg
+            ></a>
+            <a class="nav-item" href="#" title="Fuel efficiency"
+              ><svg class="icon"><use href="#i-gauge" /></svg
+            ></a>
+            <div class="nav-divider"></div>
+            <a class="nav-item" href="#" title="Geofences"
+              ><svg class="icon"><use href="#i-map-pin" /></svg
+            ></a>
+            <a class="nav-item" href="#" title="Reminder history"
+              ><svg class="icon"><use href="#i-bell" /></svg
+            ></a>
+          </nav>
+        </aside>
+
+        <div class="pane">
+          <div class="topbar">
+            <button class="icon-btn" title="Expand sidebar" aria-label="Expand sidebar">
+              <svg class="icon"><use href="#i-panel-left" /></svg>
+            </button>
+            <div class="cmdk">
+              <svg class="icon sm"><use href="#i-search" /></svg>
+              <span>Search…</span>
+              <span class="kbd"><kbd>⌘</kbd><kbd>K</kbd></span>
+            </div>
+            <div class="topbar-spacer"></div>
+            <button class="user-trigger" aria-label="User menu">
+              <span class="avatar">A</span>
+              <span class="uname">admin@fleetco.local</span>
+              <svg class="icon sm"><use href="#i-chevrons-up-down" /></svg>
+            </button>
+          </div>
+
+          <main class="content dim">
+            <div class="content-inner">
+              <div>
+                <nav class="breadcrumb" aria-label="Breadcrumb">
+                  <a href="#">FleetCo</a>
+                  <span class="sep" aria-hidden="true"> › </span>
+                  <span class="current">Customers</span>
+                </nav>
+                <div class="page-header">
+                  <div>
+                    <h1 class="htitle">Customers</h1>
+                    <p class="hsub">3 registered.</p>
+                  </div>
+                  <button class="btn-primary">New customer</button>
+                </div>
+              </div>
+            </div>
+          </main>
+        </div>
+
+        <!-- Command palette overlay -->
+        <div class="palette-backdrop"></div>
+        <div class="palette" role="dialog" aria-label="Command palette">
+          <div class="palette-input">
+            <svg class="icon"><use href="#i-search" /></svg>
+            <span>Go to…</span>
+          </div>
+          <div class="palette-list">
+            <div class="palette-group-label">Operations</div>
+            <div class="palette-item active">
+              <svg class="icon sm"><use href="#i-truck" /></svg>Vehicles
+            </div>
+            <div class="palette-item">
+              <svg class="icon sm"><use href="#i-users" /></svg>Drivers
+            </div>
+            <div class="palette-item">
+              <svg class="icon sm"><use href="#i-route" /></svg>Trips
+            </div>
+            <div class="palette-item">
+              <svg class="icon sm"><use href="#i-building" /></svg>Customers
+            </div>
+            <div class="palette-item">
+              <svg class="icon sm"><use href="#i-clipboard" /></svg>Jobs
+            </div>
+            <div class="palette-group-label">Money</div>
+            <div class="palette-item">
+              <svg class="icon sm"><use href="#i-receipt" /></svg>Invoices
+            </div>
+            <div class="palette-item">
+              <svg class="icon sm"><use href="#i-fuel" /></svg>Fuel logs
+            </div>
+          </div>
+          <div class="palette-foot">
+            <span>↑↓ to navigate</span>
+            <span>↵ to open</span>
+            <span>esc to close</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- =============================== LEGEND =============================== -->
+      <div class="legend">
+        <h2>Token → spec mapping (this mockup invents nothing)</h2>
+        <ul>
+          <li>
+            <strong>Sidebar</strong>: <code>240px</code> expanded / <code>64px</code> collapsed
+            (DESIGN.md §Navigation). Item = 20px icon (<code>size.icon.default</code>) + 14px
+            <code>font-medium</code> label. Active item background =
+            <code>color.accent.primary</code> (#059669), text = <code>color.accent.foreground</code>
+            (#ffffff).
+          </li>
+          <li>
+            <strong>Chrome surfaces</strong>: sidebar + top bar =
+            <code>color.surface.raised</code> (#ffffff) with
+            <code>color.border.subtle</code> (#e4e4e7) edges; content canvas =
+            <code>color.surface.canvas</code> (#fafafa); table header band =
+            <code>color.surface.muted</code> (#f4f4f5).
+          </li>
+          <li>
+            <strong>Top bar</strong>: sidebar collapse toggle, the ⌘K search affordance, and a user
+            menu (avatar + email). The dropdown carries "Signed in as &lt;email&gt;" + "Sign out" —
+            superseding the home dashboard's inline sign-out.
+          </li>
+          <li>
+            <strong>Breadcrumb + page header</strong>: breadcrumb (<code>text-sm</code>,
+            <code>color.text.muted</code>, "›" separators) above an <code>text-2xl</code>
+            <code>font-semibold</code> title, with the primary action right-aligned.
+          </li>
+          <li>
+            <strong>Primary button</strong> (focused, Frame 1):
+            <code>color.accent.primary</code> background + a 3px
+            <code>color.border.focus</code> ring at 50% (the single
+            <code>--focus-ring-width</code> exception). Native selects use a
+            <code>color.border.strong</code> (#d4d4d8) border.
+          </li>
+          <li>
+            <strong>Radius</strong>: controls + cards
+            <code>4px</code> (<code>radius.default</code>); popover / palette surfaces
+            <code>8px</code> (<code>radius.lg</code>); tables stay sharp.
+          </li>
+          <li>
+            <strong>Command palette</strong>: sources its destinations from the same shared nav
+            source (lib/nav.ts) as the sidebar; navigation-only in Phase 1.
+          </li>
+          <li>
+            <strong>Voice</strong>: title-case group headings (not ALL-CAPS), factual labels, no
+            exclamation marks (DESIGN.md §Voice).
+          </li>
+        </ul>
+        <div class="swatches">
+          <span class="sw"
+            ><span class="chip" style="background: #059669"></span>accent.primary #059669</span
+          >
+          <span class="sw"
+            ><span class="chip" style="background: #047857"></span>accent.primary-hover
+            #047857</span
+          >
+          <span class="sw"
+            ><span class="chip" style="background: #10b981"></span>border.focus #10b981</span
+          >
+          <span class="sw"
+            ><span class="chip" style="background: #fafafa"></span>surface.canvas #fafafa</span
+          >
+          <span class="sw"
+            ><span class="chip" style="background: #f4f4f5"></span>surface.muted #f4f4f5</span
+          >
+          <span class="sw"
+            ><span class="chip" style="background: #e4e4e7"></span>border.subtle #e4e4e7</span
+          >
+          <span class="sw"
+            ><span class="chip" style="background: #d4d4d8"></span>border.strong #d4d4d8</span
+          >
+          <span class="sw"
+            ><span class="chip" style="background: #18181b"></span>text.primary #18181b</span
+          >
+        </div>
+      </div>
+    </div>
+  </body>
+</html>
