@@ -21,7 +21,7 @@
 // Money is integer paisa end-to-end (CLAUDE.md money-as-minor-units); this module
 // never introduces a float (anti-pattern #14). The rates are basis points.
 
-import type { InvoiceServiceType } from "@/app/invoices/types";
+import type { InvoiceServiceType } from "@/app/(app)/invoices/types";
 
 // ⚠️ PROPOSED — pending operator/accountant verification (ADR-0039 c9). These
 // mirror the FLAGGED proposed constants the API freezes at issue
