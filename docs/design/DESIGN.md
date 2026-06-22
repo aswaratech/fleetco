@@ -152,16 +152,16 @@ DESIGN.md documents the **contract** for each component; not every contract is i
 | Badge | Built | `ui/badge.tsx` |
 | `<NepaliDate>` (display) | Built | `components/nepali-date.tsx` (over `lib/nepali-date.ts`) |
 | `<NepaliDatePicker>` (input) | Built | `components/nepali-date-picker.tsx` (ADR-0032) |
-| Card | Contract only | — |
+| Card | Built | `ui/card.tsx` |
 | Dialog (non-alert modal) | Contract only | — |
 | Sheet (drawer) | Contract only | — |
 | Tabs | Contract only | — |
-| Checkbox | Contract only | — |
-| Textarea | Contract only | — |
-| Skeleton | Contract only | — |
+| Checkbox | Built | `ui/checkbox.tsx` |
+| Textarea | Built | `ui/textarea.tsx` |
+| Skeleton | Built | `ui/skeleton.tsx` |
 | Breadcrumb | Contract only | — |
 | Pagination | Contract only — hand-redefined per list page today | — |
-| `<Money>` (display) | Contract only — use `formatNpr` (`lib/money.ts`) until built | — |
+| `<Money>` (display) | Built | `components/money.tsx` (over `formatNpr`) |
 | `<MoneyInput>` (input) | Contract only — use `rupeesToPaisa` / `paisaToRupeesInput` (`lib/money.ts`) until built | — |
 | Navigation shell (sidebar / top bar) | Contract only | — |
 
@@ -173,6 +173,7 @@ DESIGN.md documents the **contract** for each component; not every contract is i
 - **2026-06-05 (BS dates N3):** `badge.tsx` added. Hand-written (not CLI-pulled) as a CVA `<span>` mirroring `button.tsx`'s `cva`/`cn` shape — no new top-level dependency. A status indicator, never an action (anti-pattern #2). Its five variants (`warning`/`error`/`success`/`info`/`neutral`) bind only to `color.status.*` / surface / text tokens already declared in DESIGN.md → `globals.css` `@theme`, so it introduces no new design token and the design-token-drift test is untouched. Implements the §"Status badges" contract verbatim (amber = expiring-soon/warning, red = error, `radius.sm` + `text.xs`, hue always paired with a text label). First consumer: the vehicle-compliance expiry badges on the Vehicle detail page (ADR-0031 §E).
 - **2026-06-06 (Polish & debt sweep, P2):** `lucide-react` adopted as a direct dependency of `apps/web` — the icon library this §Iconography section already names — paying off the "`lucide-react` not yet adopted" tech-debt entry. The three inline-SVG icon substitutes in `select.tsx` (`ChevronDown` / `ChevronUp` / `Check`) and the inline `SortArrow` `<svg>` in `vehicles/page.tsx` now render from `lucide-react`'s named imports. Null visual diff: Lucide's chevron/check path data is byte-identical to the removed inline SVGs (verified against the installed `lucide-react@1.17.0`), and each call-site passes an explicit `strokeWidth` (1.5 for the size-4 chevrons, 1.75 for the size-4 Check and the 12px sort arrow) plus `aria-hidden`, matching the prior render and the §Iconography "Stroke width" rule (1.5/1.75, **not** Lucide's default of 2). No new design token — the design-token-drift test is untouched. Isolated to its own PR (`feat/lucide-react-adoption`), mirroring the `bullmq` / `react-leaflet` / `nepali-date-converter` dependency-isolation precedent.
 - **2026-06-06 (BS date-picker B1):** `popover.tsx` added. Source copied from `https://raw.githubusercontent.com/shadcn-ui/ui/main/apps/v4/registry/new-york-v4/ui/popover.tsx` (fetched 2026-06-06). Underlying primitive is `@radix-ui/react-popover` vendored via the umbrella `radix-ui@1.4.3` peer (same import shape as `select.tsx` / `alert-dialog.tsx` — no new top-level dependency; ADR-0032 commitment 1, hand-built BS date-picker over the installed Radix Popover). Local edits to upstream: (a) color classes mapped from shadcn's `:root` aliases to FleetCo's `@theme` semantic tokens (`bg-popover` → `bg-surface-elevated`, `text-popover-foreground` → `text-text-primary`, explicit `border-border-subtle`), because this project's `globals.css` exposes only the `--color-*` `@theme` tokens as Tailwind utilities — the shadcn `:root` aliases are plain CSS variables, not theme colors, so `bg-popover` generates no utility here; no new design token is introduced, so the design-token-drift test is untouched. (b) The upstream entrance/exit animation utilities are kept for upstream-diff fidelity but are inert (the project ships no `tailwindcss-animate` plugin). (c) Import path re-pointed to `@/lib/utils`. File-level provenance comment in the component records the fetch URL, date, and the token-mapping rationale. First consumer: `<NepaliDatePicker>` (the BS month-grid date input, ADR-0032).
+- **2026-06-22 (Phase 0b leaf primitives):** `card.tsx`, `skeleton.tsx`, `textarea.tsx`, `checkbox.tsx` added under `ui/`, plus the FleetCo `<Money>` display component at `components/money.tsx`. All hand-written to match the shadcn-ui `new-york` shapes (Skeleton/Card/Textarea are styled elements with no Radix primitive; Checkbox wraps `@radix-ui/react-checkbox` via the umbrella `radix-ui@1.4.3` peer — no new top-level dependency). Each is re-pointed from shadcn's dead `:root` aliases to FleetCo's `@theme` semantic utilities — the now-merged consumption guard (`apps/web/test/design-token-consumption.test.ts`) auto-scans every `ui/*.tsx` and fails on any dead alias: `bg-card`/`text-card-foreground` → `bg-surface-raised`/`text-text-primary`, `bg-accent` → `bg-surface-muted`, `border-input` → `border-border-strong`, `data-[state=checked]:bg-primary` → `bg-accent-primary`, `*-destructive` → `*-status-error`. FleetCo density/radius applied (Card `p-4` + `rounded`; controls `rounded` 4px; the focus ring uses the tokenized `--focus-ring-width`); inert `dark:` variants dropped. `<Money>` wraps `formatNpr` with `tabular-nums`. No new design token — the design-token-drift test is untouched. These discharge the matching contract-only rows in the Component-status table above.
 
 ### Buttons
 
