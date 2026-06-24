@@ -13,7 +13,6 @@ import { RecentExpensesCard } from "./_dashboard/recent-expenses-card";
 import { RecentFuelCard } from "./_dashboard/recent-fuel-card";
 import { ServicesDueCard } from "./_dashboard/services-due-card";
 import { ThisMonthCostCard } from "./_dashboard/this-month-cost-card";
-import { SignOutButton } from "./sign-out-button";
 
 // Home daily-ops dashboard — D2 of the Home-dashboard program (the program's
 // last ticket). Replaces the placeholder navigation-only home with the
@@ -31,9 +30,10 @@ import { SignOutButton } from "./sign-out-button";
 //      from the catch body, never wrapped in a second try.
 //
 // Zone A is the six overview cards (the compliance headline spans full width);
-// Zone B is the quick-links strip that preserves all nine CRUD destinations —
-// the dashboard augments navigation until the sidebar is built, it never
-// replaces it. Every empty/zero state follows the §Voice register: state the
+// Zone B is the quick-links strip, now sourced from the shared nav model
+// (lib/nav.ts); the Navigation sidebar (DESIGN.md §Navigation) is the primary
+// nav and the strip is a convenience. Every empty/zero state follows the §Voice
+// register: state the
 // fact, no exclamation, no apology. The loading skeleton (loading.tsx) and the
 // error boundary (error.tsx) round out the surface's states.
 
@@ -61,15 +61,11 @@ export default async function HomePage(): Promise<React.ReactElement> {
   return (
     <main className="bg-surface-canvas min-h-svh">
       <div className="mx-auto max-w-6xl space-y-6 px-8 py-8">
-        <header className="flex flex-wrap items-end justify-between gap-4">
-          <div className="space-y-1">
-            <h1 className="text-text-primary text-2xl font-semibold">FleetCo</h1>
-            <p className="text-text-muted text-sm">
-              <NepaliDate iso={todayIso} format="both" /> · Signed in as{" "}
-              <span className="text-text-primary">{session.user.email}</span>
-            </p>
-          </div>
-          <SignOutButton />
+        <header className="space-y-1">
+          <h1 className="text-text-primary text-2xl font-semibold">FleetCo</h1>
+          <p className="text-text-muted text-sm">
+            <NepaliDate iso={todayIso} format="both" />
+          </p>
         </header>
 
         <section aria-label="Fleet overview" className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">

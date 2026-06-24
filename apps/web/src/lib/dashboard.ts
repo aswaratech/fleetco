@@ -32,15 +32,15 @@
 import { apiFetch } from "./api";
 import { worstComplianceState, type ComplianceBadgeState } from "./compliance";
 import { serviceScheduleState, type ScheduleWithReading } from "./maintenance";
-import type { ExpenseLogListItem } from "../app/expense-logs/types";
-import type { FuelLogListItem } from "../app/fuel-logs/types";
+import type { ExpenseLogListItem } from "../app/(app)/expense-logs/types";
+import type { FuelLogListItem } from "../app/(app)/fuel-logs/types";
 import type {
   PerVehicleCostReport,
   PerVehicleCostTotals,
-} from "../app/reports/per-vehicle-cost/types";
-import type { ServiceSchedule } from "../app/service-schedules/types";
-import type { TripListItem } from "../app/trips/types";
-import type { Vehicle } from "../app/vehicles/types";
+} from "../app/(app)/reports/per-vehicle-cost/types";
+import type { ServiceSchedule } from "../app/(app)/service-schedules/types";
+import type { TripListItem } from "../app/(app)/trips/types";
+import type { Vehicle } from "../app/(app)/vehicles/types";
 
 // ---------------------------------------------------------------------------
 // Pure helpers — the testable core (test/dashboard.test.ts).
