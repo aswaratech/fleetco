@@ -1,10 +1,12 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { ChevronDown, ChevronUp } from "lucide-react";
 
 import { NepaliDate } from "@/components/nepali-date";
 import { Badge } from "@/components/ui/badge";
+import { Breadcrumb } from "@/components/ui/breadcrumb";
 import { Button } from "@/components/ui/button";
+import { Pagination } from "@/components/ui/pagination";
+import { SortableHeader } from "@/components/ui/sortable-header";
 import {
   Table,
   TableBody,
@@ -101,209 +103,6 @@ function ComplianceRollUp({ vehicle }: { vehicle: Vehicle }): React.ReactElement
   return <>—</>;
 }
 
-// Build the link for a pagination control. Filter and sort values are
-// preserved; only `skip` changes. When skip is zero we omit the key
-// entirely so the canonical /vehicles URL stays clean.
-function paginationParams(searchParams: URLSearchParams, nextSkip: number): string {
-  const next = new URLSearchParams(searchParams);
-  if (nextSkip === 0) {
-    next.delete("skip");
-  } else {
-    next.set("skip", String(nextSkip));
-  }
-  const qs = next.toString();
-  return qs ? `?${qs}` : "";
-}
-
-// Build the link for a sortable column header. If the column is the
-// active sort, clicking toggles sortDir. If it is a different column,
-// clicking sets that column with sortDir=desc (iter-4 spec). The
-// returned URL keeps the active filters and resets `skip` (a sort
-// change can shuffle which rows land on page 1; staying on page 7
-// after a sort change is rarely what the user means).
-function sortParams(
-  searchParams: URLSearchParams,
-  column: SortColumn,
-  activeColumn: SortColumn,
-  activeDir: SortDir,
-): string {
-  const next = new URLSearchParams(searchParams);
-  if (column === activeColumn) {
-    next.set("sortDir", activeDir === "asc" ? "desc" : "asc");
-    next.set("sortBy", column);
-  } else {
-    next.set("sortBy", column);
-    next.set("sortDir", "desc");
-  }
-  next.delete("skip");
-  const qs = next.toString();
-  return qs ? `?${qs}` : "";
-}
-
-// Active-sort indicator. asc → Lucide `ChevronUp`, desc → `ChevronDown`
-// (mirrors the chevron paths the prior inline SVG drew). Rendered from
-// lucide-react — DESIGN.md §Iconography names it the project icon library,
-// adopted in feat/lucide-react-adoption. The explicit strokeWidth={1.75}
-// + aria-hidden preserve the prior inline render exactly (a null visual
-// diff): Lucide's default stroke is 2, not the 1.75 this 12px indicator
-// uses per DESIGN.md §Iconography "Stroke width".
-function SortArrow({ direction }: { direction: SortDir }): React.ReactElement {
-  const className = "ml-1 inline size-3 align-[-1px]";
-  return direction === "asc" ? (
-    <ChevronUp className={className} strokeWidth={1.75} aria-hidden="true" />
-  ) : (
-    <ChevronDown className={className} strokeWidth={1.75} aria-hidden="true" />
-  );
-}
-
-interface SortableHeaderProps {
-  column: SortColumn;
-  activeColumn: SortColumn;
-  activeDir: SortDir;
-  searchParams: URLSearchParams;
-  className?: string;
-  children: React.ReactNode;
-}
-
-function SortableHeader({
-  column,
-  activeColumn,
-  activeDir,
-  searchParams,
-  className,
-  children,
-}: SortableHeaderProps): React.ReactElement {
-  const isActive = column === activeColumn;
-  const href = `/vehicles${sortParams(searchParams, column, activeColumn, activeDir)}`;
-  // aria-sort communicates the active sort to assistive tech per
-  // WAI-ARIA's table-sorting practice. "none" on inactive headers
-  // makes the surface as a whole self-describing.
-  const ariaSort: "ascending" | "descending" | "none" = isActive
-    ? activeDir === "asc"
-      ? "ascending"
-      : "descending"
-    : "none";
-  return (
-    <TableHead aria-sort={ariaSort} className={className}>
-      <Link
-        href={href}
-        className="hover:text-text-primary focus-visible:outline-border-focus inline-flex items-center focus-visible:outline-2 focus-visible:outline-offset-2"
-      >
-        {children}
-        {isActive ? <SortArrow direction={activeDir} /> : null}
-      </Link>
-    </TableHead>
-  );
-}
-
-interface PaginationProps {
-  total: number;
-  skip: number;
-  take: number;
-  searchParams: URLSearchParams;
-}
-
-// Page-number controls. Generates a small window of page numbers
-// around the current page plus first/last anchors. For Phase 1 fleet
-// sizes the window is always large enough to enumerate every page
-// (typical operator has < 200 vehicles), so the windowing is mostly
-// future-proofing for when the database grows.
-function Pagination({ total, skip, take, searchParams }: PaginationProps): React.ReactElement {
-  // Defensive: if take is zero (shouldn't happen — schema enforces >=1)
-  // anchor on whatever was returned.
-  const safeTake = Math.max(take, 1);
-  const pageCount = Math.max(1, Math.ceil(total / safeTake));
-  const currentPage = Math.floor(skip / safeTake) + 1;
-  const fromRow = total === 0 ? 0 : skip + 1;
-  const toRow = Math.min(skip + safeTake, total);
-
-  // Build the visible page-number window (current ± 1). For small page
-  // counts (<= 7) every page is shown; for larger counts we ellipsize.
-  // Both endpoints are always present so first/last are one click away.
-  const pages: (number | "ellipsis")[] = [];
-  if (pageCount <= 7) {
-    for (let i = 1; i <= pageCount; i++) pages.push(i);
-  } else {
-    const window = new Set<number>([1, pageCount, currentPage - 1, currentPage, currentPage + 1]);
-    let last = 0;
-    for (let i = 1; i <= pageCount; i++) {
-      if (window.has(i)) {
-        if (i - last > 1) pages.push("ellipsis");
-        pages.push(i);
-        last = i;
-      }
-    }
-  }
-
-  const prevDisabled = currentPage <= 1;
-  const nextDisabled = currentPage >= pageCount;
-  const prevHref = `/vehicles${paginationParams(searchParams, Math.max(0, skip - safeTake))}`;
-  const nextHref = `/vehicles${paginationParams(searchParams, skip + safeTake)}`;
-
-  return (
-    <nav
-      aria-label="Pagination"
-      className="border-border-subtle flex items-center justify-between border-t px-3 py-2 text-sm"
-    >
-      <p className="text-text-muted">
-        {total === 0 ? "No results." : `Showing ${fromRow}–${toRow} of ${total}.`}
-      </p>
-      <div className="flex items-center gap-1">
-        {prevDisabled ? (
-          <Button variant="ghost" size="sm" disabled>
-            Previous
-          </Button>
-        ) : (
-          <Button asChild variant="ghost" size="sm">
-            <Link href={prevHref} rel="prev">
-              Previous
-            </Link>
-          </Button>
-        )}
-        {pages.map((p, idx) =>
-          p === "ellipsis" ? (
-            <span
-              key={`ellipsis-${idx}`}
-              aria-hidden="true"
-              className="text-text-muted px-2 select-none"
-            >
-              …
-            </span>
-          ) : p === currentPage ? (
-            <Button
-              key={p}
-              variant="outline"
-              size="sm"
-              aria-current="page"
-              className="tabular-nums"
-              disabled
-            >
-              {p}
-            </Button>
-          ) : (
-            <Button key={p} asChild variant="ghost" size="sm" className="tabular-nums">
-              <Link href={`/vehicles${paginationParams(searchParams, (p - 1) * safeTake)}`}>
-                {p}
-              </Link>
-            </Button>
-          ),
-        )}
-        {nextDisabled ? (
-          <Button variant="ghost" size="sm" disabled>
-            Next
-          </Button>
-        ) : (
-          <Button asChild variant="ghost" size="sm">
-            <Link href={nextHref} rel="next">
-              Next
-            </Link>
-          </Button>
-        )}
-      </div>
-    </nav>
-  );
-}
-
 // Next.js 15: searchParams arrives as a Promise per the App Router's
 // async-params convention (the same shape /vehicles/[id] uses).
 interface VehiclesPageProps {
@@ -384,13 +183,7 @@ export default async function VehiclesPage({
       <div className="mx-auto max-w-6xl space-y-6 px-8 py-8">
         <header className="flex items-end justify-between gap-4">
           <div className="space-y-1">
-            <nav aria-label="Breadcrumb" className="text-text-muted text-sm">
-              <Link href="/" className="hover:text-text-primary">
-                FleetCo
-              </Link>
-              <span aria-hidden="true"> › </span>
-              <span className="text-text-secondary">Vehicles</span>
-            </nav>
+            <Breadcrumb items={[{ label: "FleetCo", href: "/" }, { label: "Vehicles" }]} />
             <h1 className="text-text-primary text-2xl font-semibold">Vehicles</h1>
             <p className="text-text-muted text-sm">
               {data.total === 0
@@ -439,6 +232,7 @@ export default async function VehiclesPage({
                 <TableHeader>
                   <TableRow>
                     <SortableHeader
+                      basePath="/vehicles"
                       column="registrationNumber"
                       activeColumn={data.sortBy}
                       activeDir={data.sortDir}
@@ -449,6 +243,7 @@ export default async function VehiclesPage({
                     <TableHead>Kind</TableHead>
                     <TableHead>Make / Model</TableHead>
                     <SortableHeader
+                      basePath="/vehicles"
                       column="acquiredAt"
                       activeColumn={data.sortBy}
                       activeDir={data.sortDir}
@@ -464,6 +259,7 @@ export default async function VehiclesPage({
                         server-side sort column. */}
                     <TableHead>Compliance</TableHead>
                     <SortableHeader
+                      basePath="/vehicles"
                       column="odometerCurrentKm"
                       activeColumn={data.sortBy}
                       activeDir={data.sortDir}
@@ -513,6 +309,7 @@ export default async function VehiclesPage({
                 </TableBody>
               </Table>
               <Pagination
+                basePath="/vehicles"
                 total={data.total}
                 skip={data.skip}
                 take={data.take}

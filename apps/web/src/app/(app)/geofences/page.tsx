@@ -2,7 +2,10 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { NepaliDate } from "@/components/nepali-date";
+import { Breadcrumb } from "@/components/ui/breadcrumb";
 import { Button } from "@/components/ui/button";
+import { Pagination } from "@/components/ui/pagination";
+import { SortableHeader } from "@/components/ui/sortable-header";
 import {
   Table,
   TableBody,
@@ -73,195 +76,6 @@ interface CustomersListResponse {
 }
 
 const DEFAULT_PAGE_SIZE = 20;
-
-// Build the link for a pagination control. Filter and sort values are
-// preserved; only `skip` changes. Omit the key at page 0 so the canonical
-// /geofences URL stays clean.
-function paginationParams(searchParams: URLSearchParams, nextSkip: number): string {
-  const next = new URLSearchParams(searchParams);
-  if (nextSkip === 0) {
-    next.delete("skip");
-  } else {
-    next.set("skip", String(nextSkip));
-  }
-  const qs = next.toString();
-  return qs ? `?${qs}` : "";
-}
-
-// Build the link for a sortable column header. Toggles dir on the active
-// column, else sets the new column desc. Same convention as the other list
-// pages.
-function sortParams(
-  searchParams: URLSearchParams,
-  column: SortColumn,
-  activeColumn: SortColumn,
-  activeDir: SortDir,
-): string {
-  const next = new URLSearchParams(searchParams);
-  if (column === activeColumn) {
-    next.set("sortDir", activeDir === "asc" ? "desc" : "asc");
-    next.set("sortBy", column);
-  } else {
-    next.set("sortBy", column);
-    next.set("sortDir", "desc");
-  }
-  next.delete("skip");
-  const qs = next.toString();
-  return qs ? `?${qs}` : "";
-}
-
-function SortArrow({ direction }: { direction: SortDir }): React.ReactElement {
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.75"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      className="ml-1 inline size-3 align-[-1px]"
-    >
-      {direction === "asc" ? <path d="m18 15-6-6-6 6" /> : <path d="m6 9 6 6 6-6" />}
-    </svg>
-  );
-}
-
-interface SortableHeaderProps {
-  column: SortColumn;
-  activeColumn: SortColumn;
-  activeDir: SortDir;
-  searchParams: URLSearchParams;
-  className?: string;
-  children: React.ReactNode;
-}
-
-function SortableHeader({
-  column,
-  activeColumn,
-  activeDir,
-  searchParams,
-  className,
-  children,
-}: SortableHeaderProps): React.ReactElement {
-  const isActive = column === activeColumn;
-  const href = `/geofences${sortParams(searchParams, column, activeColumn, activeDir)}`;
-  const ariaSort: "ascending" | "descending" | "none" = isActive
-    ? activeDir === "asc"
-      ? "ascending"
-      : "descending"
-    : "none";
-  return (
-    <TableHead aria-sort={ariaSort} className={className}>
-      <Link
-        href={href}
-        className="hover:text-text-primary focus-visible:outline-border-focus inline-flex items-center focus-visible:outline-2 focus-visible:outline-offset-2"
-      >
-        {children}
-        {isActive ? <SortArrow direction={activeDir} /> : null}
-      </Link>
-    </TableHead>
-  );
-}
-
-interface PaginationProps {
-  total: number;
-  skip: number;
-  take: number;
-  searchParams: URLSearchParams;
-}
-
-function Pagination({ total, skip, take, searchParams }: PaginationProps): React.ReactElement {
-  const safeTake = Math.max(take, 1);
-  const pageCount = Math.max(1, Math.ceil(total / safeTake));
-  const currentPage = Math.floor(skip / safeTake) + 1;
-  const fromRow = total === 0 ? 0 : skip + 1;
-  const toRow = Math.min(skip + safeTake, total);
-
-  const pages: (number | "ellipsis")[] = [];
-  if (pageCount <= 7) {
-    for (let i = 1; i <= pageCount; i++) pages.push(i);
-  } else {
-    const window = new Set<number>([1, pageCount, currentPage - 1, currentPage, currentPage + 1]);
-    let last = 0;
-    for (let i = 1; i <= pageCount; i++) {
-      if (window.has(i)) {
-        if (i - last > 1) pages.push("ellipsis");
-        pages.push(i);
-        last = i;
-      }
-    }
-  }
-
-  const prevDisabled = currentPage <= 1;
-  const nextDisabled = currentPage >= pageCount;
-  const prevHref = `/geofences${paginationParams(searchParams, Math.max(0, skip - safeTake))}`;
-  const nextHref = `/geofences${paginationParams(searchParams, skip + safeTake)}`;
-
-  return (
-    <nav
-      aria-label="Pagination"
-      className="border-border-subtle flex items-center justify-between border-t px-3 py-2 text-sm"
-    >
-      <p className="text-text-muted">
-        {total === 0 ? "No results." : `Showing ${fromRow}–${toRow} of ${total}.`}
-      </p>
-      <div className="flex items-center gap-1">
-        {prevDisabled ? (
-          <Button variant="ghost" size="sm" disabled>
-            Previous
-          </Button>
-        ) : (
-          <Button asChild variant="ghost" size="sm">
-            <Link href={prevHref} rel="prev">
-              Previous
-            </Link>
-          </Button>
-        )}
-        {pages.map((p, idx) =>
-          p === "ellipsis" ? (
-            <span
-              key={`ellipsis-${idx}`}
-              aria-hidden="true"
-              className="text-text-muted px-2 select-none"
-            >
-              …
-            </span>
-          ) : p === currentPage ? (
-            <Button
-              key={p}
-              variant="outline"
-              size="sm"
-              aria-current="page"
-              className="tabular-nums"
-              disabled
-            >
-              {p}
-            </Button>
-          ) : (
-            <Button key={p} asChild variant="ghost" size="sm" className="tabular-nums">
-              <Link href={`/geofences${paginationParams(searchParams, (p - 1) * safeTake)}`}>
-                {p}
-              </Link>
-            </Button>
-          ),
-        )}
-        {nextDisabled ? (
-          <Button variant="ghost" size="sm" disabled>
-            Next
-          </Button>
-        ) : (
-          <Button asChild variant="ghost" size="sm">
-            <Link href={nextHref} rel="next">
-              Next
-            </Link>
-          </Button>
-        )}
-      </div>
-    </nav>
-  );
-}
 
 interface GeofencesPageProps {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
@@ -350,13 +164,7 @@ export default async function GeofencesPage({
       <div className="mx-auto max-w-6xl space-y-6 px-8 py-8">
         <header className="flex items-end justify-between gap-4">
           <div className="space-y-1">
-            <nav aria-label="Breadcrumb" className="text-text-muted text-sm">
-              <Link href="/" className="hover:text-text-primary">
-                FleetCo
-              </Link>
-              <span aria-hidden="true"> › </span>
-              <span className="text-text-secondary">Geofences</span>
-            </nav>
+            <Breadcrumb items={[{ label: "FleetCo", href: "/" }, { label: "Geofences" }]} />
             <h1 className="text-text-primary text-2xl font-semibold">Geofences</h1>
             <p className="text-text-muted text-sm">
               {data.total === 0
@@ -398,6 +206,7 @@ export default async function GeofencesPage({
                 <TableHeader>
                   <TableRow>
                     <SortableHeader
+                      basePath="/geofences"
                       column="name"
                       activeColumn={data.sortBy}
                       activeDir={data.sortDir}
@@ -406,6 +215,7 @@ export default async function GeofencesPage({
                       Name
                     </SortableHeader>
                     <SortableHeader
+                      basePath="/geofences"
                       column="type"
                       activeColumn={data.sortBy}
                       activeDir={data.sortDir}
@@ -415,6 +225,7 @@ export default async function GeofencesPage({
                     </SortableHeader>
                     <TableHead>Customer</TableHead>
                     <SortableHeader
+                      basePath="/geofences"
                       column="createdAt"
                       activeColumn={data.sortBy}
                       activeDir={data.sortDir}
@@ -453,6 +264,7 @@ export default async function GeofencesPage({
                 </TableBody>
               </Table>
               <Pagination
+                basePath="/geofences"
                 total={data.total}
                 skip={data.skip}
                 take={data.take}
