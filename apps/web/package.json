@@ -17,6 +17,7 @@
     "better-auth": "~1.6.11",
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.1.0",
+    "cmdk": "^1.1.1",
     "leaflet": "^1.9.4",
     "lucide-react": "^1.17.0",
     "nepali-date-converter": "3.4.0",

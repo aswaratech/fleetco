@@ -3,8 +3,16 @@
 import * as React from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { ChevronsUpDown, LogOut, PanelLeft } from "lucide-react";
+import { ChevronsUpDown, LogOut, PanelLeft, Search } from "lucide-react";
 
+import {
+  CommandDialog,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { authClient } from "@/lib/auth-client";
 import { HOME, navForRole, type NavItem, type Role } from "@/lib/nav";
@@ -20,9 +28,11 @@ import { cn } from "@/lib/utils";
 // client code. The page renders its own <main> in the content slot, so there is
 // exactly one <main> per document.
 //
-// Scope notes: the ⌘K command-palette affordance and the mobile Sheet drawer are
-// deferred (cmdk is the separate T7 dependency ticket; Sheet is still
-// contract-only). The shell is desktop-first with the documented collapse.
+// Scope notes: the ⌘K command palette is wired here — a global ⌘/Ctrl+K listener
+// plus the top-bar "Search…" affordance, both opening a cmdk palette that lists
+// navForRole(role) and router.push-es on select (navigation-only; ADR-0040). The
+// mobile Sheet drawer is still deferred (contract-only); the shell is desktop-first
+// with the documented collapse.
 
 interface AppShellProps {
   email: string;
@@ -80,11 +90,26 @@ export function AppShell({ email, name, role, children }: AppShellProps): React.
   const router = useRouter();
   const [collapsed, setCollapsed] = React.useState(false);
   const [signingOut, setSigningOut] = React.useState(false);
+  const [paletteOpen, setPaletteOpen] = React.useState(false);
 
   // Restore the persisted collapse preference after mount. Initial render stays
   // expanded so server and first client render agree (no hydration mismatch).
   React.useEffect(() => {
     setCollapsed(window.localStorage.getItem(COLLAPSE_STORAGE_KEY) === "1");
+  }, []);
+
+  // ⌘K (or Ctrl+K) toggles the command palette from anywhere. preventDefault stops
+  // the browser's own ⌘K. Esc-to-close is handled by the Radix Dialog inside
+  // <CommandDialog>; selecting an item closes it and navigates.
+  React.useEffect(() => {
+    function onKeyDown(event: KeyboardEvent): void {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setPaletteOpen((open) => !open);
+      }
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
   }, []);
 
   function toggleCollapsed(): void {
@@ -179,6 +204,24 @@ export function AppShell({ email, name, role, children }: AppShellProps): React.
             <PanelLeft className="size-5" strokeWidth={1.5} aria-hidden="true" />
           </button>
 
+          <button
+            type="button"
+            onClick={() => setPaletteOpen(true)}
+            aria-label="Open command palette"
+            className="border-border-strong bg-surface-canvas text-text-muted hover:bg-surface-muted hidden h-9 w-[280px] items-center gap-2 rounded border px-2.5 text-sm sm:flex"
+          >
+            <Search className="size-4 shrink-0" strokeWidth={1.5} aria-hidden="true" />
+            <span>Search…</span>
+            <span className="ml-auto inline-flex gap-0.5">
+              <kbd className="border-border-subtle bg-surface-muted text-text-muted rounded border px-[5px] py-[3px] text-[11px] leading-none">
+                ⌘
+              </kbd>
+              <kbd className="border-border-subtle bg-surface-muted text-text-muted rounded border px-[5px] py-[3px] text-[11px] leading-none">
+                K
+              </kbd>
+            </span>
+          </button>
+
           <div className="flex-1" />
 
           <Popover>
@@ -219,6 +262,38 @@ export function AppShell({ email, name, role, children }: AppShellProps): React.
         </header>
 
         {children}
+
+        <CommandDialog open={paletteOpen} onOpenChange={setPaletteOpen}>
+          <CommandInput placeholder="Go to…" />
+          <CommandList>
+            <CommandEmpty>No results.</CommandEmpty>
+            {groups.map((group) => (
+              <CommandGroup key={group.id} heading={group.label}>
+                {group.items.map((item) => {
+                  const Icon = item.icon;
+                  return (
+                    <CommandItem
+                      key={item.href}
+                      value={item.label}
+                      onSelect={() => {
+                        setPaletteOpen(false);
+                        router.push(item.href);
+                      }}
+                    >
+                      <Icon className="size-4 shrink-0" strokeWidth={1.5} aria-hidden="true" />
+                      {item.label}
+                    </CommandItem>
+                  );
+                })}
+              </CommandGroup>
+            ))}
+          </CommandList>
+          <div className="border-border-subtle text-text-muted flex gap-4 border-t px-3.5 py-2 text-[11px]">
+            <span>↑↓ to navigate</span>
+            <span>↵ to open</span>
+            <span>esc to close</span>
+          </div>
+        </CommandDialog>
       </div>
     </div>
   );
