@@ -11,23 +11,31 @@ import Link from "next/link";
 // the pages spell it out today (no magic implicit first item).
 
 export interface Crumb {
-  label: string;
+  /** Crumb text — a string, or a node (e.g. a `<NepaliDate/>`) for a rich label. */
+  label: React.ReactNode;
   /** Omit on the final (current) crumb — it renders as non-linked text. */
   href?: string;
+  /** Extra classes for this crumb's text, e.g. "font-mono" for a plate or id. */
+  className?: string;
 }
 
 export function Breadcrumb({ items }: { items: Crumb[] }): React.ReactElement {
   return (
     <nav aria-label="Breadcrumb" className="text-text-muted text-sm">
       {items.map((item, index) => (
-        <React.Fragment key={`${item.label}-${index}`}>
+        <React.Fragment key={item.href ?? "current"}>
           {index > 0 ? <span aria-hidden="true"> › </span> : null}
           {item.href ? (
-            <Link href={item.href} className="hover:text-text-primary">
+            <Link
+              href={item.href}
+              className={["hover:text-text-primary", item.className].filter(Boolean).join(" ")}
+            >
               {item.label}
             </Link>
           ) : (
-            <span className="text-text-secondary">{item.label}</span>
+            <span className={["text-text-secondary", item.className].filter(Boolean).join(" ")}>
+              {item.label}
+            </span>
           )}
         </React.Fragment>
       ))}
