@@ -3,7 +3,9 @@ import { notFound, redirect } from "next/navigation";
 
 import { NepaliDate } from "@/components/nepali-date";
 import { Badge } from "@/components/ui/badge";
+import { Breadcrumb } from "@/components/ui/breadcrumb";
 import { Button } from "@/components/ui/button";
+import { DetailRow } from "@/components/ui/detail-row";
 import {
   Table,
   TableBody,
@@ -120,17 +122,13 @@ export default async function InvoiceDetailPage({
       <div className="mx-auto max-w-3xl space-y-6 px-8 py-8">
         <header className="flex flex-wrap items-end justify-between gap-4">
           <div className="space-y-1">
-            <nav aria-label="Breadcrumb" className="text-text-muted text-sm">
-              <Link href="/" className="hover:text-text-primary">
-                FleetCo
-              </Link>
-              <span aria-hidden="true"> › </span>
-              <Link href="/invoices" className="hover:text-text-primary">
-                Invoices
-              </Link>
-              <span aria-hidden="true"> › </span>
-              <span className="text-text-secondary font-mono">{heading}</span>
-            </nav>
+            <Breadcrumb
+              items={[
+                { label: "FleetCo", href: "/" },
+                { label: "Invoices", href: "/invoices" },
+                { label: heading, className: "font-mono" },
+              ]}
+            />
             <h1 className="text-text-primary font-mono text-2xl font-semibold">{heading}</h1>
             <p className="text-text-muted flex flex-wrap items-center gap-2 text-sm">
               <span>{invoice.customer.name}</span>
@@ -306,25 +304,5 @@ export default async function InvoiceDetailPage({
         </section>
       </div>
     </main>
-  );
-}
-
-interface DetailRowProps {
-  label: string;
-  value: React.ReactNode;
-  mono?: boolean;
-  className?: string;
-}
-
-function DetailRow({ label, value, mono, className }: DetailRowProps): React.ReactElement {
-  const valueClass = ["text-text-primary text-sm", mono ? "font-mono" : ""]
-    .filter(Boolean)
-    .join(" ");
-  const wrapperClass = ["space-y-1", className].filter(Boolean).join(" ");
-  return (
-    <div className={wrapperClass}>
-      <dt className="text-text-muted text-xs font-medium tracking-wide uppercase">{label}</dt>
-      <dd className={valueClass}>{value}</dd>
-    </div>
   );
 }

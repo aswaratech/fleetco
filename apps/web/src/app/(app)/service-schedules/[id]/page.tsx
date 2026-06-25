@@ -3,7 +3,9 @@ import { notFound, redirect } from "next/navigation";
 
 import { NepaliDate } from "@/components/nepali-date";
 import { Badge } from "@/components/ui/badge";
+import { Breadcrumb } from "@/components/ui/breadcrumb";
 import { Button } from "@/components/ui/button";
+import { DetailRow } from "@/components/ui/detail-row";
 import {
   Table,
   TableBody,
@@ -152,17 +154,13 @@ export default async function ServiceScheduleDetailPage({
       <div className="mx-auto max-w-3xl space-y-6 px-8 py-8">
         <header className="flex items-end justify-between gap-4">
           <div className="space-y-1">
-            <nav aria-label="Breadcrumb" className="text-text-muted text-sm">
-              <Link href="/" className="hover:text-text-primary">
-                FleetCo
-              </Link>
-              <span aria-hidden="true"> › </span>
-              <Link href="/service-schedules" className="hover:text-text-primary">
-                Service schedules
-              </Link>
-              <span aria-hidden="true"> › </span>
-              <span className="text-text-secondary">{schedule.name}</span>
-            </nav>
+            <Breadcrumb
+              items={[
+                { label: "FleetCo", href: "/" },
+                { label: "Service schedules", href: "/service-schedules" },
+                { label: schedule.name },
+              ]}
+            />
             <div className="flex flex-wrap items-center gap-3">
               <h1 className="text-text-primary text-2xl font-semibold">{schedule.name}</h1>
               {statusBadge}
@@ -281,33 +279,5 @@ export default async function ServiceScheduleDetailPage({
         </section>
       </div>
     </main>
-  );
-}
-
-interface DetailRowProps {
-  label: string;
-  value: React.ReactNode;
-  mono?: boolean;
-  numeric?: boolean;
-  className?: string;
-}
-
-function DetailRow({ label, value, mono, numeric, className }: DetailRowProps): React.ReactElement {
-  // Definition-list row — DESIGN.md §"Data display": mono for identifiers,
-  // tabular-nums for numeric, default sans otherwise. Mirror of the Geofences /
-  // Jobs detail-page DetailRow.
-  const valueClass = [
-    "text-text-primary text-sm",
-    mono ? "font-mono" : "",
-    numeric ? "tabular-nums" : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
-  const wrapperClass = ["space-y-1", className].filter(Boolean).join(" ");
-  return (
-    <div className={wrapperClass}>
-      <dt className="text-text-muted text-xs font-medium tracking-wide uppercase">{label}</dt>
-      <dd className={valueClass}>{value}</dd>
-    </div>
   );
 }

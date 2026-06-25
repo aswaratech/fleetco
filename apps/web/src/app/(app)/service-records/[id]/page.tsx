@@ -2,7 +2,9 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
 import { NepaliDate } from "@/components/nepali-date";
+import { Breadcrumb } from "@/components/ui/breadcrumb";
 import { Button } from "@/components/ui/button";
+import { DetailRow } from "@/components/ui/detail-row";
 import { apiFetch, ApiError } from "@/lib/api";
 import { formatNepaliDate } from "@/lib/nepali-date";
 import { formatNpr } from "@/lib/money";
@@ -107,19 +109,13 @@ export default async function ServiceRecordDetailPage({
       <div className="mx-auto max-w-3xl space-y-6 px-8 py-8">
         <header className="flex items-end justify-between gap-4">
           <div className="space-y-1">
-            <nav aria-label="Breadcrumb" className="text-text-muted text-sm">
-              <Link href="/" className="hover:text-text-primary">
-                FleetCo
-              </Link>
-              <span aria-hidden="true"> › </span>
-              <Link href="/service-records" className="hover:text-text-primary">
-                Service history
-              </Link>
-              <span aria-hidden="true"> › </span>
-              <span className="text-text-secondary">
-                {formatNepaliDate(record.performedAt, { format: "bs" })}
-              </span>
-            </nav>
+            <Breadcrumb
+              items={[
+                { label: "FleetCo", href: "/" },
+                { label: "Service history", href: "/service-records" },
+                { label: formatNepaliDate(record.performedAt, { format: "bs" }) },
+              ]}
+            />
             <h1 className="text-text-primary text-2xl font-semibold">
               Service on <NepaliDate iso={record.performedAt} format="bs" />
             </h1>
@@ -227,29 +223,4 @@ function rethrow401(error: unknown): null {
     throw error;
   }
   return null;
-}
-
-interface DetailRowProps {
-  label: string;
-  value: React.ReactNode;
-  mono?: boolean;
-  numeric?: boolean;
-  className?: string;
-}
-
-function DetailRow({ label, value, mono, numeric, className }: DetailRowProps): React.ReactElement {
-  const valueClass = [
-    "text-text-primary text-sm",
-    mono ? "font-mono" : "",
-    numeric ? "tabular-nums" : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
-  const wrapperClass = ["space-y-1", className].filter(Boolean).join(" ");
-  return (
-    <div className={wrapperClass}>
-      <dt className="text-text-muted text-xs font-medium tracking-wide uppercase">{label}</dt>
-      <dd className={valueClass}>{value}</dd>
-    </div>
-  );
 }

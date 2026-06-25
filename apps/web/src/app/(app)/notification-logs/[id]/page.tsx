@@ -1,8 +1,9 @@
-import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
 import { NepaliDate } from "@/components/nepali-date";
 import { Badge } from "@/components/ui/badge";
+import { Breadcrumb } from "@/components/ui/breadcrumb";
+import { DetailRow } from "@/components/ui/detail-row";
 import { apiFetch, ApiError } from "@/lib/api";
 import {
   reminderKindLabel,
@@ -67,19 +68,19 @@ export default async function NotificationLogDetailPage({
     <main className="bg-surface-canvas min-h-svh">
       <div className="mx-auto max-w-3xl space-y-6 px-8 py-8">
         <header className="space-y-1">
-          <nav aria-label="Breadcrumb" className="text-text-muted text-sm">
-            <Link href="/" className="hover:text-text-primary">
-              FleetCo
-            </Link>
-            <span aria-hidden="true"> › </span>
-            <Link href="/notification-logs" className="hover:text-text-primary">
-              Reminder history
-            </Link>
-            <span aria-hidden="true"> › </span>
-            <span className="text-text-secondary">
-              {subjectTypeLabel(log.subjectType)} · {reminderKindLabel(log.reminderKind)}
-            </span>
-          </nav>
+          <Breadcrumb
+            items={[
+              { label: "FleetCo", href: "/" },
+              { label: "Reminder history", href: "/notification-logs" },
+              {
+                label: (
+                  <>
+                    {subjectTypeLabel(log.subjectType)} · {reminderKindLabel(log.reminderKind)}
+                  </>
+                ),
+              },
+            ]}
+          />
           <h1 className="text-text-primary flex items-center gap-3 text-2xl font-semibold">
             {subjectTypeLabel(log.subjectType)} · {reminderKindLabel(log.reminderKind)}
             <Badge variant={stateBadgeVariant(log.state)}>{stateLabel(log.state)}</Badge>
@@ -97,13 +98,13 @@ export default async function NotificationLogDetailPage({
               label="State"
               value={<Badge variant={stateBadgeVariant(log.state)}>{stateLabel(log.state)}</Badge>}
             />
-            <DetailRow label="Subject id" value={log.subjectId} mono />
+            <DetailRow label="Subject id" value={log.subjectId} mono breakAll />
             {/* The due anchor (occurrenceKey) is the dedup occurrence — an expiry
                 ISO date for compliance, a meter value or date for a service
                 schedule — so it is rendered as raw text, never date-coerced
                 (a meter value is not a date). */}
-            <DetailRow label="Due anchor" value={log.occurrenceKey} mono />
-            <DetailRow label="Recipient" value={log.recipient} mono />
+            <DetailRow label="Due anchor" value={log.occurrenceKey} mono breakAll />
+            <DetailRow label="Recipient" value={log.recipient} mono breakAll />
             <DetailRow
               label="Sent"
               value={log.sentAt ? <NepaliDate iso={log.sentAt} format="both" /> : "—"}
@@ -113,29 +114,12 @@ export default async function NotificationLogDetailPage({
               label="Provider message id"
               value={log.providerMessageId ?? "—"}
               mono={Boolean(log.providerMessageId)}
+              breakAll={Boolean(log.providerMessageId)}
             />
             <DetailRow label="Recorded at" value={formatTimestamp(log.createdAt)} />
           </dl>
         </section>
       </div>
     </main>
-  );
-}
-
-interface DetailRowProps {
-  label: string;
-  value: React.ReactNode;
-  mono?: boolean;
-}
-
-function DetailRow({ label, value, mono }: DetailRowProps): React.ReactElement {
-  const valueClass = ["text-text-primary text-sm", mono ? "font-mono break-all" : ""]
-    .filter(Boolean)
-    .join(" ");
-  return (
-    <div className="space-y-1">
-      <dt className="text-text-muted text-xs font-medium uppercase tracking-wide">{label}</dt>
-      <dd className={valueClass}>{value}</dd>
-    </div>
   );
 }

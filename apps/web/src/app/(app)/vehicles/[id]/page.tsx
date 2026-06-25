@@ -3,7 +3,9 @@ import { notFound, redirect } from "next/navigation";
 
 import { NepaliDate } from "@/components/nepali-date";
 import { Badge } from "@/components/ui/badge";
+import { Breadcrumb } from "@/components/ui/breadcrumb";
 import { Button } from "@/components/ui/button";
+import { DetailRow } from "@/components/ui/detail-row";
 import {
   Table,
   TableBody,
@@ -304,17 +306,13 @@ export default async function VehicleDetailPage({
       <div className="mx-auto max-w-3xl space-y-6 px-8 py-8">
         <header className="flex items-end justify-between gap-4">
           <div className="space-y-1">
-            <nav aria-label="Breadcrumb" className="text-text-muted text-sm">
-              <Link href="/" className="hover:text-text-primary">
-                FleetCo
-              </Link>
-              <span aria-hidden="true"> › </span>
-              <Link href="/vehicles" className="hover:text-text-primary">
-                Vehicles
-              </Link>
-              <span aria-hidden="true"> › </span>
-              <span className="text-text-secondary font-mono">{vehicle.registrationNumber}</span>
-            </nav>
+            <Breadcrumb
+              items={[
+                { label: "FleetCo", href: "/" },
+                { label: "Vehicles", href: "/vehicles" },
+                { label: vehicle.registrationNumber, className: "font-mono" },
+              ]}
+            />
             <h1 className="text-text-primary font-mono text-2xl font-semibold">
               {vehicle.registrationNumber}
             </h1>
@@ -566,35 +564,5 @@ export default async function VehicleDetailPage({
         </section>
       </div>
     </main>
-  );
-}
-
-interface DetailRowProps {
-  label: string;
-  // Accept ReactNode so callers can pass a <Link> (e.g., the
-  // iter-12 "Most recent driver" cell). For the common case the
-  // value is still a plain string.
-  value: React.ReactNode;
-  mono?: boolean;
-  numeric?: boolean;
-}
-
-function DetailRow({ label, value, mono, numeric }: DetailRowProps): React.ReactElement {
-  // Definition-list row — DESIGN.md §"Data display": Latin numerals,
-  // tabular-nums for numeric values, mono for identifiers (registration
-  // number), default sans for everything else. Label sits in
-  // color.text.muted; value in color.text.primary.
-  const valueClass = [
-    "text-text-primary text-sm",
-    mono ? "font-mono" : "",
-    numeric ? "tabular-nums" : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
-  return (
-    <div className="space-y-1">
-      <dt className="text-text-muted text-xs font-medium uppercase tracking-wide">{label}</dt>
-      <dd className={valueClass}>{value}</dd>
-    </div>
   );
 }
