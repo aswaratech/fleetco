@@ -1,7 +1,9 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
+import { Breadcrumb } from "@/components/ui/breadcrumb";
 import { Button } from "@/components/ui/button";
+import { DetailRow } from "@/components/ui/detail-row";
 import { apiFetch, ApiError } from "@/lib/api";
 import { GEOFENCE_TYPE_LABELS, wktToVertexInput } from "@/lib/geofences-schema";
 import { getServerSession } from "@/lib/session";
@@ -92,17 +94,13 @@ export default async function GeofenceDetailPage({
       <div className="mx-auto max-w-3xl space-y-6 px-8 py-8">
         <header className="flex items-end justify-between gap-4">
           <div className="space-y-1">
-            <nav aria-label="Breadcrumb" className="text-text-muted text-sm">
-              <Link href="/" className="hover:text-text-primary">
-                FleetCo
-              </Link>
-              <span aria-hidden="true"> › </span>
-              <Link href="/geofences" className="hover:text-text-primary">
-                Geofences
-              </Link>
-              <span aria-hidden="true"> › </span>
-              <span className="text-text-secondary">{geofence.name}</span>
-            </nav>
+            <Breadcrumb
+              items={[
+                { label: "FleetCo", href: "/" },
+                { label: "Geofences", href: "/geofences" },
+                { label: geofence.name },
+              ]}
+            />
             <h1 className="text-text-primary text-2xl font-semibold">{geofence.name}</h1>
             <p className="text-text-muted text-sm">{typeLabel}</p>
           </div>
@@ -183,34 +181,5 @@ export default async function GeofenceDetailPage({
         </section>
       </div>
     </main>
-  );
-}
-
-interface DetailRowProps {
-  label: string;
-  value: React.ReactNode;
-  mono?: boolean;
-  numeric?: boolean;
-  className?: string;
-}
-
-function DetailRow({ label, value, mono, numeric, className }: DetailRowProps): React.ReactElement {
-  // Definition-list row — DESIGN.md §"Data display": mono for identifiers,
-  // tabular-nums for numeric, default sans otherwise. Accepts a ReactNode so
-  // the customer name can be a <Link>. Mirror of the Jobs / Customers
-  // detail-page DetailRow.
-  const valueClass = [
-    "text-text-primary text-sm",
-    mono ? "font-mono" : "",
-    numeric ? "tabular-nums" : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
-  const wrapperClass = ["space-y-1", className].filter(Boolean).join(" ");
-  return (
-    <div className={wrapperClass}>
-      <dt className="text-text-muted text-xs font-medium tracking-wide uppercase">{label}</dt>
-      <dd className={valueClass}>{value}</dd>
-    </div>
   );
 }

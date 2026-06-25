@@ -2,7 +2,9 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
 import { NepaliDate } from "@/components/nepali-date";
+import { Breadcrumb } from "@/components/ui/breadcrumb";
 import { Button } from "@/components/ui/button";
+import { DetailRow } from "@/components/ui/detail-row";
 import { apiFetch, ApiError } from "@/lib/api";
 import { CUSTOMER_STATUS_LABELS } from "@/lib/customers-schema";
 import { getServerSession } from "@/lib/session";
@@ -67,17 +69,13 @@ export default async function JobDetailPage({
       <div className="mx-auto max-w-3xl space-y-6 px-8 py-8">
         <header className="flex items-end justify-between gap-4">
           <div className="space-y-1">
-            <nav aria-label="Breadcrumb" className="text-text-muted text-sm">
-              <Link href="/" className="hover:text-text-primary">
-                FleetCo
-              </Link>
-              <span aria-hidden="true"> › </span>
-              <Link href="/jobs" className="hover:text-text-primary">
-                Jobs
-              </Link>
-              <span aria-hidden="true"> › </span>
-              <span className="text-text-secondary font-mono">{job.jobNumber}</span>
-            </nav>
+            <Breadcrumb
+              items={[
+                { label: "FleetCo", href: "/" },
+                { label: "Jobs", href: "/jobs" },
+                { label: job.jobNumber, className: "font-mono" },
+              ]}
+            />
             <h1 className="text-text-primary font-mono text-2xl font-semibold">{job.jobNumber}</h1>
             <p className="text-text-muted text-sm">
               {job.customer.name} · {statusLabel}
@@ -148,34 +146,5 @@ export default async function JobDetailPage({
         </section>
       </div>
     </main>
-  );
-}
-
-interface DetailRowProps {
-  label: string;
-  value: React.ReactNode;
-  mono?: boolean;
-  numeric?: boolean;
-  className?: string;
-}
-
-function DetailRow({ label, value, mono, numeric, className }: DetailRowProps): React.ReactElement {
-  // Definition-list row — DESIGN.md §"Data display": mono for
-  // identifiers (job number, phone), tabular-nums for numeric, default
-  // sans otherwise. Accepts a ReactNode so the customer name can be a
-  // <Link>. Mirror of the Trips / Customers detail-page DetailRow.
-  const valueClass = [
-    "text-text-primary text-sm",
-    mono ? "font-mono" : "",
-    numeric ? "tabular-nums" : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
-  const wrapperClass = ["space-y-1", className].filter(Boolean).join(" ");
-  return (
-    <div className={wrapperClass}>
-      <dt className="text-text-muted text-xs font-medium uppercase tracking-wide">{label}</dt>
-      <dd className={valueClass}>{value}</dd>
-    </div>
   );
 }

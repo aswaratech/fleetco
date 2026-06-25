@@ -2,7 +2,9 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
 import { NepaliDate } from "@/components/nepali-date";
+import { Breadcrumb } from "@/components/ui/breadcrumb";
 import { Button } from "@/components/ui/button";
+import { DetailRow } from "@/components/ui/detail-row";
 import {
   Table,
   TableBody,
@@ -171,17 +173,13 @@ export default async function DriverDetailPage({
       <div className="mx-auto max-w-3xl space-y-6 px-8 py-8">
         <header className="flex items-end justify-between gap-4">
           <div className="space-y-1">
-            <nav aria-label="Breadcrumb" className="text-text-muted text-sm">
-              <Link href="/" className="hover:text-text-primary">
-                FleetCo
-              </Link>
-              <span aria-hidden="true"> › </span>
-              <Link href="/drivers" className="hover:text-text-primary">
-                Drivers
-              </Link>
-              <span aria-hidden="true"> › </span>
-              <span className="text-text-secondary">{driver.fullName}</span>
-            </nav>
+            <Breadcrumb
+              items={[
+                { label: "FleetCo", href: "/" },
+                { label: "Drivers", href: "/drivers" },
+                { label: driver.fullName },
+              ]}
+            />
             <h1 className="text-text-primary text-2xl font-semibold">{driver.fullName}</h1>
             <p className="text-text-muted text-sm">
               {LICENSE_CLASS_LABELS[driver.licenseClass] ?? driver.licenseClass} ·{" "}
@@ -324,35 +322,5 @@ export default async function DriverDetailPage({
         </section>
       </div>
     </main>
-  );
-}
-
-interface DetailRowProps {
-  label: string;
-  // Accept ReactNode so callers can pass a <Link> (e.g., the iter-13
-  // "Most recent vehicle" cell). For the common case the value is
-  // still a plain string. Mirror of the widened iter-12 DetailRow on
-  // the vehicle detail page.
-  value: React.ReactNode;
-  mono?: boolean;
-  numeric?: boolean;
-}
-
-function DetailRow({ label, value, mono, numeric }: DetailRowProps): React.ReactElement {
-  // Definition-list row — DESIGN.md §"Data display": Latin numerals,
-  // tabular-nums for numeric values, mono for identifiers (license
-  // number, phone), default sans for everything else.
-  const valueClass = [
-    "text-text-primary text-sm",
-    mono ? "font-mono" : "",
-    numeric ? "tabular-nums" : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
-  return (
-    <div className="space-y-1">
-      <dt className="text-text-muted text-xs font-medium uppercase tracking-wide">{label}</dt>
-      <dd className={valueClass}>{value}</dd>
-    </div>
   );
 }

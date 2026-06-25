@@ -2,7 +2,9 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
 import { NepaliDate } from "@/components/nepali-date";
+import { Breadcrumb } from "@/components/ui/breadcrumb";
 import { Button } from "@/components/ui/button";
+import { DetailRow } from "@/components/ui/detail-row";
 import { apiFetch, ApiError } from "@/lib/api";
 import { formatNpr } from "@/lib/money";
 import { formatNepaliDate } from "@/lib/nepali-date";
@@ -74,19 +76,16 @@ export default async function ExpenseLogDetailPage({
       <div className="mx-auto max-w-3xl space-y-6 px-8 py-8">
         <header className="flex items-end justify-between gap-4">
           <div className="space-y-1">
-            <nav aria-label="Breadcrumb" className="text-text-muted text-sm">
-              <Link href="/" className="hover:text-text-primary">
-                FleetCo
-              </Link>
-              <span aria-hidden="true"> › </span>
-              <Link href="/expense-logs" className="hover:text-text-primary">
-                Expense logs
-              </Link>
-              <span aria-hidden="true"> › </span>
-              <span className="text-text-secondary tabular-nums">
-                <NepaliDate iso={expense.date} format="bs" />
-              </span>
-            </nav>
+            <Breadcrumb
+              items={[
+                { label: "FleetCo", href: "/" },
+                { label: "Expense logs", href: "/expense-logs" },
+                {
+                  label: <NepaliDate iso={expense.date} format="bs" />,
+                  className: "tabular-nums",
+                },
+              ]}
+            />
             <h1 className="text-text-primary text-2xl font-semibold tabular-nums">
               <NepaliDate iso={expense.date} format="bs" />
             </h1>
@@ -199,35 +198,5 @@ export default async function ExpenseLogDetailPage({
         </section>
       </div>
     </main>
-  );
-}
-
-interface DetailRowProps {
-  label: string;
-  value: React.ReactNode;
-  mono?: boolean;
-  numeric?: boolean;
-  className?: string;
-}
-
-function DetailRow({ label, value, mono, numeric, className }: DetailRowProps): React.ReactElement {
-  // Definition-list row — DESIGN.md §"Data display": mono for
-  // identifiers (vehicle registration, receipt number), tabular-nums
-  // for numeric, default sans otherwise. Accepts a ReactNode so the
-  // vehicle registration and trip link can be <Link>s. Mirror of the
-  // Fuel logs / Jobs / Trips / Customers detail-page DetailRow.
-  const valueClass = [
-    "text-text-primary text-sm",
-    mono ? "font-mono" : "",
-    numeric ? "tabular-nums" : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
-  const wrapperClass = ["space-y-1", className].filter(Boolean).join(" ");
-  return (
-    <div className={wrapperClass}>
-      <dt className="text-text-muted text-xs font-medium tracking-wide uppercase">{label}</dt>
-      <dd className={valueClass}>{value}</dd>
-    </div>
   );
 }

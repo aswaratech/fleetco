@@ -1,7 +1,9 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
+import { Breadcrumb } from "@/components/ui/breadcrumb";
 import { Button } from "@/components/ui/button";
+import { DetailRow } from "@/components/ui/detail-row";
 import { apiFetch, ApiError } from "@/lib/api";
 import { CUSTOMER_STATUS_LABELS } from "@/lib/customers-schema";
 import { getServerSession } from "@/lib/session";
@@ -75,17 +77,13 @@ export default async function CustomerDetailPage({
       <div className="mx-auto max-w-3xl space-y-6 px-8 py-8">
         <header className="flex items-end justify-between gap-4">
           <div className="space-y-1">
-            <nav aria-label="Breadcrumb" className="text-text-muted text-sm">
-              <Link href="/" className="hover:text-text-primary">
-                FleetCo
-              </Link>
-              <span aria-hidden="true"> › </span>
-              <Link href="/customers" className="hover:text-text-primary">
-                Customers
-              </Link>
-              <span aria-hidden="true"> › </span>
-              <span className="text-text-secondary">{customer.name}</span>
-            </nav>
+            <Breadcrumb
+              items={[
+                { label: "FleetCo", href: "/" },
+                { label: "Customers", href: "/customers" },
+                { label: customer.name },
+              ]}
+            />
             <h1 className="text-text-primary text-2xl font-semibold">{customer.name}</h1>
             <p className="text-text-muted text-sm">
               {CUSTOMER_STATUS_LABELS[customer.status] ?? customer.status}
@@ -126,35 +124,5 @@ export default async function CustomerDetailPage({
         </section>
       </div>
     </main>
-  );
-}
-
-interface DetailRowProps {
-  label: string;
-  // Accept ReactNode so a future cross-slice surface can pass a <Link>
-  // (e.g., a "Jobs by this customer" link when the Jobs slice lands).
-  // For the iter-15 read path every value is a plain string. Mirror of
-  // the widened Drivers / Vehicles detail-page DetailRow.
-  value: React.ReactNode;
-  mono?: boolean;
-  numeric?: boolean;
-}
-
-function DetailRow({ label, value, mono, numeric }: DetailRowProps): React.ReactElement {
-  // Definition-list row — DESIGN.md §"Data display": Latin numerals,
-  // tabular-nums for numeric values, mono for identifiers (phone,
-  // email, PAN), default sans for everything else.
-  const valueClass = [
-    "text-text-primary text-sm",
-    mono ? "font-mono" : "",
-    numeric ? "tabular-nums" : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
-  return (
-    <div className="space-y-1">
-      <dt className="text-text-muted text-xs font-medium uppercase tracking-wide">{label}</dt>
-      <dd className={valueClass}>{value}</dd>
-    </div>
   );
 }
