@@ -16,16 +16,17 @@ export const LOG_REDACT_PATHS: readonly string[] = [
   "*.token",
   "*.secret",
   "*.email",
-  "*.driverName",
+  "*.fullName",
   "*.licenseNumber",
-  "*.phoneNumber",
+  "*.phone",
   "*.contactPerson",
+  "*.dateOfBirth",
   // GPS telematics location keys (ADR-0029 commitment 12 / ADR-0027
   // commitment 5). The GpsPing coordinate + movement fields are Tier 5 (a raw
   // location trail) and MUST NOT appear in logs. These land ATOMICALLY with the
   // GpsPing schema (same PR) so a ping is never loggable before its keys are
   // denylisted. The `*.<key>` wildcard matches the key one level under a
-  // wrapper object (same form as *.driverName above).
+  // wrapper object (same form as *.fullName above).
   //
   // KEEP IN SYNC: the ADR-0026 span-scrub denylist is the OTHER egress layer
   // these same keys must be scrubbed from. That seam EXISTS —
