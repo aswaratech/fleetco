@@ -36,6 +36,9 @@
       "esbuild",
       "prisma",
       "sharp"
-    ]
+    ],
+    "overrides": {
+      "multer": "^2.2.0"
+    }
   }
 }
