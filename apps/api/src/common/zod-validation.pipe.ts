@@ -18,6 +18,22 @@ import { ZodError, type ZodType } from "zod";
 // controller argument; it integrates cleanly with @Body() / @Query()
 // decorators and is locally scoped per route rather than globally
 // registered.
+/**
+ * Compact a ZodError's issues into the house "field: explanation; …" string.
+ * The convention is documented in docs/runbook/api-error-mapping.md so the
+ * web client's apps/web/src/lib/api.ts can parse the response body's
+ * `message` field as a single string. Exported (ADR-0043 A4) so the agent
+ * tool registry can surface module-schema re-validation failures with the
+ * exact same 400 shape this pipe produces.
+ */
+export function formatZodError(error: ZodError): string {
+  const messages = error.issues.map((issue) => {
+    const path = issue.path.length > 0 ? issue.path.join(".") : "body";
+    return `${path}: ${issue.message}`;
+  });
+  return messages.join("; ");
+}
+
 export class ZodValidationPipe<T> implements PipeTransform<unknown, T> {
   constructor(private readonly schema: ZodType<T>) {}
 
@@ -26,19 +42,10 @@ export class ZodValidationPipe<T> implements PipeTransform<unknown, T> {
       return this.schema.parse(value);
     } catch (error) {
       if (error instanceof ZodError) {
-        // Compact each issue into "field: explanation" and join with
-        // "; ". The convention is documented in
-        // docs/runbook/api-error-mapping.md so the web client's
-        // apps/web/src/lib/api.ts can parse the response body's
-        // `message` field as a single string.
-        const messages = error.issues.map((issue) => {
-          const path = issue.path.length > 0 ? issue.path.join(".") : "body";
-          return `${path}: ${issue.message}`;
-        });
         throw new BadRequestException({
           statusCode: 400,
           error: "Bad Request",
-          message: messages.join("; "),
+          message: formatZodError(error),
         });
       }
       // Surface non-Zod errors as-is. This path should never fire in
