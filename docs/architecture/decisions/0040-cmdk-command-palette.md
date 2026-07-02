@@ -1,8 +1,13 @@
 # ADR-0040: `cmdk` for the ⌘K command palette — adopt one new top-level dependency, with the modal built on the installed Radix Dialog
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-25
 - **Decider:** Product owner (CEO)
+- **Accepted:** 2026-06-25
+
+## Acceptance
+
+Accepted by the product owner (CEO) on 2026-06-25 via ratify-by-merge of the T7 PR (#168, `feat/cmdk-command-palette`, merged 2026-06-25) — the Phase-1 design-first governance's acceptance mechanism (the PR body carried this ADR as the new-dependency proposal). The one owner-level pick is ratified as proposed: adopt **`cmdk@^1.1.1`** as the single new top-level dependency for the ⌘K command palette, with the modal built on the already-installed `radix-ui` Dialog (no separate dialog dependency).
 
 ## Proposal
 
