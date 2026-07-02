@@ -50,6 +50,22 @@ export const LOG_REDACT_PATHS: readonly string[] = [
   "*.location",
   "*.point",
   "*.position",
+  // AI-agent transcript keys (ADR-0043 commitments 5/6, ticket A2). Agent chat
+  // transcripts are Tier 2 — the user's typed text, the model's replies, tool
+  // arguments, and update pre-images can all embed PII — and per c5 the
+  // transcript-content keys join this list ATOMICALLY with the AgentConversation
+  // / AgentMessage / AgentAction schema (same PR), so a transcript row is never
+  // loggable before its keys are denylisted. Field names from schema.prisma:
+  // AgentMessage.content, AgentConversation.title, AgentAction.argsJson /
+  // previousJson.
+  //
+  // KEEP IN SYNC: the same bare keys join AGENT_SPAN_SCRUB_DENYLIST in
+  // apps/api/src/observability/span-scrub.ts (the OTLP-egress twin), exactly as
+  // the GPS block above pairs with GPS_SPAN_SCRUB_DENYLIST.
+  "*.content",
+  "*.title",
+  "*.argsJson",
+  "*.previousJson",
 ];
 
 export const LOG_REDACT_CENSOR = "[Redacted]";

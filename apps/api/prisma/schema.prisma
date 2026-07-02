@@ -36,35 +36,37 @@ enum UserRole {
 }
 
 model User {
-  id                      String            @id
+  id                      String              @id
   /// Tier 2 PII per ADR-0013 — excluded from default logging (pino redact covers *.email).
-  email                   String            @unique
-  emailVerified           Boolean           @default(false)
+  email                   String              @unique
+  emailVerified           Boolean             @default(false)
   /// Tier 2 PII per ADR-0013 — admin display name.
   name                    String
   image                   String?
   /// Tier 3 per ADR-0013 — authorization metadata, not a credential or PII; intentionally NOT redacted (a session's role is operational signal).
-  role                    UserRole          @default(OFFICE_STAFF)
-  createdAt               DateTime          @default(now())
-  updatedAt               DateTime          @updatedAt
+  role                    UserRole            @default(OFFICE_STAFF)
+  createdAt               DateTime            @default(now())
+  updatedAt               DateTime            @updatedAt
   sessions                Session[]
   accounts                Account[]
-  vehiclesCreated         Vehicle[]         @relation("VehicleCreatedBy")
-  driversCreated          Driver[]          @relation("DriverCreatedBy")
-  tripsCreated            Trip[]            @relation("TripCreatedBy")
-  customersCreated        Customer[]        @relation("CustomerCreatedBy")
-  jobsCreated             Job[]             @relation("JobCreatedBy")
-  fuelLogsCreated         FuelLog[]         @relation("FuelLogCreatedBy")
-  expenseLogsCreated      ExpenseLog[]      @relation("ExpenseLogCreatedBy")
-  gpsPingsCreated         GpsPing[]         @relation("GpsPingCreatedBy")
-  geofencesCreated        Geofence[]        @relation("GeofenceCreatedBy")
-  serviceSchedulesCreated ServiceSchedule[] @relation("ServiceScheduleCreatedBy")
-  serviceRecordsCreated   ServiceRecord[]   @relation("ServiceRecordCreatedBy")
-  invoicesCreated         Invoice[]         @relation("InvoiceCreatedBy")
-  trackerDevicesCreated   TrackerDevice[]   @relation("TrackerDeviceCreatedBy")
+  vehiclesCreated         Vehicle[]           @relation("VehicleCreatedBy")
+  driversCreated          Driver[]            @relation("DriverCreatedBy")
+  tripsCreated            Trip[]              @relation("TripCreatedBy")
+  customersCreated        Customer[]          @relation("CustomerCreatedBy")
+  jobsCreated             Job[]               @relation("JobCreatedBy")
+  fuelLogsCreated         FuelLog[]           @relation("FuelLogCreatedBy")
+  expenseLogsCreated      ExpenseLog[]        @relation("ExpenseLogCreatedBy")
+  gpsPingsCreated         GpsPing[]           @relation("GpsPingCreatedBy")
+  geofencesCreated        Geofence[]          @relation("GeofenceCreatedBy")
+  serviceSchedulesCreated ServiceSchedule[]   @relation("ServiceScheduleCreatedBy")
+  serviceRecordsCreated   ServiceRecord[]     @relation("ServiceRecordCreatedBy")
+  invoicesCreated         Invoice[]           @relation("InvoiceCreatedBy")
+  trackerDevicesCreated   TrackerDevice[]     @relation("TrackerDeviceCreatedBy")
+  agentConversations      AgentConversation[] @relation("AgentConversationUser")
+  agentActions            AgentAction[]       @relation("AgentActionUser")
   /// The Driver this login identity is linked to, if any (ADR-0034 c4). A User
   /// with role DRIVER is linked 1:1 to a Driver row via Driver.userId.
-  driver                  Driver?           @relation("DriverUser")
+  driver                  Driver?             @relation("DriverUser")
 
   @@map("user")
 }
@@ -279,10 +281,10 @@ model Vehicle {
   createdById String
   createdBy   User     @relation("VehicleCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
 
-  trips       Trip[]       @relation("TripVehicle")
-  fuelLogs    FuelLog[]
-  expenseLogs ExpenseLog[]
-  gpsPings    GpsPing[]
+  trips         Trip[]         @relation("TripVehicle")
+  fuelLogs      FuelLog[]
+  expenseLogs   ExpenseLog[]
+  gpsPings      GpsPing[]
   /// The hardware GPS tracker mounted on this vehicle, if any (ADR-0042 c6).
   /// At most one — TrackerDevice.vehicleId is @unique.
   trackerDevice TrackerDevice?
@@ -1867,13 +1869,158 @@ model InvoiceNumberSequence {
   /// The last sequence value handed out for this (documentType, bsFiscalYear); 0
   /// before the first issue. Advances only on a COMMITTED issue — the gapless,
   /// rollback-safe property a Postgres SEQUENCE cannot provide (ADR-0039 c4).
-  lastValue Int @default(0)
+  lastValue    Int          @default(0)
   /// When this fiscal-year series row was first created (its first issue). No
   /// updatedAt: the row is written via raw SQL inside the issue transaction
   /// (`SELECT … FOR UPDATE` + UPDATE), where Prisma's @updatedAt would not be
   /// managed; createdAt (a DB default) is the one timestamp worth keeping.
-  createdAt DateTime @default(now())
+  createdAt    DateTime     @default(now())
 
   @@id([documentType, bsFiscalYear])
   @@map("invoice_number_sequence")
+}
+
+// AI agent persistence + audit spine (ADR-0043 commitment 5, ticket A2). Owned
+// by apps/api/src/modules/agent/ per ADR-0001 (the module lands in A3/A5; the
+// retention prune lives in apps/api/src/modules/retention/).
+//
+// Two lifecycles, one seam: AgentConversation + AgentMessage are the TRANSCRIPT
+// — Tier-2 content pruned at 180 days by the transcript-prune retention job —
+// while AgentAction is the AUDIT TRAIL, kept INDEFINITELY. To make those two
+// facts compatible, AgentAction's references to conversation/message are
+// nullable with onDelete: SetNull — the FIRST SetNull in this schema, a
+// deliberate deviation from the uniform Restrict/Cascade posture, ratified
+// explicitly by ADR-0043 c5: the prune must never touch an audit row, so
+// deleting a transcript DETACHES its actions rather than deleting or blocking,
+// and the action row carries enough denormalized context (tool, entity,
+// timestamp, acting user) to stand alone after its transcript is gone.
+
+model AgentConversation {
+  id        String   @id @default(cuid())
+  /// References the User (the requesting human) this conversation belongs to
+  /// (ADR-0021 authenticated principal; ADR-0043 c1 — the agent executes as
+  /// the requesting user, agent:use is ADMIN-only in v1). onDelete: Restrict
+  /// keeps the chain intact while the transcript lives; the audit row's own
+  /// user FK is on AgentAction.
+  userId    String
+  user      User     @relation("AgentConversationUser", fields: [userId], references: [id], onDelete: Restrict)
+  /// Tier 2 per ADR-0013 — the conversation title is derived from the user's
+  /// chat text (ADR-0043 c6 classifies transcript content Tier 2), so it can
+  /// embed anything the user typed. Never logged (pino redact covers *.title).
+  title     String?
+  createdAt DateTime @default(now())
+  /// Last-activity instant (@updatedAt — A5's message writes touch the parent
+  /// row). This is the transcript prune's RETENTION BASIS: pruning on
+  /// updatedAt (not createdAt) keeps an old-but-still-active conversation
+  /// alive. See RetentionService.computeTranscriptCutoff.
+  updatedAt DateTime @updatedAt
+
+  messages AgentMessage[]
+  actions  AgentAction[]
+
+  @@index([userId])
+  // The transcript prune's `updatedAt < cutoff` scan.
+  @@index([updatedAt])
+  @@map("agent_conversation")
+}
+
+model AgentMessage {
+  id               String            @id @default(cuid())
+  /// FK to the owning AgentConversation. onDelete: Cascade — a message is
+  /// OWNED by its conversation (the InvoiceLine→Invoice pattern), so the
+  /// 180-day transcript prune deletes a conversation and its messages
+  /// together in one statement.
+  conversationId   String
+  conversation     AgentConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  /// Tier 4 per ADR-0013 — the chat role ("user" / "assistant" / "system" /
+  /// "tool"). An OPEN STRING (the NotificationLog discriminator precedent),
+  /// not an enum, so a provider-shaped role addition needs no migration.
+  role             String
+  /// Tier 2 per ADR-0013 — transcript content (ADR-0043 c6): the user's chat
+  /// text and the model's replies, which may embed any PII the user types
+  /// (and, for tool-role messages, redacted tool results). NEVER logged (pino
+  /// redact covers *.content); the span policy is to never put content on a
+  /// span at all (the transcript keys also join the span-scrub denylist as a
+  /// backstop).
+  content          String
+  /// Tier 4 per ADR-0013 — per-call token usage (ADR-0043 c8: usage is
+  /// recorded per message; the cost envelope reads from here). Null on rows
+  /// with no LLM call behind them (e.g. the user's own message).
+  promptTokens     Int?
+  completionTokens Int?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  actions AgentAction[]
+
+  @@index([conversationId])
+  @@map("agent_message")
+}
+
+model AgentAction {
+  id               String             @id @default(cuid())
+  /// Nullable FK to the conversation this action was requested in. onDelete:
+  /// SetNull (ADR-0043 c5) — the 180-day transcript prune DETACHES the audit
+  /// row (nulls this FK) rather than deleting or blocking; see the block
+  /// comment above AgentConversation for why this is the schema's first
+  /// SetNull. Null therefore means "transcript pruned" (or a standalone
+  /// execution context in a later ticket), never "no context": the
+  /// denormalized fields below keep the row self-describing.
+  conversationId   String?
+  conversation     AgentConversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  /// Nullable FK to the assistant message whose tool call produced this
+  /// action. onDelete: SetNull — same rationale as conversationId.
+  messageId        String?
+  message          AgentMessage?      @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  /// Tier 4 per ADR-0013 — the registry tool name (e.g. "list_vehicles").
+  /// Part of the denormalized standalone context (with userId + createdAt)
+  /// that keeps this row meaningful after its transcript is pruned; the A8
+  /// activity page filters on it.
+  toolName         String
+  /// Tier 2 per ADR-0013 — the VALIDATED tool arguments as JSON (ADR-0043
+  /// c5). Arguments can embed PII (a driver name in a filter, a phone number
+  /// in a create payload). NEVER logged (pino redact covers *.argsJson).
+  argsJson         Json
+  /// Tier 4 per ADR-0013 — the affected entity's type (e.g. "Vehicle"), an
+  /// open string; with resultEntityId it powers the A8 activity page's
+  /// deep-link to the affected record. Null when the tool touched no single
+  /// entity (list tools, reports).
+  resultEntityType String?
+  /// Tier 3 per ADR-0013 — the affected entity's row id. Deliberately NOT a
+  /// FK (the NotificationLog subjectId precedent): the audit row must survive
+  /// the entity's later deletion.
+  resultEntityId   String?
+  /// Tier 2 per ADR-0013 — the pre-image: the prior row captured as JSON
+  /// BEFORE an update executes (ADR-0043 c4b — every agent update is cheaply
+  /// reversible; the undo procedure lands in A8's runbook). Null for reads
+  /// and creates. Can contain anything the row contained, so it is handled
+  /// like transcript content: NEVER logged (pino redact covers
+  /// *.previousJson).
+  previousJson     Json?
+  /// Tier 4 per ADR-0013 — execution outcome ("succeeded" / "failed" /
+  /// "denied"). An open string (the NotificationLog discriminator precedent).
+  status           String
+  /// Tier 4 per ADR-0013 — tool execution latency in milliseconds.
+  latencyMs        Int
+  /// References the User the agent executed AS (ADR-0043 c1 / ADR-0021 — the
+  /// requesting human, never a synthetic machine actor; agent-ness is the
+  /// existence of this row). onDelete: Restrict — the acting user cannot be
+  /// deleted out from under the indefinite audit trail. Denormalized
+  /// standalone context, NOT nulled by the transcript prune.
+  userId           String
+  user             User               @relation("AgentActionUser", fields: [userId], references: [id], onDelete: Restrict)
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  @@index([userId])
+  // Default "most recent first" ordering for the A8 activity page (the
+  // NotificationLog precedent).
+  @@index([createdAt(sort: Desc)])
+  // The A8 activity page's by-tool filter.
+  @@index([toolName])
+  // FK indexes so the prune's SET NULL fan-out never seq-scans this
+  // ever-growing table.
+  @@index([conversationId])
+  @@index([messageId])
+  @@map("agent_action")
 }

@@ -41,9 +41,38 @@ export const GPS_SPAN_SCRUB_DENYLIST = [
 ] as const;
 
 /**
- * An OpenTelemetry `SpanProcessor` that deletes every GPS Tier-5 attribute
- * (the `GPS_SPAN_SCRUB_DENYLIST` keys) from a span's attributes at `onEnd`,
- * before the span is exported (ADR-0026 commitment 5 / ADR-0027 commitment 5).
+ * The AI-agent transcript denylist for the SPAN egress layer (ADR-0043
+ * commitments 5/6, ticket A2) — the OTLP twin of the transcript block in
+ * `log-redact.ts`, exactly as GPS_SPAN_SCRUB_DENYLIST twins its GPS block.
+ * Agent transcripts are Tier 2 (chat text, tool arguments, update pre-images
+ * can all embed PII). The PRIMARY defense is the traces-prune posture — agent
+ * code never puts transcript content on a span at all (the transcript-prune
+ * worker's span carries only counts/cutoff/window); this denylist is the
+ * backstop. Kept SEPARATE from the GPS list above because the GPS list is
+ * also consumed on its own (the agent tool-result redaction layer imports it
+ * as its coordinate strip basis, ADR-0043 c6). **KEEP IN SYNC** with the
+ * `*.content` / `*.title` / `*.argsJson` / `*.previousJson` block in
+ * log-redact.ts.
+ */
+export const AGENT_SPAN_SCRUB_DENYLIST = ["content", "title", "argsJson", "previousJson"] as const;
+
+/**
+ * The FULL span-scrub denylist the processor below enforces: every key that
+ * must never leave the process on a span, across both egress-sensitive
+ * domains (GPS Tier-5 + agent-transcript Tier-2).
+ */
+export const SPAN_SCRUB_DENYLIST = [
+  ...GPS_SPAN_SCRUB_DENYLIST,
+  ...AGENT_SPAN_SCRUB_DENYLIST,
+] as const;
+
+/**
+ * An OpenTelemetry `SpanProcessor` that deletes every scrub-denylisted
+ * attribute (the `SPAN_SCRUB_DENYLIST` keys — GPS Tier-5 per ADR-0026/0027,
+ * plus the agent-transcript Tier-2 keys per ADR-0043) from a span's
+ * attributes at `onEnd`, before the span is exported. (The class keeps its
+ * original GPS-derived name — it predates the agent keys, and renaming a
+ * wired seam is churn; the denylist consts above are the semantic surface.)
  *
  * It MUST be registered AHEAD of the OTLP `BatchSpanProcessor` — `otel.ts`'s
  * `buildOtlpSpanProcessors` puts it at index 0. OpenTelemetry runs span
@@ -64,7 +93,7 @@ export class GpsSpanScrubProcessor implements SpanProcessor {
   }
 
   onEnd(span: ReadableSpan): void {
-    for (const key of GPS_SPAN_SCRUB_DENYLIST) {
+    for (const key of SPAN_SCRUB_DENYLIST) {
       // `span.attributes` is the span's live attribute object (the SDK Span
       // class exposes the underlying record, not a copy), so deleting a key
       // here removes it from what every later processor — including the OTLP

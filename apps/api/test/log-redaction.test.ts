@@ -68,4 +68,38 @@ describe("pino Tier-2 PII log redaction", () => {
     expect(LOG_REDACT_PATHS).not.toContain("*.driverName");
     expect(LOG_REDACT_PATHS).not.toContain("*.phoneNumber");
   });
+
+  test("masks a nested agent transcript's content, title, argsJson, previousJson (ADR-0043 A2)", () => {
+    // Agent transcripts are Tier 2 (ADR-0043 c6) — the user's typed text, tool
+    // arguments, and update pre-images can all embed PII. Field names match
+    // schema.prisma's AgentConversation / AgentMessage / AgentAction.
+    const line = logLine({
+      message: {
+        id: "amsg_1",
+        role: "user",
+        content: "register driver Ram Bahadur, phone 9800000000",
+      },
+      conversation: {
+        id: "aconv_1",
+        title: "Register Ram Bahadur",
+      },
+      action: {
+        id: "aact_1",
+        toolName: "list_vehicles",
+        argsJson: { search: "Hari Prasad" },
+        previousJson: { fullName: "Old Name" },
+        status: "succeeded",
+      },
+    });
+    expect(line).not.toContain("Ram Bahadur");
+    expect(line).not.toContain("9800000000");
+    expect(line).not.toContain("Hari Prasad");
+    expect(line).not.toContain("Old Name");
+    expect(line).toContain(LOG_REDACT_CENSOR);
+    // The non-sensitive discriminators on the same objects are preserved:
+    // role/toolName/status are Tier 4 operational signal.
+    expect(line).toContain('"role":"user"');
+    expect(line).toContain("list_vehicles");
+    expect(line).toContain("succeeded");
+  });
 });

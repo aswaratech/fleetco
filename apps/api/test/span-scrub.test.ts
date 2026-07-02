@@ -9,7 +9,12 @@ import {
 import { describe, expect, test } from "vitest";
 
 import { buildOtlpSpanProcessors } from "../src/observability/otel";
-import { GPS_SPAN_SCRUB_DENYLIST, GpsSpanScrubProcessor } from "../src/observability/span-scrub";
+import {
+  AGENT_SPAN_SCRUB_DENYLIST,
+  GPS_SPAN_SCRUB_DENYLIST,
+  GpsSpanScrubProcessor,
+  SPAN_SCRUB_DENYLIST,
+} from "../src/observability/span-scrub";
 
 // Unit tests for the GPS Tier-5 span-scrub seam (ADR-0026 commitment 5 /
 // ADR-0027 commitment 5) — the OTLP-egress twin of the pino `redact` GPS
@@ -72,6 +77,41 @@ describe("GpsSpanScrubProcessor", () => {
       deleted_count: 42,
       "http.method": "POST",
     });
+  });
+
+  test("onEnd deletes every agent-transcript denylist attribute (ADR-0043 A2)", () => {
+    // The transcript keys are the Tier-2 twin of the GPS block: agent code
+    // never puts content on a span by design (the transcript-prune worker
+    // carries only counts), so this is the backstop layer.
+    const span = finishedSpanWith({
+      content: "register driver Ram Bahadur",
+      title: "Register a driver",
+      argsJson: '{"search":"Hari Prasad"}',
+      previousJson: '{"fullName":"Old Name"}',
+      // Safe attributes must survive.
+      "retention.pruned.count": 3,
+      toolName: "list_vehicles",
+    });
+
+    new GpsSpanScrubProcessor().onEnd(span);
+
+    for (const key of AGENT_SPAN_SCRUB_DENYLIST) {
+      expect(span.attributes[key]).toBeUndefined();
+    }
+    expect(span.attributes).toEqual({
+      "retention.pruned.count": 3,
+      toolName: "list_vehicles",
+    });
+  });
+
+  test("the combined denylist is exactly the GPS list plus the agent list, kept separate", () => {
+    // A4's tool-result redactor imports GPS_SPAN_SCRUB_DENYLIST on its own as
+    // its coordinate strip basis — the GPS list must never absorb the agent
+    // keys, and the processor must enforce the union.
+    expect(SPAN_SCRUB_DENYLIST).toEqual([...GPS_SPAN_SCRUB_DENYLIST, ...AGENT_SPAN_SCRUB_DENYLIST]);
+    for (const key of AGENT_SPAN_SCRUB_DENYLIST) {
+      expect(GPS_SPAN_SCRUB_DENYLIST).not.toContain(key);
+    }
   });
 
   test("onEnd leaves a span carrying only safe attributes untouched", () => {
