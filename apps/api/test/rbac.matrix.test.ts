@@ -47,6 +47,7 @@ import { JobsController } from "../src/modules/jobs/jobs.controller";
 import { ServiceRecordsController } from "../src/modules/maintenance/service-records.controller";
 import { ServiceSchedulesController } from "../src/modules/maintenance/service-schedules.controller";
 import { ReportsController } from "../src/modules/reports/reports.controller";
+import { TrackersController } from "../src/modules/telematics/trackers.controller";
 import { TripsController } from "../src/modules/trips/trips.controller";
 import { TripsService } from "../src/modules/trips/trips.service";
 import { VehiclesController } from "../src/modules/vehicles/vehicles.controller";
@@ -76,6 +77,21 @@ describe("newly-minted capability tokens (2026-07-02 hardening)", () => {
     // downloads invoices but cannot create/issue/cancel/credit one.
     expect(roleHasCapability(UserRole.OFFICE_STAFF, "invoices:write")).toBe(false);
     expect(roleHasCapability(UserRole.DRIVER, "invoices:write")).toBe(false);
+  });
+});
+
+describe("tracker-register capability tokens (ADR-0042 M4)", () => {
+  test("trackers:read is on the operational floor; trackers:write is ADMIN-only", () => {
+    expect(roleHasCapability(UserRole.ADMIN, "trackers:read")).toBe(true);
+    expect(roleHasCapability(UserRole.OFFICE_STAFF, "trackers:read")).toBe(true);
+    expect(roleHasCapability(UserRole.DRIVER, "trackers:read")).toBe(false);
+
+    expect(roleHasCapability(UserRole.ADMIN, "trackers:write")).toBe(true);
+    // The load-bearing half of the split: an office-staff session sees which
+    // vehicle carries which unit but cannot re-point the IMEI → vehicle
+    // mapping that decides where every hardware ping lands.
+    expect(roleHasCapability(UserRole.OFFICE_STAFF, "trackers:write")).toBe(false);
+    expect(roleHasCapability(UserRole.DRIVER, "trackers:write")).toBe(false);
   });
 });
 
@@ -138,6 +154,16 @@ const INVOICES_HANDLER_TABLE: readonly [string, Capability][] = [
   ["removeLine", "invoices:write"],
 ];
 
+// The trackers per-route split (ADR-0042 M4 — the geofences read/write
+// pattern applied to the tracker register). There is deliberately NO delete
+// handler: unassign frees the vehicle slot, RETIRED ends the lifecycle.
+const TRACKERS_HANDLER_TABLE: readonly [string, Capability][] = [
+  ["list", "trackers:read"],
+  ["getById", "trackers:read"],
+  ["create", "trackers:write"],
+  ["update", "trackers:write"],
+];
+
 describe("controller wiring (reflection over guard + permission metadata)", () => {
   test.each(CLASS_TOKEN_TABLE)(
     "%s requires its capability at class level",
@@ -164,6 +190,26 @@ describe("controller wiring (reflection over guard + permission metadata)", () =
     const handler: unknown = InvoicesController.prototype[method as keyof InvoicesController];
     expect(typeof handler).toBe("function");
     expect(Reflect.getMetadata(REQUIRE_PERMISSION_KEY, handler as object)).toBe(token);
+  });
+
+  test("TrackersController runs the chain at class level with the per-route split", () => {
+    const guards: unknown[] = Reflect.getMetadata(GUARDS_METADATA, TrackersController) ?? [];
+    expect(guards).toContain(AuthGuard);
+    expect(guards).toContain(RolesGuard);
+    // No class-level token: every route declares its own side of the split.
+    expect(Reflect.getMetadata(REQUIRE_PERMISSION_KEY, TrackersController)).toBeUndefined();
+  });
+
+  test.each(TRACKERS_HANDLER_TABLE)("TrackersController.%s requires %s", (method, token) => {
+    const handler: unknown = TrackersController.prototype[method as keyof TrackersController];
+    expect(typeof handler).toBe("function");
+    expect(Reflect.getMetadata(REQUIRE_PERMISSION_KEY, handler as object)).toBe(token);
+  });
+
+  test("TrackersController exposes NO delete handler (ADR-0042: RETIRE, never delete)", () => {
+    const proto = TrackersController.prototype as unknown as Record<string, unknown>;
+    expect(proto.remove).toBeUndefined();
+    expect(proto.delete).toBeUndefined();
   });
 
   test("GET /me stays capability-free — any authenticated role reads its own role", () => {

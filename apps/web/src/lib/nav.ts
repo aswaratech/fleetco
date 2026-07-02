@@ -28,6 +28,7 @@ import {
   Gauge,
   LayoutDashboard,
   MapPin,
+  RadioTower,
   Receipt,
   Route,
   TrendingUp,
@@ -74,10 +75,10 @@ export const HOME: NavItem = {
 };
 
 // The five PO-ratified groups. Item order within a group is the sidebar's
-// vertical order. The flattened set is exactly the 15 destinations the
-// quick-links strip carries today (Geofences in Logs, the two reports their own
-// group) — only the order is regrouped, a change T3 makes under the DESIGN.md
-// §"Home dashboard" update.
+// vertical order. The flattened set was exactly the 15 destinations the
+// quick-links strip carried at the T3 regroup (Geofences in Logs, the two
+// reports their own group); ADR-0042 M4 added Trackers (Logs, beside
+// Geofences — telematics configuration) for 16.
 export const NAV: readonly NavGroup[] = [
   {
     id: "operations",
@@ -146,6 +147,7 @@ export const NAV: readonly NavGroup[] = [
     label: "Logs",
     items: [
       { href: "/geofences", label: "Geofences", icon: MapPin, allowedRoles: ADMIN_OFFICE },
+      { href: "/trackers", label: "Trackers", icon: RadioTower, allowedRoles: ADMIN_OFFICE },
       {
         href: "/notification-logs",
         label: "Reminder history",
@@ -163,8 +165,8 @@ export const NAV: readonly NavGroup[] = [
  * quick-links strip and the command palette flatten the result.
  *
  * Examples:
- *   navForRole("ADMIN")        → all 5 groups, all 15 items
- *   navForRole("OFFICE_STAFF") → all 5 groups, all 15 items (web is admin-facing)
+ *   navForRole("ADMIN")        → all 5 groups, all 16 items
+ *   navForRole("OFFICE_STAFF") → all 5 groups, all 16 items (web is admin-facing)
  *   navForRole("DRIVER")       → [] (DRIVER has no web surface; uses the Expo app)
  */
 export function navForRole(role: Role): NavGroup[] {

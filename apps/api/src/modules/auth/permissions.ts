@@ -65,6 +65,17 @@ export type Capability =
   // judgment applied twice.)
   | "invoices:read"
   | "invoices:write"
+  // Tracker-device register (ADR-0042 c6: the IMEI → vehicle mapping the
+  // Traccar ingest adapter resolves on every forward). A READ/WRITE split
+  // like geofences, NOT a coarse `trackers:*`, because the two operation
+  // classes carry different privilege: both live roles READ the register
+  // (which vehicle carries which unit — operational context for the live
+  // map); only ADMIN WRITES it. Registering hardware and re-pointing a
+  // vehicle's identity on the map is configuration at the users:manage tier
+  // — a mis-assignment makes vehicle A render as vehicle B for as long as
+  // it stands.
+  | "trackers:read"
+  | "trackers:write"
   | "gps:ingest"
   | "gps:read-derived"
   | "gps:read-raw"
@@ -102,6 +113,11 @@ const OPERATIONAL_CAPABILITIES: readonly Capability[] = [
   // irreversible issue/cancel/credit lifecycle) is ADMIN-only — see the
   // Capability union note on the invoices read/write split.
   "invoices:read",
+  // Reading the tracker register joins the shared floor (ADR-0042 c6):
+  // OFFICE_STAFF need to SEE which vehicle carries which unit — the same
+  // calculus as geofences:read. WRITING the register (trackers:write) is
+  // ADMIN-only and lives in the ADMIN set below.
+  "trackers:read",
 ];
 
 // The role -> capability map, exactly per ADR-0028 c4's table. Keyed by the
@@ -131,6 +147,12 @@ export const ROLE_CAPABILITY_MAP: Record<UserRole, ReadonlySet<Capability>> = {
     // an OFFICE_STAFF session reads fences (the floor's geofences:read) but does
     // not redraw them.
     "geofences:write",
+    // Writing the tracker register (register a device / assign it to a
+    // vehicle / retire it) is ADMIN-only (ADR-0042 c6): the IMEI → vehicle
+    // mapping decides which vehicle every hardware ping lands on, so a
+    // write here re-points physical-world identity — the geofences:write
+    // calculus applied to hardware.
+    "trackers:write",
     // Reading the reminder-delivery audit history (ADR-0038 C4). ADMIN-only:
     // it is operational audit data (the NotificationLog ledger), above the
     // operational floor — an OFFICE_STAFF session does the data entry but does

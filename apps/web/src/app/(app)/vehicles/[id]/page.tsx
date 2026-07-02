@@ -108,6 +108,24 @@ interface ServiceSchedulesResponse {
   sortDir: string;
 }
 
+// Cross-slice read — M4 (ADR-0042). The read-only "Tracker" row surfaces the
+// hardware GPS unit mounted on this vehicle (at most one —
+// TrackerDevice.vehicleId is unique), fetched from the tracker register
+// filtered by vehicle. Inlined slim projection per the same convention as
+// the responses above; the row deep-links to /trackers/<id> where
+// assignment is managed.
+interface TrackerRow {
+  id: string;
+  imei: string;
+  status: "ACTIVE" | "SPARE" | "RETIRED";
+  label: string | null;
+}
+
+interface TrackersListResponse {
+  items: TrackerRow[];
+  total: number;
+}
+
 // Human-readable interval label, e.g. "Every 5,000 km" / "Every 250.0 h" /
 // "Every 90 days". formatKm / formatHours come from lib/units (hours are
 // integer tenths, so formatHours(2500) → "250.0 h").
@@ -275,8 +293,9 @@ export default async function VehicleDetailPage({
   let trips: TripsListResponse;
   let stats: VehicleStatsResponse;
   let schedules: ServiceSchedulesResponse;
+  let trackers: TrackersListResponse;
   try {
-    [trips, stats, schedules] = await Promise.all([
+    [trips, stats, schedules, trackers] = await Promise.all([
       apiFetch<TripsListResponse>(
         `/api/v1/trips?vehicleId=${encodeURIComponent(vehicle.id)}&sortBy=createdAt&sortDir=desc&take=${RECENT_TRIPS_LIMIT}`,
       ),
@@ -287,6 +306,11 @@ export default async function VehicleDetailPage({
       apiFetch<ServiceSchedulesResponse>(
         `/api/v1/service-schedules?vehicleId=${encodeURIComponent(vehicle.id)}&status=ACTIVE&take=200&sortBy=name&sortDir=asc`,
       ),
+      // The mounted GPS tracker, if any (ADR-0042 M4). vehicleId is unique on
+      // the register, so take=1 is exact, not a truncation.
+      apiFetch<TrackersListResponse>(
+        `/api/v1/telematics/trackers?vehicleId=${encodeURIComponent(vehicle.id)}&take=1`,
+      ),
     ]);
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) {
@@ -294,6 +318,8 @@ export default async function VehicleDetailPage({
     }
     throw error;
   }
+
+  const tracker: TrackerRow | null = trackers.items[0] ?? null;
 
   // Engine-hours (ADR-0036 c1/c6): the detail page shows km, hours, or both per
   // the asset's meter — an ENGINE_HOURS excavator shows hours where a truck
@@ -343,6 +369,27 @@ export default async function VehicleDetailPage({
             <DetailRow
               label="Meter type"
               value={METER_TYPE_LABELS[vehicle.meterType] ?? vehicle.meterType}
+            />
+            <DetailRow
+              label="Tracker"
+              value={
+                tracker === null ? (
+                  "—"
+                ) : (
+                  <Link
+                    href={`/trackers/${tracker.id}`}
+                    className="text-text-primary font-mono underline-offset-2 hover:underline"
+                  >
+                    {tracker.imei}
+                    {tracker.status !== "ACTIVE" ? (
+                      <span className="text-text-muted font-sans">
+                        {" "}
+                        ({tracker.status === "SPARE" ? "Spare" : "Retired"})
+                      </span>
+                    ) : null}
+                  </Link>
+                )
+              }
             />
             {showOdometer ? (
               <>

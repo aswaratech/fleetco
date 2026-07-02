@@ -332,13 +332,28 @@ export class VehiclesService {
         if (error.code === "P2025") {
           return false;
         }
-        // P2003 = FK constraint violation on the referencing side. The
-        // referencing model (Trip) declares onDelete: Restrict on
-        // vehicleId per ADR-0003; this branch fires when the operator
-        // tries to delete a Vehicle that still has Trips. We count the
-        // referencing rows so the message names the obstacle precisely.
+        // P2003 = FK constraint violation on the referencing side. Two
+        // referencing models declare onDelete: Restrict on vehicleId: Trip
+        // (ADR-0003) and TrackerDevice (ADR-0042 c6 — a mounted hardware
+        // tracker blocks deletion until unassigned). Postgres reports only
+        // the FIRST violated constraint, so rather than trust which one
+        // fired, count both referencers and name every obstacle — a vehicle
+        // with a mounted tracker and zero trips must not read "0 trips
+        // reference this vehicle."
         if (error.code === "P2003") {
-          const tripCount = await this.prisma.trip.count({ where: { vehicleId: id } });
+          const [tripCount, trackerCount] = await this.prisma.$transaction([
+            this.prisma.trip.count({ where: { vehicleId: id } }),
+            this.prisma.trackerDevice.count({ where: { vehicleId: id } }),
+          ]);
+          if (trackerCount > 0) {
+            const alsoTrips =
+              tripCount > 0
+                ? ` ${tripCount} trip${tripCount === 1 ? "" : "s"} also reference this vehicle.`
+                : "";
+            throw new ConflictException(
+              `Cannot delete vehicle: a mounted GPS tracker references this vehicle. Unassign the tracker first.${alsoTrips}`,
+            );
+          }
           throw new ConflictException(
             `Cannot delete vehicle: ${tripCount} trip${tripCount === 1 ? "" : "s"} reference this vehicle.`,
           );
