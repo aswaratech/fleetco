@@ -219,6 +219,7 @@ export class TelematicsService {
       altitude: ping.altitude ?? null,
       speed: ping.speed ?? null,
       heading: ping.heading ?? null,
+      ignition: ping.ignition ?? null,
       timestamp: new Date(ping.timestamp),
       createdById: data.createdById,
     }));

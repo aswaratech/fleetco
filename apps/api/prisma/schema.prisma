@@ -61,6 +61,7 @@ model User {
   serviceSchedulesCreated ServiceSchedule[] @relation("ServiceScheduleCreatedBy")
   serviceRecordsCreated   ServiceRecord[]   @relation("ServiceRecordCreatedBy")
   invoicesCreated         Invoice[]         @relation("InvoiceCreatedBy")
+  trackerDevicesCreated   TrackerDevice[]   @relation("TrackerDeviceCreatedBy")
   /// The Driver this login identity is linked to, if any (ADR-0034 c4). A User
   /// with role DRIVER is linked 1:1 to a Driver row via Driver.userId.
   driver                  Driver?           @relation("DriverUser")
@@ -282,6 +283,9 @@ model Vehicle {
   fuelLogs    FuelLog[]
   expenseLogs ExpenseLog[]
   gpsPings    GpsPing[]
+  /// The hardware GPS tracker mounted on this vehicle, if any (ADR-0042 c6).
+  /// At most one — TrackerDevice.vehicleId is @unique.
+  trackerDevice TrackerDevice?
 
   // Preventive maintenance (ADR-0037). A vehicle is the anchor for many
   // concurrent service schedules (a 250-hour engine service, a 500-hour
@@ -1108,6 +1112,13 @@ model GpsPing {
   /// (0–360, clockwise from true north). Nullable. Never logged / never
   /// span-exported; pruned after the retention window.
   heading     Float?
+  /// Tier 5 per ADR-0027/ADR-0042 — engine ignition state at the fix
+  /// (idle-vs-parked, a core fleet signal hardware trackers report).
+  /// Nullable: phone/synthetic pings do not carry it. Movement-state data
+  /// travels with the location fix and follows the same egress rules —
+  /// never logged (pino redact), never span-exported (span-scrub), pruned
+  /// with the raw fix after the retention window.
+  ignition    Boolean?
   /// The instant the fix was captured by the device (UTC). Indexed
   /// `(timestamp desc)` for recency queries. ISO/UTC per CLAUDE.md. NOT
   /// Tier-5 location data per ADR-0027 commitment 9: the fix time
@@ -1132,7 +1143,12 @@ model GpsPing {
   createdById String
   createdBy   User                                  @relation("GpsPingCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
 
-  @@index([vehicleId])
+  /// Composite (vehicleId, timestamp DESC) replaces the original
+  /// single-column vehicleId index (ADR-0042 c7): it serves both the
+  /// per-vehicle trace filter (vehicleId prefix) AND the hot
+  /// latest-fix-per-vehicle query (per-vehicle DISTINCT ON / findFirst
+  /// ordered by timestamp DESC) that the live map polls every ~20 s.
+  @@index([vehicleId, timestamp(sort: Desc)])
   @@index([tripId])
   @@index([timestamp(sort: Desc)])
   @@index([createdById])
@@ -1250,6 +1266,65 @@ model Geofence {
   @@index([customerId])
   @@index([createdById])
   @@map("geofence")
+}
+
+// Tracker devices. Owned by apps/api/src/modules/telematics/ per ADR-0001
+// (the M4 CRUD API + /trackers web UI land in their own ticket; M3 ships ONLY
+// this schema, its hand-authored migration, the test/db.ts truncate entry,
+// and the schema round-trip test — the G1 pattern). The physical hardware GPS
+// units of ADR-0042: a dedicated aggregate rather than a Vehicle.trackerImei
+// column because devices have their own lifecycle — swapped between vehicles,
+// kept as spares, retired — and carry SIM metadata of their own.
+
+/// Lifecycle of a physical tracker unit (ADR-0042 c6). ACTIVE = mounted and
+/// expected to report; SPARE = owned but not installed (vehicleId null);
+/// RETIRED = permanently out of service (kept for the audit chain — its
+/// historical pings still reference the vehicle it was mounted on).
+enum TrackerStatus {
+  ACTIVE
+  SPARE
+  RETIRED
+}
+
+model TrackerDevice {
+  id          String        @id @default(cuid())
+  /// Tier 3 per ADR-0013 — the device IMEI, the identifier tracker protocols
+  /// (and the Traccar gateway) identify a unit by. Unique: one physical
+  /// device, one row. An operational asset identifier like
+  /// Vehicle.registrationNumber — NOT a person identifier. Note ADR-0042 c9:
+  /// IMEI is also the only thing the open tracker port authenticates by, so
+  /// unknown-IMEI forwards are dropped at the ingest adapter (M5) and only
+  /// registered IMEIs exist in the gateway.
+  imei        String        @unique
+  /// Nullable FK to Vehicle — null = spare/uninstalled. @unique enforces at
+  /// most one mounted tracker per vehicle (the Vehicle side is a nullable
+  /// one-to-one). onDelete: Restrict — deleting a vehicle with a mounted
+  /// tracker is blocked until the tracker is unassigned (the standard
+  /// delete-blocker posture; surfaces as P2003 → 409 in the M4 API).
+  vehicleId   String?       @unique
+  vehicle     Vehicle?      @relation(fields: [vehicleId], references: [id], onDelete: Restrict)
+  /// Free-form operator label ("FMC920 unit 1", "spare — office drawer").
+  label       String?
+  /// Tier 3 per ADR-0013 — the SIM's phone number (MSISDN). Operational
+  /// config data: the number the operator sends SMS server-pointing commands
+  /// to (docs/runbook/traccar.md, M6) and tops up monthly. It addresses a
+  /// company-owned device, not a person.
+  simMsisdn   String?
+  status      TrackerStatus @default(SPARE)
+  /// When the unit was installed on the CURRENT vehicle (null for spares).
+  /// Reset on reassignment; the per-vehicle install log the M10 rollout
+  /// maintains.
+  installedAt DateTime?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  /// References the User who registered the device (ADR-0021 authenticated
+  /// principal). Audit field; Restrict keeps the audit chain intact.
+  createdById String
+  createdBy   User          @relation("TrackerDeviceCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@index([status])
+  @@index([createdById])
+  @@map("tracker_device")
 }
 
 // Preventive-maintenance scheduling. Owned by apps/api/src/modules/maintenance/

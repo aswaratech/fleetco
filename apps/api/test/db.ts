@@ -38,6 +38,9 @@ const TABLES = [
   "service_record",
   "service_schedule",
   "geofence",
+  // ADR-0042 M3: FKs into vehicle + user, so it precedes both (CASCADE makes
+  // order cosmetic, but the list stays readable as a dependency ordering).
+  "tracker_device",
   "gps_ping",
   "fuel_log",
   // Program D (ADR-0039): the Invoice aggregate. invoice_line is the owned child
