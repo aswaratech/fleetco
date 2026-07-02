@@ -219,6 +219,10 @@ const AUTH_STUB = {
 const VEHICLE_ID = "ckreadrbac000000";
 const PINGS = `/api/v1/telematics/vehicles/${VEHICLE_ID}/pings`;
 const LOCATION = `/api/v1/telematics/vehicles/${VEHICLE_ID}/location`;
+// The fleet-wide latest-positions poll target (ADR-0042 M7): same
+// gps:read-derived tier as LOCATION; with no vehicles seeded it returns an
+// empty positions array — HTTP 200, all the gate test needs.
+const POSITIONS = "/api/v1/telematics/positions/latest";
 const GEOFENCE = `/api/v1/telematics/vehicles/${VEHICLE_ID}/geofence-status?centerLatitude=27.7172&centerLongitude=85.324&radiusMeters=100`;
 // A geofence-status URL driven by a STORED fence id that does NOT exist (the
 // RBAC block seeds no fence). The route-level gps:read-derived gate runs BEFORE
@@ -301,6 +305,29 @@ describe("Telematics read RBAC (gps:read-raw / gps:read-derived, ADR-0029 T5)", 
 
   test("derived location: anonymous → 401", async () => {
     expect(await status(LOCATION)).toBe(401);
+  });
+
+  // ── gps:read-derived — fleet-wide latest positions (ADR-0042 M7) ──
+
+  test("latest positions: ADMIN → 200 with a { positions: [...] } body", async () => {
+    const res = await fetch(`${baseUrl}${POSITIONS}`, {
+      headers: { "x-test-role": UserRole.ADMIN },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { positions: unknown };
+    expect(Array.isArray(body.positions)).toBe(true);
+  });
+
+  test("latest positions: OFFICE_STAFF → 200 (same derived tier as /location)", async () => {
+    expect(await status(POSITIONS, UserRole.OFFICE_STAFF)).toBe(200);
+  });
+
+  test("latest positions: DRIVER → 403 (gps:read-derived stays deferred until D6)", async () => {
+    expect(await status(POSITIONS, UserRole.DRIVER)).toBe(403);
+  });
+
+  test("latest positions: anonymous → 401", async () => {
+    expect(await status(POSITIONS)).toBe(401);
   });
 
   // ── gps:read-derived — geofence status, ADMIN + OFFICE_STAFF ──

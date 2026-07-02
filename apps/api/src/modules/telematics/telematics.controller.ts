@@ -39,6 +39,7 @@ import {
   LIST_TAKE_DEFAULT,
   TelematicsService,
   type GeofenceQuery,
+  type LatestPosition,
   type LocationFix,
   type RawPingItem,
   type ResolvedGeofence,
@@ -238,6 +239,25 @@ export class TelematicsController {
   async latestLocation(@Param("vehicleId") vehicleId: string): Promise<VehicleLocationResponse> {
     const fix = await this.telematics.latestLocation(vehicleId);
     return { vehicleId, fix };
+  }
+
+  /**
+   * DERIVED fleet-wide latest positions (ADR-0042 c10, M7) — the live map's
+   * ~20 s poll target. `gps:read-derived`, ADMIN + OFFICE_STAFF: the same
+   * derived tier as the per-vehicle `/location` above, widened to one latest
+   * fix per non-retired vehicle — still never a trail (ADR-0027 c6). Vehicles
+   * without a fix appear with `fix: null` so the map's untracked list can
+   * render them; `fixAgeSeconds` is server-computed so staleness rendering
+   * never trusts a client clock. A wrapper object (not a bare array) so the
+   * shape can grow additively (e.g. a server poll-interval hint).
+   *
+   * Route note: `positions/latest` is a static path, so it neither shadows nor
+   * is shadowed by the `vehicles/:vehicleId/…` parameterized routes.
+   */
+  @Get("positions/latest")
+  @RequirePermission("gps:read-derived")
+  async latestPositions(): Promise<{ positions: LatestPosition[] }> {
+    return { positions: await this.telematics.latestPositions() };
   }
 
   /**

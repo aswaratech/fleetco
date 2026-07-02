@@ -1,7 +1,7 @@
 import { getQueueToken } from "@nestjs/bullmq";
 import { NotFoundException } from "@nestjs/common";
 import { Test, type TestingModule } from "@nestjs/testing";
-import { GeofenceType } from "@prisma/client";
+import { GeofenceType, VehicleStatus } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 
 import { GeofencesService } from "../src/modules/geofences/geofences.service";
@@ -476,5 +476,115 @@ describe("TelematicsService reads + geofencing (ADR-0029 T5)", () => {
       expect(storedOutside.inside).toBe(paramOutside.inside);
       expect(storedOutside.inside).toBe(false);
     });
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// Fleet-wide latest positions (ADR-0042 c10, ticket M7) — the live map's poll
+// target. Correctness of the per-vehicle top-1 LATERAL join + the LEFT-join
+// no-fix rows + the fleet boundary (RETIRED/SOLD excluded) + the
+// server-computed fixAgeSeconds.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe("TelematicsService.latestPositions (ADR-0042 M7)", () => {
+  let module: TestingModule;
+  let prisma: PrismaService;
+  let service: TelematicsService;
+  let adminId: string;
+
+  beforeAll(async () => {
+    module = await Test.createTestingModule({
+      providers: [
+        TelematicsService,
+        GeofencesService,
+        PrismaService,
+        { provide: getQueueToken(GPS_INGEST_QUEUE), useValue: fakeQueue },
+      ],
+    }).compile();
+    await module.init();
+    prisma = module.get(PrismaService);
+    service = module.get(TelematicsService);
+  });
+
+  afterAll(async () => {
+    await module.close();
+  });
+
+  beforeEach(async () => {
+    await resetDb(prisma);
+    adminId = await seedUser(prisma);
+  });
+
+  test("one latest fix per vehicle; no-fix vehicles ride with fix:null; retired/sold excluded", async () => {
+    // AAA: three fixes — the NEWEST (recent, moving, ignition on) must win.
+    const tracked = await seedVehicle(prisma, adminId, { registrationNumber: "AAA-0001" });
+    await seedGpsPing(prisma, {
+      vehicleId: tracked.id,
+      createdById: adminId,
+      latitude: 27.7,
+      longitude: 85.3,
+      timestamp: new Date("2026-07-01T06:00:00Z"),
+    });
+    await seedGpsPing(prisma, {
+      vehicleId: tracked.id,
+      createdById: adminId,
+      latitude: 27.71,
+      longitude: 85.31,
+      timestamp: new Date("2026-07-01T07:00:00Z"),
+    });
+    const newest = await seedGpsPing(prisma, {
+      vehicleId: tracked.id,
+      createdById: adminId,
+      latitude: 27.7172,
+      longitude: 85.324,
+      speed: 12.5,
+      ignition: true,
+      // Recent so the server-computed age is small and assertable.
+      timestamp: new Date(Date.now() - 60_000),
+    });
+
+    // BBB: in the fleet (IN_MAINTENANCE counts) but no fix yet — must appear
+    // with fix:null rather than silently vanishing (the untracked list).
+    await seedVehicle(prisma, adminId, {
+      registrationNumber: "BBB-0002",
+      status: VehicleStatus.IN_MAINTENANCE,
+    });
+
+    // CCC/DDD: RETIRED and SOLD are not "the fleet" — excluded even with a fix.
+    const retired = await seedVehicle(prisma, adminId, {
+      registrationNumber: "CCC-0003",
+      status: VehicleStatus.RETIRED,
+      retiredAt: new Date("2026-06-01"),
+    });
+    await seedGpsPing(prisma, { vehicleId: retired.id, createdById: adminId });
+    await seedVehicle(prisma, adminId, {
+      registrationNumber: "DDD-0004",
+      status: VehicleStatus.SOLD,
+      retiredAt: new Date("2026-06-01"),
+    });
+
+    const positions = await service.latestPositions();
+
+    // Fleet boundary + registration ordering.
+    expect(positions.map((p) => p.registrationNumber)).toEqual(["AAA-0001", "BBB-0002"]);
+
+    const [aaa, bbb] = positions;
+    // The NEWEST fix won the per-vehicle top-1 (not either older ping).
+    expect(aaa.fix).not.toBeNull();
+    expect(aaa.fix?.latitude).toBe(27.7172);
+    expect(aaa.fix?.longitude).toBe(85.324);
+    expect(aaa.fix?.speed).toBe(12.5);
+    expect(aaa.fix?.ignition).toBe(true);
+    expect(aaa.fix?.timestamp.getTime()).toBe(newest.timestamp.getTime());
+    // Server-computed age: seeded ~60 s ago; generous ceiling for a slow CI box.
+    expect(aaa.fixAgeSeconds).toBeGreaterThanOrEqual(0);
+    expect(aaa.fixAgeSeconds).toBeLessThan(300);
+
+    expect(bbb.fix).toBeNull();
+    expect(bbb.fixAgeSeconds).toBeNull();
+  });
+
+  test("an empty fleet returns an empty array (not an error)", async () => {
+    expect(await service.latestPositions()).toEqual([]);
   });
 });
