@@ -5,6 +5,7 @@ import { TripStatus, VehicleKind, VehicleStatus } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 
 import { AuthGuard } from "../src/modules/auth/auth.guard";
+import { RolesGuard } from "../src/modules/auth/roles.guard";
 import { AUTH } from "../src/modules/auth/auth.tokens";
 import { DriverScopeService } from "../src/modules/auth/driver-scope.service";
 import { DriversService } from "../src/modules/drivers/drivers.service";
@@ -181,6 +182,8 @@ describe("VehiclesController.list (integration, real Prisma)", () => {
         { provide: AUTH, useValue: { api: { getSession: () => null } } },
       ],
     })
+      .overrideGuard(RolesGuard)
+      .useValue({ canActivate: () => true })
       .overrideGuard(AuthGuard)
       .useValue({ canActivate: () => true })
       .compile();
@@ -309,6 +312,8 @@ describe("VehiclesController.getStats (iter-12 cross-slice read)", () => {
         { provide: AUTH, useValue: { api: { getSession: () => null } } },
       ],
     })
+      .overrideGuard(RolesGuard)
+      .useValue({ canActivate: () => true })
       .overrideGuard(AuthGuard)
       .useValue({ canActivate: () => true })
       .compile();

@@ -17,6 +17,8 @@ import {
 
 import { ZodValidationPipe } from "../../common/zod-validation.pipe";
 import { AuthGuard } from "../auth/auth.guard";
+import { RequirePermission } from "../auth/decorators";
+import { RolesGuard } from "../auth/roles.guard";
 import type { AuthenticatedRequest } from "../auth/auth.types";
 
 // InvoicesService is injected by NestJS via emitDecoratorMetadata; the class
@@ -71,12 +73,16 @@ export interface InvoicesListResponse {
 // validation conventions so the web client's API helpers and form patterns
 // transfer without surprises.
 //
-// NOTE on RBAC: like the Phase-1 aggregates, this controller is AuthGuard-only
-// (not RolesGuard-gated) — invoicing is an admin/office surface in v1; any role
-// gating is a later decision (ADR-0039 does not scope invoice RBAC, and the web
-// surface is admin-facing in Phase 4).
+// RBAC (2026-07-02 hardening): the composed AuthGuard + RolesGuard chain with a
+// per-route READ/WRITE split — the geofences pattern applied to money. Reads
+// (list / detail / PDF) require `invoices:read` (both live office roles);
+// every write, and above all the irreversible issue / cancel / credit-note
+// lifecycle on a VAT tax document, requires `invoices:write` (ADMIN-only).
+// Before this the controller was AuthGuard-only, so any signed-in role —
+// including a driver's phone bearer credential — could issue or cancel a tax
+// invoice.
 @Controller("api/v1/invoices")
-@UseGuards(AuthGuard)
+@UseGuards(AuthGuard, RolesGuard)
 export class InvoicesController {
   constructor(private readonly invoices: InvoicesService) {}
 
@@ -95,6 +101,7 @@ export class InvoicesController {
    * always the values that actually ran the query — the anchors the web client's
    * pagination and sort-indicator UI read.
    */
+  @RequirePermission("invoices:read")
   @Get()
   async list(
     @Query(new ZodValidationPipe(ListInvoicesQuerySchema)) query: ListInvoicesQuery,
@@ -122,6 +129,7 @@ export class InvoicesController {
    * message so an operator chasing a bad URL sees exactly which id missed.
    * Mirrors JobsController.getById / CustomersController.getById.
    */
+  @RequirePermission("invoices:read")
   @Get(":id")
   async getById(@Param("id") id: string): Promise<InvoiceDetail> {
     const invoice = await this.invoices.findById(id);
@@ -144,6 +152,7 @@ export class InvoicesController {
    * shadowed by) the single-segment `:id` read above — the same pattern
    * `:id/issue` / `:id/lines` already use.
    */
+  @RequirePermission("invoices:read")
   @Get(":id/pdf")
   async getPdf(@Param("id") id: string): Promise<StreamableFile> {
     const { buffer, filename } = await this.invoices.getPdf(id);
@@ -160,6 +169,7 @@ export class InvoicesController {
    * stale `customerId` / `jobId` surfaces as HTTP 400 (service P2003 mapping).
    * The lines are added in D4; the number + tax snapshot at issue (D3 issue()).
    */
+  @RequirePermission("invoices:write")
   @Post()
   @HttpCode(HttpStatus.CREATED)
   async create(
@@ -176,6 +186,7 @@ export class InvoicesController {
    * on a missing row; 409 when the row is not a DRAFT (an issued invoice is
    * immutable — corrected only by a credit note, the service enforces this).
    */
+  @RequirePermission("invoices:write")
   @Patch(":id")
   async update(
     @Param("id") id: string,
@@ -194,6 +205,7 @@ export class InvoicesController {
    * cancelled in place (ADR-0039 c5). A POST action (a state transition), not a
    * DELETE: the row is retained as CANCELLED, not removed.
    */
+  @RequirePermission("invoices:write")
   @Post(":id/cancel")
   async cancel(@Param("id") id: string): Promise<InvoiceDetail> {
     const cancelled = await this.invoices.cancel(id);
@@ -211,6 +223,7 @@ export class InvoicesController {
    * subtotal). The PDF render + R2 store (also at issue per ADR-0039 c5) are D5.
    * A POST action (a one-way state transition with side effects), not a PATCH.
    */
+  @RequirePermission("invoices:write")
   @Post(":id/issue")
   async issue(@Param("id") id: string): Promise<InvoiceDetail> {
     // No issuedAt argument from the HTTP path — issue() defaults it to now.
@@ -224,6 +237,7 @@ export class InvoicesController {
    * The service throws 404 (original missing) / 409 (original not an ISSUED
    * INVOICE). The full credit-note web flow is D6; this is the seam.
    */
+  @RequirePermission("invoices:write")
   @Post(":id/credit-notes")
   @HttpCode(HttpStatus.CREATED)
   async createCreditNote(
@@ -248,6 +262,7 @@ export class InvoicesController {
    * DRAFT), or 400 (job-customer mismatch / stale FK / amount overflow). Returns the
    * updated invoice detail so the web re-renders the lines + totals in one round-trip.
    */
+  @RequirePermission("invoices:write")
   @Post(":id/lines")
   @HttpCode(HttpStatus.CREATED)
   async addLine(
@@ -265,6 +280,7 @@ export class InvoicesController {
    * tech-debt notes). The service throws 404 (invoice missing), 409 (not a DRAFT), or
    * 400 (job-customer mismatch / stale trip / amount overflow).
    */
+  @RequirePermission("invoices:write")
   @Post(":id/build-from-job")
   @HttpCode(HttpStatus.CREATED)
   async buildFromJob(
@@ -280,6 +296,7 @@ export class InvoicesController {
    * (invoice or line missing), 409 (not a DRAFT), or 400 (job-customer mismatch /
    * stale FK / overflow). Returns the updated invoice detail.
    */
+  @RequirePermission("invoices:write")
   @Patch(":id/lines/:lineId")
   async updateLine(
     @Param("id") id: string,
@@ -294,6 +311,7 @@ export class InvoicesController {
    * convention every prior slice uses). The service throws 404 (invoice or line
    * missing) or 409 (not a DRAFT). The web re-reads the invoice afterwards.
    */
+  @RequirePermission("invoices:write")
   @Delete(":id/lines/:lineId")
   @HttpCode(HttpStatus.NO_CONTENT)
   async removeLine(@Param("id") id: string, @Param("lineId") lineId: string): Promise<void> {

@@ -25,6 +25,8 @@ import { Logger } from "nestjs-pino";
 import { SLI_TRIP_CREATION_SUCCESS, SLI_TRIP_START_SUCCESS } from "../../common/sli";
 import { ZodValidationPipe } from "../../common/zod-validation.pipe";
 import { AuthGuard } from "../auth/auth.guard";
+import { RequirePermission } from "../auth/decorators";
+import { RolesGuard } from "../auth/roles.guard";
 import type { AuthenticatedRequest } from "../auth/auth.types";
 import type { Actor } from "../auth/driver-scope.service";
 import { toUserRole } from "../auth/permissions";
@@ -83,7 +85,11 @@ export interface TripsListResponse {
 // client's API helpers and form patterns transfer across both modules
 // without surprises.
 @Controller("api/v1/trips")
-@UseGuards(AuthGuard)
+// RBAC (2026-07-02 hardening): the trips:* capability gates every route in this
+// controller on the composed AuthGuard + RolesGuard chain (ADR-0028 c5). Before
+// this, the controller was AuthGuard-only and open to any signed-in role.
+@RequirePermission("trips:*")
+@UseGuards(AuthGuard, RolesGuard)
 export class TripsController {
   constructor(
     private readonly trips: TripsService,

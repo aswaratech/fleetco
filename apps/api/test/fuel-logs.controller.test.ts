@@ -5,6 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest"
 
 import { ZodValidationPipe } from "../src/common/zod-validation.pipe";
 import { AuthGuard } from "../src/modules/auth/auth.guard";
+import { RolesGuard } from "../src/modules/auth/roles.guard";
 import { AUTH } from "../src/modules/auth/auth.tokens";
 import type { AuthenticatedRequest } from "../src/modules/auth/auth.types";
 import { DriverScopeService } from "../src/modules/auth/driver-scope.service";
@@ -169,7 +170,11 @@ describe("FuelLogsController.list (integration, real Prisma)", () => {
   // list builds the actor from the session; for a non-DRIVER reader the
   // own-record predicate is a no-op (no Driver lookup), so a fixed fake session
   // suffices (ADR-0034).
-  const fakeRequest = { session: { user: { id: "reader" } } } as unknown as AuthenticatedRequest;
+  // Explicit OFFICE_STAFF role: a role-less session now coerces to DRIVER
+  // (2026-07-02 fail-closed re-target), which would trip the driver row-scope.
+  const fakeRequest = {
+    session: { user: { id: "reader", role: "OFFICE_STAFF" } },
+  } as unknown as AuthenticatedRequest;
 
   beforeAll(async () => {
     module = await Test.createTestingModule({
@@ -185,6 +190,8 @@ describe("FuelLogsController.list (integration, real Prisma)", () => {
         { provide: AUTH, useValue: { api: { getSession: () => null } } },
       ],
     })
+      .overrideGuard(RolesGuard)
+      .useValue({ canActivate: () => true })
       .overrideGuard(AuthGuard)
       .useValue({ canActivate: () => true })
       .compile();
@@ -336,7 +343,11 @@ describe("FuelLogsController.getById (integration, real Prisma)", () => {
   // getById builds the actor from the session; for a non-DRIVER reader the
   // own-record predicate is a no-op (no Driver lookup), so a fixed fake session
   // suffices (ADR-0034).
-  const fakeRequest = { session: { user: { id: "reader" } } } as unknown as AuthenticatedRequest;
+  // Explicit OFFICE_STAFF role: a role-less session now coerces to DRIVER
+  // (2026-07-02 fail-closed re-target), which would trip the driver row-scope.
+  const fakeRequest = {
+    session: { user: { id: "reader", role: "OFFICE_STAFF" } },
+  } as unknown as AuthenticatedRequest;
 
   beforeAll(async () => {
     module = await Test.createTestingModule({
@@ -348,6 +359,8 @@ describe("FuelLogsController.getById (integration, real Prisma)", () => {
         { provide: AUTH, useValue: { api: { getSession: () => null } } },
       ],
     })
+      .overrideGuard(RolesGuard)
+      .useValue({ canActivate: () => true })
       .overrideGuard(AuthGuard)
       .useValue({ canActivate: () => true })
       .compile();
@@ -613,6 +626,8 @@ describe("FuelLogsController.create / update / remove (integration, real Prisma)
         { provide: AUTH, useValue: { api: { getSession: () => null } } },
       ],
     })
+      .overrideGuard(RolesGuard)
+      .useValue({ canActivate: () => true })
       .overrideGuard(AuthGuard)
       .useValue({ canActivate: () => true })
       .compile();
@@ -684,7 +699,12 @@ describe("FuelLogsController.create / update / remove (integration, real Prisma)
     });
     tripId = trip.id;
 
-    fakeRequest = { session: { user: { id: adminId } } } as unknown as AuthenticatedRequest;
+    fakeRequest = {
+      // Explicit ADMIN role: since the 2026-07-02 hardening, toUserRole coerces
+      // a role-less session to DRIVER (fail-closed), which would trip the
+      // service-layer driver scope in these non-driver test sections.
+      session: { user: { id: adminId, role: "ADMIN" } },
+    } as unknown as AuthenticatedRequest;
   });
 
   test("create() persists with derived totalCostPaisa and createdById from session", async () => {

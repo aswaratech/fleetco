@@ -48,6 +48,23 @@ export type Capability =
   // floor (the same calculus as observability:read). A single read token, not a
   // read/write split, because the surface is read-only by construction.
   | "notifications:read"
+  // Preventive-maintenance aggregate (ADR-0037: ServiceSchedule + ServiceRecord).
+  // A coarse operation-class token like the Phase-1 aggregates: maintenance is
+  // operational data entry the office staff do, so it joins the shared floor.
+  // Minted by the 2026-07-02 RBAC hardening (the audit found both maintenance
+  // controllers AuthGuard-only with no token to require).
+  | "maintenance:*"
+  // Invoice aggregate (ADR-0039). A READ/WRITE split like geofences, NOT a
+  // coarse `invoices:*`, because the two operation classes carry genuinely
+  // different privilege: reading/downloading an invoice is operational, but
+  // WRITING one — and above all the irreversible issue / cancel / credit-note
+  // lifecycle operations on a Nepal VAT tax document — is a financial act at
+  // the users:manage tier. Both live roles read; only ADMIN writes. (Minted by
+  // the 2026-07-02 RBAC hardening; ADR-0043 also excludes invoice writes from
+  // the AI agent's tool registry entirely — the same "most dangerous surface"
+  // judgment applied twice.)
+  | "invoices:read"
+  | "invoices:write"
   | "gps:ingest"
   | "gps:read-derived"
   | "gps:read-raw"
@@ -78,6 +95,13 @@ const OPERATIONAL_CAPABILITIES: readonly Capability[] = [
   // parallel to gps:read-derived already on this floor. WRITING fences
   // (geofences:write) is ADMIN-only and lives in the ADMIN set below.
   "geofences:read",
+  // Maintenance CRUD is operational data entry (schedules + completed-service
+  // records), the same class as the Phase-1 aggregates above.
+  "maintenance:*",
+  // Reading/downloading invoices is operational; WRITING them (incl. the
+  // irreversible issue/cancel/credit lifecycle) is ADMIN-only — see the
+  // Capability union note on the invoices read/write split.
+  "invoices:read",
 ];
 
 // The role -> capability map, exactly per ADR-0028 c4's table. Keyed by the
@@ -112,6 +136,11 @@ export const ROLE_CAPABILITY_MAP: Record<UserRole, ReadonlySet<Capability>> = {
     // operational floor — an OFFICE_STAFF session does the data entry but does
     // not inspect what the compliance/maintenance reminder channel sent and when.
     "notifications:read",
+    // Writing invoices — including the irreversible issue / cancel /
+    // credit-note lifecycle on a VAT tax document — is a financial act above
+    // the operational data-entry floor (the geofences:write calculus applied
+    // to money). OFFICE_STAFF read invoices via the floor's invoices:read.
+    "invoices:write",
     "users:manage",
     "roles:assign",
   ]),
@@ -128,16 +157,18 @@ export const ROLE_CAPABILITY_MAP: Record<UserRole, ReadonlySet<Capability>> = {
   // their own trips) and `fuel-logs:*` (log fuel / odometer against their own
   // trip). Two things are load-bearing to understand:
   //
-  //  (1) These caps do NOT, by themselves, gate the trips / fuel-logs routes.
-  //      Those Phase-1 controllers are auth-guarded but NOT RolesGuard-gated (no
-  //      `@RequirePermission`), so `roleHasCapability` is never consulted for
-  //      them. Per ADR-0034 c7 the SOLE new enforcement is a SERVICE-LAYER
-  //      own-record predicate (DriverScopeService.resolveOwnDriverId): a DRIVER
-  //      may read / act on only their OWN trips and fuel logs (resolved through
-  //      the Driver.userId link, ADR-0034 c4), and may not create or delete
-  //      either. The set here is the map's RECORD of the grant (and future-proofs
-  //      any route that later opts into `@RequirePermission`); the row-scope is
-  //      what actually constrains a driver.
+  //  (1) Since the 2026-07-02 RBAC hardening, these caps DO gate the trips /
+  //      fuel-logs routes: every operational controller now carries
+  //      `@RequirePermission` on the AuthGuard + RolesGuard chain, so a DRIVER
+  //      session reaches ONLY the trips/fuel-logs routes (403 everywhere else
+  //      — previously all 12 AuthGuard-only controllers, including drivers'
+  //      Tier-2 PII and invoices, were open to any signed-in role). On the two
+  //      routes it CAN reach, the SERVICE-LAYER own-record predicate
+  //      (DriverScopeService.resolveOwnDriverId, ADR-0034 c7) remains the
+  //      row-level constraint: a DRIVER may read / act on only their OWN trips
+  //      and fuel logs (via the Driver.userId link, ADR-0034 c4), and may not
+  //      create or delete either. Route gate = which operation classes; row
+  //      scope = which records. Both are required.
   //
   //  (2) `gps:ingest` and `gps:read-derived` — the other two caps ADR-0034 c6
   //      assigns DRIVER — are DEFERRED, not forgotten. ADR-0034 c5's hard rule is
@@ -161,15 +192,22 @@ export function roleHasCapability(role: UserRole, capability: Capability): boole
 // because the library has no native enum field type — the value is declared as
 // a plain string additionalField in auth.ts, with the real enum enforced at the
 // Prisma/Postgres layer) to the domain `UserRole`. This is the SINGLE
-// fail-closed coercion for the whole auth surface: both the RolesGuard
-// (authorization) and `GET /me` (UI-gating signal) read the session role
-// through here, so they can never disagree on how an unexpected value is
-// treated. On any value that is not exactly ADMIN or DRIVER it returns
-// OFFICE_STAFF — the least-privileged LIVE role — so a corrupted or empty
-// session can never be silently treated as more privileged than office staff.
-// (At runtime the column is NOT NULL with a valid enum default, so the
-// unexpected-value branch is unreachable in practice; the coercion exists to
-// satisfy the type system and to fail closed if that invariant is ever broken.)
+// fail-closed coercion for the whole auth surface: the RolesGuard
+// (authorization), `GET /me` (UI-gating signal), and the trips/fuel-logs
+// Actor threading all read the session role through here, so they can never
+// disagree on how an unexpected value is treated. On any value that is not
+// exactly ADMIN or OFFICE_STAFF it returns DRIVER — the LEAST-privileged live
+// role: DRIVER holds only trips:*/fuel-logs:* and is further constrained by
+// the DriverScopeService own-record predicate, which fails closed (403) for a
+// user with no Driver link. (The pre-D2 version of this coercion targeted
+// OFFICE_STAFF, which was least-privileged THEN; once DRIVER became a live
+// role with the smallest set — and especially once the 2026-07-02 hardening
+// put @RequirePermission on every operational controller — an
+// unexpected-value coercion to OFFICE_STAFF would have ESCALATED a corrupted
+// session onto the whole operational floor. Fail-closed must track the
+// smallest live set.) At runtime the column is NOT NULL with a valid enum
+// default, so this branch is unreachable in practice; it exists to satisfy
+// the type system and to fail closed if that invariant is ever broken.
 export function toUserRole(role: string | null | undefined): UserRole {
-  return role === UserRole.ADMIN || role === UserRole.DRIVER ? role : UserRole.OFFICE_STAFF;
+  return role === UserRole.ADMIN || role === UserRole.OFFICE_STAFF ? role : UserRole.DRIVER;
 }

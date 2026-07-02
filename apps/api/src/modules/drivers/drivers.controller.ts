@@ -17,6 +17,8 @@ import type { Driver } from "@prisma/client";
 
 import { ZodValidationPipe } from "../../common/zod-validation.pipe";
 import { AuthGuard } from "../auth/auth.guard";
+import { RequirePermission } from "../auth/decorators";
+import { RolesGuard } from "../auth/roles.guard";
 import type { AuthenticatedRequest } from "../auth/auth.types";
 
 // DriversService and TripsService are injected by NestJS via
@@ -93,7 +95,11 @@ export interface DriverStatsResponse {
 // the web client's API helpers and form patterns transfer across both
 // modules without surprises.
 @Controller("api/v1/drivers")
-@UseGuards(AuthGuard)
+// RBAC (2026-07-02 hardening): the drivers:* capability gates every route in this
+// controller on the composed AuthGuard + RolesGuard chain (ADR-0028 c5). Before
+// this, the controller was AuthGuard-only and open to any signed-in role.
+@RequirePermission("drivers:*")
+@UseGuards(AuthGuard, RolesGuard)
 export class DriversController {
   constructor(
     private readonly drivers: DriversService,
