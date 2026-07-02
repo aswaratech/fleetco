@@ -37,6 +37,7 @@ import { REQUIRE_PERMISSION_KEY } from "../src/modules/auth/decorators";
 import { DriverScopeService } from "../src/modules/auth/driver-scope.service";
 import { roleHasCapability, toUserRole, type Capability } from "../src/modules/auth/permissions";
 import { RolesGuard } from "../src/modules/auth/roles.guard";
+import { AgentController } from "../src/modules/agent/agent.controller";
 import { AuthController } from "../src/modules/auth/auth.controller";
 import { CustomersController } from "../src/modules/customers/customers.controller";
 import { DriversController } from "../src/modules/drivers/drivers.controller";
@@ -77,6 +78,18 @@ describe("newly-minted capability tokens (2026-07-02 hardening)", () => {
     // downloads invoices but cannot create/issue/cancel/credit one.
     expect(roleHasCapability(UserRole.OFFICE_STAFF, "invoices:write")).toBe(false);
     expect(roleHasCapability(UserRole.DRIVER, "invoices:write")).toBe(false);
+  });
+});
+
+describe("agent capability token (ADR-0043 c1, ticket A5)", () => {
+  test("agent:use is ADMIN-only — not OFFICE_STAFF, not DRIVER", () => {
+    expect(roleHasCapability(UserRole.ADMIN, "agent:use")).toBe(true);
+    // The load-bearing half (c1): the agent executes autonomous writes with
+    // no confirmation gate (from A7), so v1 access stays with the
+    // accountable owner. Widening to OFFICE_STAFF is a deliberate later
+    // grant (ADR-0043 "Revisit when"), one row in permissions.ts.
+    expect(roleHasCapability(UserRole.OFFICE_STAFF, "agent:use")).toBe(false);
+    expect(roleHasCapability(UserRole.DRIVER, "agent:use")).toBe(false);
   });
 });
 
@@ -125,6 +138,10 @@ const GUARDS_METADATA = "__guards__";
 // adding it here is deliberate friction: the new controller's PR must state
 // its capability.
 const CLASS_TOKEN_TABLE: readonly [string, object, Capability][] = [
+  // Class-level single token, NOT the invoices/trackers per-route split:
+  // every agent route carries the same privilege (talking to the agent); the
+  // per-TOOL authorization inside a turn is the registry's job (ADR-0043 c1).
+  ["AgentController", AgentController, "agent:use"],
   ["VehiclesController", VehiclesController, "vehicles:*"],
   ["DriversController", DriversController, "drivers:*"],
   ["CustomersController", CustomersController, "customers:*"],

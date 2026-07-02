@@ -1,15 +1,25 @@
 import { Module } from "@nestjs/common";
 
 import { env } from "../../config/env";
+import { AuthModule } from "../auth/auth.module";
+import { AgentController } from "./agent.controller";
+import { AgentService } from "./agent.service";
+import { AgentToolsModule } from "./agent-tools.module";
 import { DeepSeekClient } from "./deepseek.client";
 import { LlmClient } from "./llm-client";
 import { MockLlmClient } from "./mock-llm.client";
 
-// AgentModule — the AI chat agent concern (ADR-0043; module scaffold lands
-// with ticket A3). As of A3 it owns exactly one thing: the provider-agnostic
-// LlmClient DI seam. The tool registry (A4, a sibling module file), the agent
-// loop + endpoints + `agent:use` gate (A5), and the chat UI (A6) grow from
-// here.
+// AgentModule — the AI chat agent concern (ADR-0043). A3 gave it the
+// provider-agnostic LlmClient DI seam; A5 (this ticket) composes that seam
+// with the A4 tool registry into the agent loop (AgentService), exposes the
+// conversation/turn endpoints (AgentController, `agent:use`-gated), and wires
+// AgentToolsModule into the app graph — the registration A4 deliberately left
+// out so the two parallel branches would merge here, not in git. The chat UI
+// (A6) consumes these endpoints.
+//
+// AuthModule is imported (the geofences precedent) so the AUTH provider,
+// AuthGuard, AND RolesGuard are available to the controller's composed
+// `@UseGuards(AuthGuard, RolesGuard)` chain at request time.
 //
 // THE LLM DI (ADR-0043 c2), mirroring NotificationModule's Mailer factory:
 // the abstract `LlmClient` token resolves to DeepSeekClient only when the
@@ -33,11 +43,14 @@ export function llmClientFactory(apiKey: string | undefined): LlmClient {
 }
 
 @Module({
+  imports: [AuthModule, AgentToolsModule],
+  controllers: [AgentController],
   providers: [
     {
       provide: LlmClient,
       useFactory: (): LlmClient => llmClientFactory(env.DEEPSEEK_API_KEY),
     },
+    AgentService,
   ],
   exports: [LlmClient],
 })

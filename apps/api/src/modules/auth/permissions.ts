@@ -76,6 +76,16 @@ export type Capability =
   // it stands.
   | "trackers:read"
   | "trackers:write"
+  // The AI chat agent (ADR-0043 c1). A single coarse token — "may this role
+  // talk to the agent at all?" — because the agent's PER-TOOL authorization
+  // is not this token's job: the tool registry re-checks each tool's own
+  // capability against the requesting user's role before dispatch, so
+  // holding agent:use never widens what a role could already do directly.
+  // ADMIN-only in v1: the agent executes autonomous writes (from A7) with no
+  // confirmation gate, so first use stays with the accountable owner;
+  // OFFICE_STAFF is a deliberate later grant (an ADR-0043 "Revisit when"),
+  // which is one row in the map below — not a controller edit.
+  | "agent:use"
   | "gps:ingest"
   | "gps:read-derived"
   | "gps:read-raw"
@@ -163,6 +173,9 @@ export const ROLE_CAPABILITY_MAP: Record<UserRole, ReadonlySet<Capability>> = {
     // the operational data-entry floor (the geofences:write calculus applied
     // to money). OFFICE_STAFF read invoices via the floor's invoices:read.
     "invoices:write",
+    // Talking to the AI chat agent (ADR-0043 c1) — ADMIN-only in v1; see the
+    // Capability union note for why this is a single coarse token.
+    "agent:use",
     "users:manage",
     "roles:assign",
   ]),
