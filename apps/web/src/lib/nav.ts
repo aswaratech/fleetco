@@ -21,6 +21,7 @@
 import type { LucideIcon } from "lucide-react";
 import {
   Bell,
+  Bot,
   Building2,
   CalendarClock,
   ClipboardList,
@@ -65,6 +66,10 @@ export interface NavGroup {
 // Everything an office staffer needs daily is visible to both web roles.
 const ADMIN_OFFICE: readonly Role[] = ["ADMIN", "OFFICE_STAFF"];
 
+// The AI agent is the first ADMIN-only surface (`agent:use`, ADR-0043 c1) —
+// the one-line-change moment the `allowedRoles` field was built for.
+const ADMIN_ONLY: readonly Role[] = ["ADMIN"];
+
 // The top-level destination, rendered above the groups in the sidebar (the
 // daily-ops dashboard at /). Kept separate from NAV because it is ungrouped and
 // the quick-links strip historically does not list it.
@@ -80,7 +85,8 @@ export const HOME: NavItem = {
 // quick-links strip carried at the T3 regroup (Geofences in Logs, the two
 // reports their own group); ADR-0042 M4 added Trackers (Logs, beside
 // Geofences — telematics configuration) and M9 added Live map (Operations,
-// per the DESIGN.md §"Live map" spec) for 17.
+// per the DESIGN.md §"Live map" spec) for 17; ADR-0043 A6 added Agent
+// (Operations, ADMIN-only per DESIGN.md §"Agent chat") for 18.
 export const NAV: readonly NavGroup[] = [
   {
     id: "operations",
@@ -92,6 +98,11 @@ export const NAV: readonly NavGroup[] = [
       { href: "/map", label: "Live map", icon: Map, allowedRoles: ADMIN_OFFICE },
       { href: "/customers", label: "Customers", icon: Building2, allowedRoles: ADMIN_OFFICE },
       { href: "/jobs", label: "Jobs", icon: ClipboardList, allowedRoles: ADMIN_OFFICE },
+      // ADMIN-only (ADR-0043 c1 / DESIGN.md §"Agent chat"): the AI agent's
+      // conversational surface. The first item whose gate diverges from
+      // ADMIN_OFFICE — sidebar, quick-links, and ⌘K palette all inherit it
+      // from this one row.
+      { href: "/chat", label: "Agent", icon: Bot, allowedRoles: ADMIN_ONLY },
     ],
   },
   {
@@ -168,8 +179,9 @@ export const NAV: readonly NavGroup[] = [
  * quick-links strip and the command palette flatten the result.
  *
  * Examples:
- *   navForRole("ADMIN")        → all 5 groups, all 17 items
- *   navForRole("OFFICE_STAFF") → all 5 groups, all 17 items (web is admin-facing)
+ *   navForRole("ADMIN")        → all 5 groups, all 18 items
+ *   navForRole("OFFICE_STAFF") → all 5 groups, 17 items (all but the
+ *                                ADMIN-only Agent — the first divergence)
  *   navForRole("DRIVER")       → [] (DRIVER has no web surface; uses the Expo app)
  */
 export function navForRole(role: Role): NavGroup[] {
