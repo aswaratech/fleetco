@@ -1,10 +1,13 @@
-# FleetCo production app + data plane (ADR-0014).
+# FleetCo production app + data plane (ADR-0014, + the ADR-0042 GPS gateway).
 #
-# The five-service Compose project the production VPS runs behind Caddy: the
+# The six-service Compose project the production VPS runs behind Caddy: the
 # api + web app images (built and pushed to GHCR by CI — T3), Postgres (with
-# PostGIS), Redis, and the Caddy reverse proxy that terminates TLS and serves
-# everything same-origin (ADR-0014 §1–§3). It is driven by the deploy /
-# rollback / restore runbooks under docs/runbook/.
+# PostGIS), Redis, the Caddy reverse proxy that terminates TLS and serves
+# everything same-origin (ADR-0014 §1–§3), and the Traccar GPS-tracker
+# gateway (ADR-0042 c2 — infra category, like Caddy; devices speak raw TCP
+# to it, NOT through Caddy). It is driven by the deploy / rollback / restore
+# runbooks under docs/runbook/ (the gateway's own procedures:
+# docs/runbook/traccar.md).
 #
 # Usage (on the box, from /opt/fleetco — see docs/runbook/deploy.md):
 #   export IMAGE_TAG=<sha>                                          # the version to run
@@ -156,8 +159,75 @@ services:
       - caddy_data:/data
       - caddy_config:/config
 
+  # --- Traccar GPS-tracker gateway (ADR-0042 c2/c3) ---------------------------
+  traccar:
+    # Version-pinned to a FULL x.y.z tag (infra convention, but tighter than
+    # the postgres/redis major pins on purpose): the M5 ingest adapter's
+    # contract test pins Traccar's {position, device} JSON forward payload,
+    # so a gateway upgrade is a deliberate act — bump the tag ONLY after
+    # re-verifying apps/api/test/traccar-ingest.test.ts against the new
+    # version's forward shape (ADR-0042 "Revisit when"). The alpine variant
+    # carries busybox wget for the healthcheck below.
+    image: traccar/traccar:6.14.5-alpine
+    restart: unless-stopped
+    ports:
+      # Teltonika Codec 8 device port (TCP — devices must be configured for
+      # TCP; UDP is deliberately not published). Internet-facing by design:
+      # trackers in vehicles dial this port directly, Caddy proxies HTTP
+      # only (ADR-0042 c2). 5013 (H02/Sinotrack) is added only if budget
+      # devices are ever bought.
+      - "5027:5027"
+      # Traccar's own web UI — loopback ONLY (operator reaches it via an SSH
+      # tunnel; see docs/runbook/traccar.md). Never expose 8082 publicly.
+      - "127.0.0.1:8082:8082"
+    # Config strategy (ADR-0042 c3): the committed, non-secret config is
+    # deploy/traccar.xml (bind-mounted read-only below); the two
+    # secret-bearing values ride in as environment overrides via Traccar's
+    # CONFIG_USE_ENVIRONMENT_VARIABLES mechanism (env wins over XML; key
+    # mapping: database.password -> DATABASE_PASSWORD, forward.header ->
+    # FORWARD_HEADER). Discrete env vars only — like postgres, this
+    # third-party container never sees the whole app secret file.
+    environment:
+      CONFIG_USE_ENVIRONMENT_VARIABLES: "true"
+      DATABASE_PASSWORD: "${TRACCAR_DB_PASSWORD:?set TRACCAR_DB_PASSWORD (the dedicated traccar DB role's password; see .env.production.example)}"
+      # The same key the API's IngestKeyGuard validates (M5). Traccar sends
+      # this header line on every position forward; a mismatch is a 401 at
+      # the API and the position retries, then drops from forwarding (it
+      # stays in Traccar's DB).
+      FORWARD_HEADER: "X-Ingest-Key: ${INGEST_API_KEY:?set INGEST_API_KEY (must equal the API's INGEST_API_KEY; see .env.production.example)}"
+    volumes:
+      - ./deploy/traccar.xml:/opt/traccar/conf/traccar.xml:ro
+      - traccar_data:/opt/traccar/data
+    # Postgres only — deliberately NOT api: forwarding retries buffer through
+    # api restarts/deploys (forward.retry.* in deploy/traccar.xml), and a
+    # traccar->api dependency would insert the gateway into every app
+    # bring-up for no benefit.
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # /api/server is Traccar's unauthenticated server-info endpoint; busybox
+    # wget ships in the alpine image. The long start_period covers the
+    # first-boot Liquibase migration (~40 tables in the traccar database).
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8082/api/server || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+    # Tier-5 discipline (ADR-0042 c8): Traccar logs to stdout (logger.console
+    # in deploy/traccar.xml) and at INFO its PositionLogger lines carry
+    # coordinates. Docker's default json-file log is UNBOUNDED — cap it so a
+    # temporarily-raised log level can never grow an unpruned Tier-5 trail.
+    # (The committed default level is `warning`, which emits no coordinates.)
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   postgres_data:
   redis_data:
   caddy_data:
   caddy_config:
+  traccar_data:

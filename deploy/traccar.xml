@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE properties SYSTEM 'http://java.sun.com/dtd/properties.dtd'>
+
+<!--
+  Traccar gateway configuration — the committed, NON-SECRET half (ADR-0042
+  c2/c3, ticket M6). Bind-mounted read-only into the traccar service at
+  /opt/traccar/conf/traccar.xml (see docker-compose.prod.yml).
+
+  The two secret-bearing values NEVER appear here. They ride in as
+  environment variables via Traccar's CONFIG_USE_ENVIRONMENT_VARIABLES
+  mechanism (env overrides XML; key -> env mapping is dots-to-underscores,
+  uppercase):
+
+    database.password  ->  DATABASE_PASSWORD   (the traccar DB role's password)
+    forward.header     ->  FORWARD_HEADER      ("X-Ingest-Key: <INGEST_API_KEY>")
+
+  Operator procedures (device registration, SIM/APN, troubleshooting,
+  retention, backup): docs/runbook/traccar.md.
+-->
+<properties>
+
+    <!-- Storage (ADR-0042 c3): the separate `traccar` database in the
+         EXISTING postgres container, owned by the dedicated low-privilege
+         `traccar` role (ownership is required — Postgres 15+ revoked
+         public-schema CREATE from non-owners, and Traccar's first-boot
+         Liquibase migration creates its ~40 tables as this user). The DB is
+         created once by the runbook's idempotent snippet; the postgres
+         entrypoint only creates POSTGRES_DB on first volume init. No
+         sslmode: this URL never leaves the compose-internal network and the
+         postgres container carries no certificates. The JDBC driver is
+         bundled in the official Traccar image. -->
+    <entry key='database.driver'>org.postgresql.Driver</entry>
+    <entry key='database.url'>jdbc:postgresql://postgres:5432/traccar</entry>
+    <entry key='database.user'>traccar</entry>
+
+    <!-- Known-IMEI-only registration (ADR-0042 c9): an unknown device that
+         dials 5027 is dropped by Traccar itself — it never reaches the
+         forward, let alone the API. false is also the code default; pinned
+         explicitly so a Traccar default change can never widen this. -->
+    <entry key='database.registerUnknown'>false</entry>
+
+    <!-- Start ONLY the Teltonika listener (TCP/UDP 5027 in-container; only
+         TCP is published by compose). Without this, Traccar opens ~200
+         protocol ports inside the container — harmless but noisy, and every
+         open listener is surface. Add `,h02` (port 5013) only if the budget
+         Sinotrack devices are ever bought (ADR-0042 c1). -->
+    <entry key='protocols.enable'>teltonika</entry>
+
+    <!-- Position forwarding (ADR-0042 c4): every decoded position POSTs as
+         JSON ({position, device} — the shape the M5 adapter's contract test
+         pins) to the API's machine-authenticated ingest endpoint. There is
+         no forward.enable key — setting forward.url activates forwarding.
+         The auth header is env-injected (FORWARD_HEADER, see the header
+         comment). -->
+    <entry key='forward.url'>http://api:3001/api/v1/telematics/ingest/traccar</entry>
+    <entry key='forward.type'>json</entry>
+
+    <!-- Retries, raised from the defaults (100 ms delay / no retry): with
+         retry enabled the delay doubles per failure up to `count` attempts
+         (~17 min of backoff from 1 s), and up to `limit` positions queue
+         while the API is unreachable — enough to ride out an api redeploy.
+         A position that exhausts its retries is dropped from FORWARDING
+         only; it remains queryable in the traccar database (the
+         reconciliation/backfill job is a named tech-debt entry). -->
+    <entry key='forward.retry.enable'>true</entry>
+    <entry key='forward.retry.delay'>1000</entry>
+    <entry key='forward.retry.count'>10</entry>
+    <entry key='forward.retry.limit'>1000</entry>
+
+    <!-- Tier-5 log discipline (ADR-0042 c8): Traccar's PositionLogger writes
+         decoded coordinates at INFO. Default to `warning` so the container
+         emits NO coordinate lines; log to stdout (logger.console) so the
+         only log sink is docker's json-file, which compose caps
+         (max-size/max-file) — no unbounded file inside the container. For
+         device onboarding, temporarily raise via the env override
+         LOGGER_LEVEL=info (never edit this file); the docker caps bound the
+         Tier-5 exposure while raised. See docs/runbook/traccar.md. -->
+    <entry key='logger.console'>true</entry>
+    <entry key='logger.level'>warning</entry>
+
+</properties>
