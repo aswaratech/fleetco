@@ -107,3 +107,7 @@ A durable, encrypted on-device store plus a flush state machine (backoff, coales
 - **The aggregation-to-Tier-3-summary end-state is wanted** (ADR-0027 c3 / ADR-0029's "Revisit when") — the late-ping and prune-basis decisions interact with aggregation; re-confirm them then.
 - **A Nepali regulatory change affects on-device retention or encryption of location data** (ADR-0027's regulatory "Revisit when") — revisit the on-device store's retention and encryption.
 - **Acceptance fixes the open picks** — the late-ping (commitment 5) and prune-basis (commitment 6) discharges are the PO's to confirm; if the PO chooses differently, the slice follows and this ADR is annotated.
+
+---
+
+**Annotation (2026-07-02, append-only):** ADR-0042 changes this ADR's primary-producer assumption: the PO chose dedicated hardware GPS trackers (via a Traccar gateway) as the fleet's primary position producer, and the driver-phone producer slices D4–D6 are deprioritized (deferred, not cancelled — this ADR's client mechanics stand unchanged for whenever they are picked up). See ADR-0042 §Relationship to prior ADRs.

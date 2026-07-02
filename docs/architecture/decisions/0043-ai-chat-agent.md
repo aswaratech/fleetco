@@ -1,0 +1,81 @@
+# ADR-0043: AI chat agent — an in-process tool layer over the module services, DeepSeek-first
+
+- **Status:** Accepted (decisions taken interactively by the PO in the 2026-07-02 planning session; the PO merging this PR is the durable ratification — see §Phase mismatch)
+- **Date:** 2026-07-02
+- **Decider:** Product owner (CEO)
+
+## Context
+
+The PO wants an AI chat agent inside the admin app that **operates the software on request**: "add this vehicle", "register this driver", "give me this month's fuel report" — asked in chat, executed or answered by the agent. Four PO decisions were taken interactively on 2026-07-02, each with trade-offs surfaced:
+
+1. **Provider-agnostic LLM client, DeepSeek first** (cost-driven; swappable later).
+2. **Redaction stance:** the most sensitive fields — Tier-5 GPS data, `licenseNumber`, `dateOfBirth` — never enter prompts; ordinary operational data (names, phones as operational contact data) may.
+3. **Fully autonomous writes in v1:** the agent executes creates/updates **without a human confirmation gate**. Chosen against the session's recommendation, with the prompt-injection/misread risk stated explicitly. The compensations are structural (commitment 4).
+4. Deletes and irreversible invoice operations are **excluded from the agent entirely**.
+
+The mechanical ground is unusually good: every domain module exports its service class (an in-process tool layer needs no HTTP hop, and CLAUDE.md sanctions cross-module calls via public service interfaces); every endpoint's input contract is a `.strict()` Zod schema; RBAC is a single hardcoded capability map. What does not exist: any LLM code, any streaming transport, any conversation/audit persistence, any machine-actor auth. One **hard prerequisite** from the same audit: the RBAC hardening PR (capability tokens wired on every controller, minting the missing `invoices:*`/`maintenance:*` tokens) must land first — the agent's per-tool authorization builds on those tokens, and shipping an agent onto a surface where the DRIVER role can CRUD everything would be indefensible.
+
+ADR-0041 (ratified the same day) freezes new feature scope until the first deploy reaches daily use; its commitment 4 requires this fresh ADR (see §Phase mismatch).
+
+## Decision
+
+A new `apps/api/src/modules/agent/` module: a curated, typed tool registry over the existing module services, driven by a provider-agnostic LLM client, with every action audited and rendered back to the user. Nine commitments:
+
+1. **In-process tool layer, executing as the requesting user.** Tools call module services directly through their exported public interfaces (`VehiclesService`, `TripsService`, `ReportsService`, …), adapting to each service's actual signature. Every tool execution runs under the **requesting user's real identity**: `createdById` is the human's user id, the capability ceiling is the human's role, and the DRIVER row-scope (were a driver ever granted chat) is inherited for free. Agent-ness is recorded in the audit spine (commitment 5), not by a synthetic actor — a dedicated machine identity was rejected for v1 (it would need its own auth path better-auth 1.6.11 does not offer, and it would *weaken* attribution by hiding which human asked). Access is gated by a new `agent:use` capability, **ADMIN-only in v1**.
+
+2. **Zero new dependencies.** DeepSeek's API is OpenAI-compatible (`POST /chat/completions`, Bearer auth, `tools`/`tool_choice`, ≤128 functions; verified against the official docs 2026-07-02), so the client is **raw `fetch`** behind a provider-agnostic `LlmClient` interface: `DeepSeekClient` (60 s per-call abort, 2 budget-aware jittered retries on 429/5xx, token usage captured per call) plus a **`MockLlmClient` used whenever `DEEPSEEK_API_KEY` is unset** — the `RESEND_API_KEY` pattern, so dev/CI never touch the network and unsetting the key is the production kill switch. Model name is env-configurable (`DEEPSEEK_MODEL`), targeting **`deepseek-v4-flash`** from day one (the legacy `deepseek-chat`/`deepseek-reasoner` names deprecate 2026-07-24). Tool parameter schemas are generated at boot via zod 4's native `z.toJSONSchema` — from **agent-owned, transform-free wrapper schemas** (`z.iso.date()` strings, plain primitives), because the modules' own schemas use `.transform()`/`z.coerce.date()`, which `z.toJSONSchema` cannot represent. The wrapper is the LLM-facing contract; the owning module's real `.strict()` schema **re-validates every tool call server-side** before any service is invoked, so the model never bypasses the house validation layer.
+
+3. **A curated registry of ~25 tools — not the whole API.** v1 ships in two stages. Stage one (reads + reports, the first shippable agent): list/get tools for vehicles, drivers, customers, jobs, trips, fuel logs, expense logs, geofences, service schedules/records; the two report tools (`per_vehicle_cost`, `per_vehicle_efficiency`); and a `fleet_snapshot` tool composing the Home-dashboard reads. Stage two (writes): **8 creates** (vehicle, driver, customer, job, trip, fuel log, expense log, service record) and **3 updates** (vehicle, trip, driver) — updates capture a **pre-image** of the row into the audit record before executing, so every agent update is cheaply reversible. **Absent from the registry entirely: every delete, invoice issue/cancel/credit-note, raw GPS trace access, and user/role management.** Each tool declares its required capability token and a risk tier (`read` / `reversible-write`), enforced in the registry before dispatch. Money passes through as integer paisa untouched; dates as ISO strings.
+
+4. **Autonomous-write compensations (the PO chose no confirmation gate).** (a) The exclusions above bound the blast radius — the worst possible autonomous action is a reversible create/update by design. (b) **Pre-image undo:** updates store the prior row (`previousJson`); the runbook documents the undo procedure. (c) **Server-derived action cards:** every executed tool renders in the chat transcript from the *server's* `AgentAction` record — tool name, validated payload summary, changed-fields diff, deep-link to the affected record — so the model cannot misreport what it did. (d) **Loop budgets:** at most 8 LLM rounds and 15 tool executions per turn, a 90 s turn wall-clock (the 60 s per-call abort nests strictly inside it; the web action budget sits above both at ~150 s), and a per-conversation in-flight lock (a concurrent turn gets 409; the composer disables while pending) so a retry cannot fork two interleaved tool loops. (e) A system-prompt rule: never guess entity ids — resolve via list tools first; always state what was created/changed with its link.
+
+5. **Persistence + audit spine.** Three new models (hand-authored migration, ADR-0013 tier comments on every field): `AgentConversation`, `AgentMessage` (role, content, token usage), and `AgentAction` (tool, validated args, result entity type/id, pre-image, status, latency). **Transcripts are pruned at 180 days** by a retention job on the existing `traces-prune` pattern; **`AgentAction` rows are kept indefinitely** — they are the audit trail. To make those two facts compatible, `AgentAction`'s references to conversation/message are **nullable with `onDelete: SetNull`**, and the action row carries enough denormalized context (tool, entity, timestamp, acting user) to stand alone after its transcript is pruned. Transcript content keys join the pino redact list and the span-attribute policy. A read-only **`/agent/activity`** page (filterable by date/tool/status, linking each action to its record) is the standing answer to "what did the agent do last week".
+
+6. **ADR-0013 amendment — the hosted-LLM data flow, named.** This section amends ADR-0013 (which carries a dated annotation pointing here). **The flow:** the user's chat text and redacted tool results leave the VPS to DeepSeek's hosted API. Per DeepSeek's published policies (fetched 2026-07-02): data is processed and stored in the People's Republic of China; inputs/outputs may be used to train/improve their models; a training opt-out exists under their privacy policy's rights section but is jurisdiction-dependent — **the opt-out is requested for the API account, and treated as best-effort: the working assumption is that prompt content may be retained and used for training.** Consequences: (a) agent chat **transcripts are classified Tier 2** (they will contain PII the user types) with the Tier-2 handling rules (encrypted at rest, never logged, restricted access); (b) the **redaction contract**: a recursive strip/mask pass runs on every tool result before it enters model context — Tier-5 GPS coordinates and traces **stripped**, `dateOfBirth` **stripped**, `licenseNumber` **masked to last-4**; driver/customer names and phone numbers pass as operational contact data (the agent is useless without them — the PO accepted this line explicitly); (c) the honest limit, stated rather than hidden: **anything the user types in chat reaches the provider verbatim** — a phone number typed into "add this driver" egresses by definition; (d) `DEEPSEEK_API_KEY` is Tier 1 under the standard rules.
+
+7. **Chat UI in the (app) shell.** A `/chat` page (conversation rail, transcript, composer, action cards built from existing `ui/` primitives) plus an "Agent" nav entry, `agent:use`-gated. **v1 is non-streamed request/response** through a server action (the repo has zero SSE infrastructure; a 10–60 s wait with a pending state is acceptable for one user; token streaming is a named tech-debt follow-up). Per the house rule, a **DESIGN.md §Surfaces "Agent chat"** section (and an "Agent activity" addendum) precedes the pages.
+
+8. **Cost envelope.** deepseek-v4-flash pricing (2026-07-02: $0.14/M input cache-miss, $0.0028/M cache-hit, $0.28/M output) puts realistic single-heavy-user usage at **~$2–10/month**, with the ~25-tool schema block (realistically 5–10 K tokens/turn) dominated by cache-hit pricing. Token usage is recorded per message; no hard monthly cap in v1 (trivial to add on the recorded usage if wanted).
+
+9. **Tickets.** **A1** this ADR + env plumbing + glossary · **A2** the three-model migration + redact/span/retention wiring · **A3** `LlmClient`/`DeepSeekClient`/`MockLlmClient` · **A4** tool registry (read/report tools) + redaction layer (parallel with A3) · **A5** agent loop + persistence + endpoints + `agent:use` · **A6** DESIGN.md §Surfaces + `/chat` page — **the first shippable agent: questions + reports end-to-end** · **A7** the 8 create tools + write action cards · **A8** the 3 update tools + pre-image undo + `/agent/activity` + `docs/runbook/agent-operations.md` (key rotation, kill switch, undo, prompt-injection posture, the opt-out request procedure). Hard prerequisite before A5 merges: the RBAC hardening PR.
+
+## Alternatives considered
+
+**Confirm-before-write (the session's recommendation).** The agent proposes a typed payload; the human taps confirm; only then does the service execute. Rejected **by the PO** in favor of fully autonomous writes — recorded here with the risk stated: a misread instruction or a prompt-injected free-text field can mutate records without a human check. Commitment 4 is the compensating design; this alternative remains the documented fallback if autonomous operation proves untrustworthy in practice.
+
+**An HTTP tool loop (agent calls the REST API).** Rejected: an in-process layer inherits validation, RBAC, and row-scoping through the same service interfaces with no auth-forwarding machinery, no localhost HTTP hop, and no second serialization of every contract.
+
+**A dedicated agent user/machine identity for writes.** Rejected for v1: better-auth 1.6.11 offers no api-key plugin; a synthetic actor hides *which human* instructed the action, weakening exactly the attribution the no-confirm-gate design needs. `AgentAction` carries the agent-ness; `createdById` carries the human.
+
+**An LLM SDK dependency.** Rejected: the wire format is OpenAI-compatible JSON; raw fetch keeps the dependency count at zero and the provider abstraction honest.
+
+**Self-hosted open-weights model (full data locality).** Rejected by the PO as disproportionate for a single-tenant internal tool (GPU + ops cost, quality trade-off); the provider-agnostic client keeps it a future option.
+
+**Exposing all ~60 endpoints as tools.** Rejected: tool-count bloats every prompt, and the highest-risk operations (deletes, invoice issue/cancel) must be structurally absent, not merely discouraged.
+
+## Consequences
+
+**Easier.** Fleet questions and reports become conversational; data entry ("register this driver…") becomes dictation; every agent action is better-audited than today's hand entry (pre-images, tool args, and an activity feed exist for agent writes but not for manual ones — an asymmetry worth extending to manual writes someday). The provider abstraction plus mock client keep dev/CI hermetic and make provider swaps a ~200-line adapter.
+
+**Harder / costs accepted.** Operational data (including names/phones typed or fetched) flows to a hosted third-party LLM stored in the PRC under a best-effort opt-out — accepted explicitly by the PO within the commitment-6 contract. Autonomous writes can be wrong in ways a confirmation gate would catch — accepted by the PO; bounded by commitment 4. Synchronous 10–60 s turns until streaming lands. A new module to maintain, plus prompt/tool-schema upkeep as modules evolve (a drift risk: tool wrappers must follow schema changes — the re-validation layer turns drift into loud Zod errors rather than silent corruption).
+
+## Revisit when
+
+- **The write tools misfire in practice** (wrong-entity updates, injection-shaped incidents) → reinstate the confirm-before-write alternative; it is designed and documented above.
+- **DeepSeek reliability/quality disappoints** → add a second `LlmClient` adapter (any OpenAI-compatible provider); the interface exists for exactly this.
+- **Monthly spend exceeds ~$25** or turns feel slow → add the usage cap; pick up the SSE streaming tech-debt ticket.
+- **OFFICE_STAFF access is wanted** → a deliberate `agent:use` grant after observing write behavior for a few weeks, plus `update_customer`/`update_job` tools if asked.
+- **DeepSeek's strict function-calling mode leaves beta** → evaluate enabling it; server-side Zod re-validation remains the authority regardless.
+- **The deploy lands and daily use begins** → re-estimate cost/latency against real usage; consider per-record "via Agent" attribution on entity detail pages (named tech-debt).
+
+## Phase mismatch (ADR-0041 commitment 4, exercised)
+
+This is unambiguously new feature scope opened before the first deploy reaches daily use. The PO chose to open it ("build both now, deploy later", 2026-07-02) with the risk framing surfaced; this ADR is the fresh argument commitment 4 requires. Sequencing keeps the discipline honest: the agent program runs **after** the RBAC hardening prerequisite and behind ADR-0042's wave (whose M1 is the deploy itself), so the deploy still precedes the agent's first production use. ADR-0025 is not cited as precedent.
+
+## Relationship to prior ADRs
+
+- **ADR-0041** — commitment-4 fresh-ADR exception; annotated to point here.
+- **ADR-0013** — amended by commitment 6 (the hosted-LLM egress flow, transcript tiering, the redaction contract); carries a dated annotation. This is its second amendment (ADR-0027 was the first).
+- **ADR-0028 (RBAC)** — consumed: the capability map is the agent's per-tool authorization basis; the new `agent:use` token joins it. The RBAC hardening PR (wiring `@RequirePermission` across all controllers, minting `invoices:*`/`maintenance:*`) is a hard prerequisite.
+- **ADR-0021 (auth integration shape)** — honored: `createdById` always comes from the authenticated session — the requesting human — never from a request body or a synthetic actor.
+- **ADR-0029 retention pattern** — reused for the 180-day transcript prune.

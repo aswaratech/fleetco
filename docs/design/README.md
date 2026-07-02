@@ -6,8 +6,6 @@ The structure of this folder follows the discipline established in ADR-0007 and 
 
 External design tools (Open Design with its MCP server, Figma, hand-coded HTML, anywhere) are iteration surfaces. They are useful for rapid iteration, but the conclusions that emerge from iteration must commit to this folder to count as memory. A design that lives only on the designer's laptop is not memory, because it does not survive across machines, sessions, or tool changes.
 
-At project start, this folder contains only this README. The `DESIGN.md` itself is a Phase 0 deliverable to be authored before the first UI slice in Phase 1. The base design system FleetCo customizes from is `shadcn-ui`, recorded in ADR-0016; the Linear and Notion alternatives discussed in ADR-0007 are documented as rejected in ADR-0016's `Alternatives considered` section.
+The base design system FleetCo customizes from is `shadcn-ui`, recorded in ADR-0016; the Linear and Notion alternatives discussed in ADR-0007 are documented as rejected in ADR-0016's `Alternatives considered` section. `DESIGN.md` was authored as a Phase 0 deliverable and has grown with the UI slice-by-slice since; new surfaces are specified as a `DESIGN.md` §Surfaces section before their implementing tickets (the Home-dashboard precedent).
 
-The `slices/` folder is empty at project start because no UI slices exist yet. The first entry will appear when the first Phase 1 UI slice (likely Vehicles or Drivers) is being built.
-
-The `slices/_archive/` folder is empty because no slices have completed yet. Entries will accumulate as Phase 1 progresses, providing a historical visual record of what each surface used to look like at the moment its implementing code merged.
+The `slices/` folder holds mockups only for surfaces whose implementing code has not yet merged; as of 2026-07-02 it is empty apart from the archive. The `slices/_archive/` folder holds the historical mockups whose implementing code has merged (currently `app-shell.html`, archived when the UX-uplift Phase 1 shell shipped), providing a visual record of what each surface looked like at the moment its code merged.
