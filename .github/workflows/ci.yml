@@ -84,6 +84,14 @@ jobs:
           DATABASE_URL: postgresql://placeholder:placeholder@localhost:5432/placeholder
         run: pnpm --filter @fleetco/api exec prisma generate
 
+      - name: Docs consistency (living-doc paths + links resolve)
+        # Guards the repo-as-memory discipline: fails when a living document
+        # (glossary, active tech-debt, runbooks, DESIGN.md, roadmap, CLAUDE.md)
+        # cites a repo path or relative link that no longer exists. Historical
+        # records (ADRs, CURRENT_PHASE log, paid-off debt) are out of scope by
+        # design — see docs/architecture/memory-architecture.md.
+        run: node scripts/check-doc-paths.mjs
+
       - name: Lint
         run: pnpm lint
 

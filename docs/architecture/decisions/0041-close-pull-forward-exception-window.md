@@ -1,6 +1,6 @@
 # ADR-0041: Close the ADR-0025 pull-forward exception window — no new phase or pull-forward feature program until the first production deploy reaches daily use
 
-- **Status:** Proposed
+- **Status:** Accepted (ratified by the PO authoring and merging PR #172 on 2026-07-02; flipped from Proposed in a follow-up docs commit, mirroring the ADR-0040 acceptance pattern)
 - **Date:** 2026-07-02
 - **Decider:** Product owner (CEO)
 
@@ -62,3 +62,7 @@ This is the exact situation ADR-0025's own "Revisit when" flagged as an escalati
 - **Closes the exception ADR-0025 opened** (the Phase-1 → Phase-2 pull-forward window). ADR-0025 is not superseded — its record of opening Phase 2 stands — but its forward license ends here, per its own "Revisit when" escalation triggers.
 - **Re-asserts** the roadmap's "daily-use-before-next-phase" rule and CLAUDE.md's "do not work on items from later phases; surface the phase mismatch and ask."
 - **Does not touch** any shipped feature ADR (0028–0040); those decisions and their code stand.
+
+---
+
+**Annotation (2026-07-02, append-only):** Commitment 4's mechanism was exercised the same day this ADR was ratified. The PO decided — with the risk surfaced explicitly and the audit's findings in hand — to open two new feature programs ahead of the deploy-reaches-daily-use gate: hardware GPS trackers + the live fleet map (**ADR-0042**) and the AI chat agent (**ADR-0043**). Each argues its case afresh in its own PO-ratified ADR, as this commitment requires; neither cites ADR-0025 as precedent. Mitigating fact recorded in ADR-0042: the tracker hardware needs a publicly reachable 24/7 endpoint, so **the first production deploy is ADR-0042's opening ticket (M1)** — the owed item this window exists to unblock rides in front of the new scope, not behind it.

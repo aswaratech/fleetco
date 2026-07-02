@@ -41,3 +41,7 @@ The cost of this ADR is the cost of taking data classification seriously from th
 ## Revisit when
 
 The signal to revisit this decision is a regulatory change in Nepal that materially affects the obligations of a data controller, a customer requirement that exceeds the current commitments, or the addition of a data category that the current four tiers do not cover. The Phase 2 introduction of GPS traces is a candidate for revisiting because GPS traces have privacy properties that may justify a fifth tier or a tighter retention policy.
+
+---
+
+**Annotation (2026-07-02, append-only):** ADR-0043 amends this ADR for a new egress class: fleet data flowing to a **hosted third-party LLM API** (DeepSeek-first) inside the AI chat agent's prompts. The amendment (in ADR-0043 §ADR-0013 amendment) names the flow, classifies agent chat transcripts Tier 2, and fixes the redaction contract — Tier-5 GPS coordinates, `licenseNumber`, and `dateOfBirth` never enter prompts; ordinary operational data (names, phones as operational contact data) may. This is the second amendment to this ADR; the first was ADR-0027 (Tier 5, GPS/telematics).
