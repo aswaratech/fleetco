@@ -109,6 +109,13 @@ const PingSchema = z
     altitude: Altitude.nullable().optional(),
     speed: Speed.nullable().optional(),
     heading: Heading.nullable().optional(),
+    // Engine ignition state at the fix (ADR-0042 c6/c7 — hardware trackers
+    // report it; phone/synthetic producers omit it). Optional+nullable like
+    // the other rider fields; a non-boolean is corruption, not a fix.
+    ignition: z
+      .boolean({ error: () => "ignition must be a boolean." })
+      .nullable()
+      .optional(),
     timestamp: Timestamp,
   })
   .strict();

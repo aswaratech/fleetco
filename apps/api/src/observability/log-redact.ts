@@ -44,6 +44,7 @@ export const LOG_REDACT_PATHS: readonly string[] = [
   "*.altitude",
   "*.heading",
   "*.speed",
+  "*.ignition",
   "*.coordinates",
   "*.geometry",
   "*.location",

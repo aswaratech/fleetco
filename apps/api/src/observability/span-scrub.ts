@@ -32,6 +32,7 @@ export const GPS_SPAN_SCRUB_DENYLIST = [
   "altitude",
   "heading",
   "speed",
+  "ignition",
   "coordinates",
   "geometry",
   "location",
