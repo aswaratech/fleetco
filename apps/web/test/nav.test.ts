@@ -6,17 +6,20 @@ import { HOME, NAV, navForRole, navItemsForRole } from "../src/lib/nav";
  * Pins the shared navigation source (apps/web/src/lib/nav.ts) — the single list
  * the §Navigation sidebar (T3), the home quick-links strip, and the ⌘K palette
  * (T7) will all read from. The load-bearing assertions are (a) the flattened
- * groups equal EXACTLY the 15 destinations the quick-links strip carries today,
- * so lifting that strip onto this source strands no screen and adds none, and
+ * groups equal EXACTLY the canonical destination set below (the 15 quick-links
+ * destinations + Trackers from ADR-0042 M4), so no screen strands and none
+ * sneaks in unpinned, and
  * (b) the role filter is fail-closed for DRIVER (web is admin-facing; DRIVER
  * uses the Expo app). RBAC here is a UI affordance only — the API's
  * permissions.ts is the security boundary.
  */
 
-// The 15 destinations in apps/web/src/app/_dashboard/quick-links.tsx as of the
-// Phase-0 strip. Order-independent on purpose: the five groups deliberately
-// regroup these; T3 reconciles the strip's render order under the DESIGN.md
-// §"Home dashboard" update. The SET, however, must not drift.
+// The canonical destination set. The first 15 are the destinations in
+// apps/web/src/app/_dashboard/quick-links.tsx as of the Phase-0 strip;
+// Trackers joined with ADR-0042 M4 (telematics configuration, Logs group).
+// Order-independent on purpose: the five groups deliberately regroup these.
+// The SET, however, must not drift — a new destination is added HERE and in
+// nav.ts in the same commit, deliberate friction against silent IA growth.
 const QUICK_LINKS_TODAY: readonly { href: string; label: string }[] = [
   { href: "/vehicles", label: "Vehicles" },
   { href: "/drivers", label: "Drivers" },
@@ -27,6 +30,7 @@ const QUICK_LINKS_TODAY: readonly { href: string; label: string }[] = [
   { href: "/fuel-logs", label: "Fuel logs" },
   { href: "/expense-logs", label: "Expense logs" },
   { href: "/geofences", label: "Geofences" },
+  { href: "/trackers", label: "Trackers" },
   { href: "/service-schedules", label: "Service schedules" },
   { href: "/service-records", label: "Service history" },
   { href: "/service-schedules/due", label: "Services due" },
@@ -49,7 +53,7 @@ describe("NAV structure", () => {
     ]);
   });
 
-  test("flattens to exactly today's quick-links destinations (no strand, no add)", () => {
+  test("flattens to exactly the canonical destination set (no strand, no add)", () => {
     const flat = NAV.flatMap((g) => g.items)
       .map(key)
       .sort();
@@ -70,7 +74,7 @@ describe("NAV structure", () => {
 });
 
 describe("navForRole", () => {
-  test("ADMIN and OFFICE_STAFF see all five groups and all fifteen items", () => {
+  test("ADMIN and OFFICE_STAFF see all five groups and all sixteen items", () => {
     for (const role of ["ADMIN", "OFFICE_STAFF"] as const) {
       const groups = navForRole(role);
       expect(groups.map((g) => g.id)).toEqual([
@@ -80,7 +84,7 @@ describe("navForRole", () => {
         "reports",
         "logs",
       ]);
-      expect(groups.flatMap((g) => g.items)).toHaveLength(15);
+      expect(groups.flatMap((g) => g.items)).toHaveLength(16);
     }
   });
 
@@ -98,10 +102,10 @@ describe("navForRole", () => {
 });
 
 describe("navItemsForRole", () => {
-  test("prepends HOME for the web roles (16 = HOME + 15)", () => {
+  test("prepends HOME for the web roles (17 = HOME + 16)", () => {
     const items = navItemsForRole("ADMIN");
     expect(items[0]).toBe(HOME);
-    expect(items).toHaveLength(16);
+    expect(items).toHaveLength(17);
   });
 
   test("is empty for DRIVER (HOME is ADMIN/OFFICE only)", () => {

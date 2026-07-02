@@ -9,6 +9,8 @@ import { TelematicsController } from "./telematics.controller";
 import { GPS_INGEST_QUEUE, TelematicsService } from "./telematics.service";
 import { TraccarIngestController } from "./traccar-ingest.controller";
 import { TraccarIngestService } from "./traccar-ingest.service";
+import { TrackersController } from "./trackers.controller";
+import { TrackersService } from "./trackers.service";
 
 // TelematicsModule — the first Phase-2 telematics feature slice (ADR-0029 T3).
 // It OWNS the `gps-ingest` queue per ADR-0029 commitment 2's per-feature queue
@@ -39,16 +41,22 @@ import { TraccarIngestService } from "./traccar-ingest.service";
 // through TraccarIngestService. ingestApiKeyProvider binds the Tier-1
 // INGEST_API_KEY from the typed env, so tests exercise the guard's
 // configured/unconfigured branches by overriding one provider.
+//
+// The M4 tracker register (TrackersController/TrackersService, ADR-0042 c6)
+// rides here too: TrackerDevice is telematics configuration — the IMEI →
+// vehicle mapping the M5 adapter resolves on every forward — so the register
+// lives beside its reader rather than as a separate module.
 @Module({
   imports: [AuthModule, GeofencesModule, BullModule.registerQueue({ name: GPS_INGEST_QUEUE })],
-  controllers: [TelematicsController, TraccarIngestController],
+  controllers: [TelematicsController, TraccarIngestController, TrackersController],
   providers: [
     TelematicsService,
     GpsIngestProcessor,
     TraccarIngestService,
+    TrackersService,
     IngestKeyGuard,
     ingestApiKeyProvider,
   ],
-  exports: [TelematicsService],
+  exports: [TelematicsService, TrackersService],
 })
 export class TelematicsModule {}
