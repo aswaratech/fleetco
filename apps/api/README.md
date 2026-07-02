@@ -74,7 +74,7 @@ Validated by [zod](./src/config/env.ts) at module load. Required vars throw a st
 Conventions:
 
 - `.env.example` is the committed canonical default. Copy to `.env` (gitignored) for local overrides such as port collisions with sibling projects.
-- Tier 1 values never appear in any committed file. The pino redact list in [`src/app.module.ts`](./src/app.module.ts) covers Tier 1 (`*.password`, `*.token`, `*.secret`) and Tier 2 (`*.email`, `*.driverName`, `*.licenseNumber`, `*.phoneNumber`) patterns at the log layer.
+- Tier 1 values never appear in any committed file. The pino redact denylist in [`src/observability/log-redact.ts`](./src/observability/log-redact.ts) covers Tier 1 (`*.password`, `*.token`, `*.secret`) and Tier 2 (`*.email`, `*.fullName`, `*.phone`, `*.licenseNumber`, `*.contactPerson`, `*.dateOfBirth`) patterns at the log layer.
 
 ## Conventions
 

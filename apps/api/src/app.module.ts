@@ -5,6 +5,7 @@ import { LoggerModule } from "nestjs-pino";
 
 import { enrichLogWithAvailabilitySignal } from "./common/sli";
 import { env } from "./config/env";
+import { LOG_REDACT_CENSOR, LOG_REDACT_PATHS } from "./observability/log-redact";
 import { otelTraceMixin } from "./observability/otel";
 import { AuthModule } from "./modules/auth/auth.module";
 import { CustomersModule } from "./modules/customers/customers.module";
@@ -63,51 +64,12 @@ import { VehiclesModule } from "./modules/vehicles/vehicles.module";
           enrichLogWithAvailabilitySignal(res, val),
         customErrorObject: (_req, res, _err, val: Record<string, unknown>) =>
           enrichLogWithAvailabilitySignal(res, val),
+        // Log redaction denylist (Tier-1/2/5 keys) lives in
+        // observability/log-redact.ts so it is importable + unit-tested
+        // (test/log-redaction.test.ts). See that file's ADR-0026/0027 sync note.
         redact: {
-          paths: [
-            "req.headers.authorization",
-            "req.headers.cookie",
-            'res.headers["set-cookie"]',
-            "*.password",
-            "*.token",
-            "*.secret",
-            "*.email",
-            "*.driverName",
-            "*.licenseNumber",
-            "*.phoneNumber",
-            "*.contactPerson",
-            // GPS telematics location keys (ADR-0029 commitment 12 /
-            // ADR-0027 commitment 5). The GpsPing coordinate + movement
-            // fields are Tier 5 (a raw location trail) and MUST NOT appear
-            // in logs. These land ATOMICALLY with the GpsPing schema (same
-            // PR) so a ping is never loggable before its keys are
-            // denylisted. The `*.<key>` wildcard matches the key at any
-            // nesting depth (same form as *.driverName above).
-            //
-            // KEEP IN SYNC: the ADR-0026 span-scrub denylist is the OTHER
-            // egress layer these same keys must be scrubbed from. That seam
-            // now EXISTS — apps/api/src/observability/span-scrub.ts exports
-            // GPS_SPAN_SCRUB_DENYLIST (this exact key set, minus the `*.`
-            // wildcard prefix) and its GpsSpanScrubProcessor deletes those
-            // keys from every span before OTLP egress (wired at index 0 in
-            // otel.ts's buildOtlpSpanProcessors). Adding a coordinate/movement
-            // key here MUST add it there too — the two layers (logs here,
-            // spans there) are the pair ADR-0027 commitment 5 names.
-            "*.latitude",
-            "*.longitude",
-            "*.lat",
-            "*.lng",
-            "*.lon",
-            "*.altitude",
-            "*.heading",
-            "*.speed",
-            "*.coordinates",
-            "*.geometry",
-            "*.location",
-            "*.point",
-            "*.position",
-          ],
-          censor: "[Redacted]",
+          paths: [...LOG_REDACT_PATHS],
+          censor: LOG_REDACT_CENSOR,
         },
         transport:
           env.NODE_ENV === "production"

@@ -309,9 +309,9 @@ model Vehicle {
 // Tier annotations per ADR-0013: driver records mix Tier 2 PII
 // (fullName, phone, dateOfBirth, licenseNumber) with Tier 3 operational
 // fields (status, hiredAt, licenseExpiresAt). The Tier 2 fields are
-// excluded from default logging (pino redact in apps/api/src/app.module.ts
-// already covers *.licenseNumber, *.phoneNumber, *.driverName — added
-// pre-emptively before the Drivers slice existed).
+// excluded from default logging (the pino redact denylist in
+// apps/api/src/observability/log-redact.ts covers *.fullName, *.phone,
+// *.licenseNumber, and *.dateOfBirth).
 
 // Nepal Department of Transport Management license categories. The
 // four entries cover the heavy-construction-fleet use cases:
@@ -345,8 +345,7 @@ enum DriverStatus {
 model Driver {
   id               String       @id @default(cuid())
   /// Tier 2 PII per ADR-0013 — driver's legal full name. Pino redact
-  /// path `*.driverName` was added in iter 0 in anticipation of this
-  /// slice; the field is still excluded from default logging.
+  /// path `*.fullName` covers it (excluded from default logging).
   fullName         String
   /// Tier 2 PII per ADR-0013 — DoTM-issued license number. Unique
   /// across the fleet so a duplicate registration is rejected at the
@@ -358,11 +357,12 @@ model Driver {
   /// Tier 2 PII per ADR-0013 — phone number, stored loosely (no E.164
   /// normalization) because Nepali numbers come in many shapes and the
   /// fleet has both Nepali and occasional foreign numbers in practice.
-  /// Pino redact path `*.phoneNumber` covers it.
+  /// Pino redact path `*.phone` covers it.
   phone            String
   /// Tier 2 PII per ADR-0013 — optional date of birth. Stored as ISO/UTC
   /// per CLAUDE.md; BS-calendar rendering arrives with the future
-  /// <NepaliDate> component on the web side.
+  /// <NepaliDate> component on the web side. Pino redact path
+  /// `*.dateOfBirth` covers it.
   dateOfBirth      DateTime?
   /// Tier 3 per ADR-0013 — date the driver joined the fleet.
   hiredAt          DateTime
@@ -541,9 +541,9 @@ model Trip {
 // when the customer is an individual the name itself is personal,
 // but on average the field carries business-counterparty data, so we
 // treat it as Tier 3 with the caveat noted on the field. The pino
-// redact paths in apps/api/src/app.module.ts cover *.email and
-// *.phoneNumber; iter 15 adds *.contactPerson because the Tier 2 PII
-// field is a person's name that does not match an existing redact path.
+// redact paths in apps/api/src/observability/log-redact.ts cover *.email
+// and *.phone; iter 15 adds *.contactPerson because the Tier 2 PII field
+// is a person's name that does not match an existing redact path.
 
 enum CustomerStatus {
   ACTIVE
@@ -570,7 +570,7 @@ model Customer {
   /// Tier 2 PII per ADR-0013 — phone number, stored loosely (no
   /// E.164 normalization) per the same CLAUDE.md "no PII-heavy
   /// regex" rationale that Driver.phone follows. Pino redact path
-  /// `*.phoneNumber` covers it.
+  /// `*.phone` covers it.
   phone         String
   /// Tier 2 PII per ADR-0013 — email address, loose validation
   /// (presence of `@`; CLAUDE.md forbids gold-plating). Nullable;
