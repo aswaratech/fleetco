@@ -54,13 +54,25 @@ const PATH_PREFIXES = [
 ];
 // Markers meaning "this is a pattern/example, not a literal current path".
 const PLACEHOLDER = /[<>*{}…]|\$\{|YYYY|NNNNN|\.\.\./;
-// Runtime files that exist by convention on a running box but are gitignored,
-// so docs legitimately cite them while the repo legitimately lacks them.
+// Runtime artifacts that exist by convention on a running/working machine but
+// are gitignored, so docs legitimately cite them while a clean checkout lacks
+// them. Two rules:
+//   (1) any `.env*` file at any depth — the env-template convention (the
+//       committed file is `.env.example`; the real `.env` / `.env.test` is
+//       created per the runbooks), and
+//   (2) the explicit artifact set below (loop control/state files, log dirs).
+// IMPORTANT: these must be allowed WITHOUT consulting the local disk — such
+// files often exist on a dev machine, and disk-dependent behavior is exactly
+// how this check's first version passed locally and failed in CI (the runner's
+// clean checkout has no .env files).
+const RUNTIME_ENV_FILE = /(^|\/)\.env(\.[\w.-]+)?$/;
 const RUNTIME_ALLOW = new Set([
   "deploy/backup.env",
   "scripts/orchestration/.stop",
   "scripts/orchestration/kickoff.md",
   "scripts/orchestration/state.json",
+  "scripts/orchestration/logs",
+  "scripts/orchestration/logs/",
 ]);
 // `docs/<kebab-name>` with no extension is far more likely a git BRANCH name
 // (the house branch convention: docs/memory-repair, docs/invoice-closeout)
@@ -75,7 +87,9 @@ function checkableExists(p) {
     .replace(/[),.;]+$/, "")
     .replace(/:\d+(-\d+)?$/, "")
     .replace(/:[A-Za-z_$][\w$]*$/, "");
-  if (RUNTIME_ALLOW.has(clean) || BRANCH_LIKE.test(clean)) return true;
+  if (RUNTIME_ALLOW.has(clean) || RUNTIME_ENV_FILE.test(clean) || BRANCH_LIKE.test(clean)) {
+    return true;
+  }
   if (PLACEHOLDER.test(clean)) {
     // Check the deepest placeholder-free ancestor directory instead.
     const parts = clean.split("/");
