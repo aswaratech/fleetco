@@ -7,6 +7,7 @@ import { enrichLogWithAvailabilitySignal } from "./common/sli";
 import { env } from "./config/env";
 import { LOG_REDACT_CENSOR, LOG_REDACT_PATHS } from "./observability/log-redact";
 import { otelTraceMixin } from "./observability/otel";
+import { AgentModule } from "./modules/agent/agent.module";
 import { AuthModule } from "./modules/auth/auth.module";
 import { CustomersModule } from "./modules/customers/customers.module";
 import { DriversModule } from "./modules/drivers/drivers.module";
@@ -100,6 +101,10 @@ import { VehiclesModule } from "./modules/vehicles/vehicles.module";
     MaintenanceModule,
     NotificationModule,
     NotificationLogsModule,
+    // ADR-0043 A3: registers the LlmClient DI seam at boot so a misconfigured
+    // key surfaces at startup, not on the first chat turn. No HTTP surface
+    // until A5.
+    AgentModule,
   ],
 })
 export class AppModule {}
