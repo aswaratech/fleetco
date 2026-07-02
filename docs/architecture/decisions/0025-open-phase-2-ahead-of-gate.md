@@ -1,6 +1,7 @@
 # ADR-0025: Open Phase 2 (driver app + telematics) ahead of the daily-use gate
 
 - **Status:** Accepted
+- **Forward license closed by:** ADR-0041 (2026-07-02). This exception was one-time and may no longer be cited as precedent for further pull-forwards; any new program ahead of the deploy-reaches-daily-use gate needs its own fresh PO-ratified ADR per ADR-0041 commitment 4 (exercised by ADR-0042 and ADR-0043).
 - **Date:** 2026-06-03
 - **Decider:** Product owner (CEO)
 
