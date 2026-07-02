@@ -6,8 +6,14 @@ with `--ignore-workspace`).
 
 ## Status
 
-**D0 — toolchain spike.** Scaffold + CI gate + a no-login screen only. Driver
-auth (ADR-0034), trip/fuel entry, and GPS capture (ADR-0035) arrive in D1–D5.
+**D0–D3 (+B2) shipped.** Toolchain spike + CI gate (D0); better-auth login via
+`@better-auth/expo` (D1); the DRIVER role's own-record scope + a trip start/stop
+screen (D2); and odometer + fuel entry (D3, meter-aware B2) — so login, an
+own-trip list, trip start/stop, and fuel/odometer entry all work. Still to come:
+GPS capture — the foreground producer + offline outbox (D4–D6, ADR-0035) — and a
+device-build path (EAS / local prebuild) beyond Expo Go. The app is a pure
+consumer of the FleetCo API, so it delivers field value only once that API is
+deployed.
 
 ## Run it (dev)
 
