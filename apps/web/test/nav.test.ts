@@ -16,8 +16,10 @@ import { HOME, NAV, navForRole, navItemsForRole } from "../src/lib/nav";
 
 // The canonical destination set. The first 15 are the destinations in
 // apps/web/src/app/_dashboard/quick-links.tsx as of the Phase-0 strip;
-// Trackers joined with ADR-0042 M4 (telematics configuration, Logs group)
-// and Live map with ADR-0042 M9 (Operations, per DESIGN.md §"Live map").
+// Trackers joined with ADR-0042 M4 (telematics configuration, Logs group),
+// Live map with ADR-0042 M9 (Operations, per DESIGN.md §"Live map"), and
+// Agent with ADR-0043 A6 (Operations, the first ADMIN-only item, per
+// DESIGN.md §"Agent chat").
 // Order-independent on purpose: the five groups deliberately regroup these.
 // The SET, however, must not drift — a new destination is added HERE and in
 // nav.ts in the same commit, deliberate friction against silent IA growth.
@@ -39,6 +41,7 @@ const QUICK_LINKS_TODAY: readonly { href: string; label: string }[] = [
   { href: "/reports/per-vehicle-cost", label: "Cost report" },
   { href: "/reports/per-vehicle-efficiency", label: "Fuel efficiency" },
   { href: "/notification-logs", label: "Reminder history" },
+  { href: "/chat", label: "Agent" },
 ];
 
 const key = (i: { href: string; label: string }): string => `${i.href}\t${i.label}`;
@@ -76,18 +79,27 @@ describe("NAV structure", () => {
 });
 
 describe("navForRole", () => {
-  test("ADMIN and OFFICE_STAFF see all five groups and all seventeen items", () => {
-    for (const role of ["ADMIN", "OFFICE_STAFF"] as const) {
-      const groups = navForRole(role);
-      expect(groups.map((g) => g.id)).toEqual([
-        "operations",
-        "money",
-        "maintenance",
-        "reports",
-        "logs",
-      ]);
-      expect(groups.flatMap((g) => g.items)).toHaveLength(17);
-    }
+  test("ADMIN sees all five groups and all eighteen items", () => {
+    const groups = navForRole("ADMIN");
+    expect(groups.map((g) => g.id)).toEqual([
+      "operations",
+      "money",
+      "maintenance",
+      "reports",
+      "logs",
+    ]);
+    expect(groups.flatMap((g) => g.items)).toHaveLength(18);
+  });
+
+  test("OFFICE_STAFF sees seventeen items — everything but the ADMIN-only Agent", () => {
+    // The first role divergence on the web (ADR-0043 c1: agent:use is
+    // ADMIN-only in v1). The API is the security boundary; this pins the UI
+    // affordance matching it.
+    const groups = navForRole("OFFICE_STAFF");
+    const items = groups.flatMap((g) => g.items);
+    expect(items).toHaveLength(17);
+    expect(items.map((i) => i.href)).not.toContain("/chat");
+    expect(navForRole("ADMIN").flatMap((g) => g.items.map((i) => i.href))).toContain("/chat");
   });
 
   test("DRIVER sees nothing on the web; empty groups are dropped", () => {
@@ -104,10 +116,11 @@ describe("navForRole", () => {
 });
 
 describe("navItemsForRole", () => {
-  test("prepends HOME for the web roles (18 = HOME + 17)", () => {
+  test("prepends HOME for the web roles (ADMIN: 19 = HOME + 18)", () => {
     const items = navItemsForRole("ADMIN");
     expect(items[0]).toBe(HOME);
-    expect(items).toHaveLength(18);
+    expect(items).toHaveLength(19);
+    expect(navItemsForRole("OFFICE_STAFF")).toHaveLength(18);
   });
 
   test("is empty for DRIVER (HOME is ADMIN/OFFICE only)", () => {
