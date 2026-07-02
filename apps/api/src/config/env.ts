@@ -128,6 +128,23 @@ const envSchema = z.object({
   R2_ACCESS_KEY_ID: z.preprocess(emptyStringAsUndefined, z.string().optional()),
   R2_SECRET_ACCESS_KEY: z.preprocess(emptyStringAsUndefined, z.string().optional()),
   R2_BUCKET: z.preprocess(emptyStringAsUndefined, z.string().optional()),
+
+  // Machine-ingest credential for the Traccar gateway → API hop (ADR-0042 c5,
+  // ticket M5). A static shared secret the gateway sends as an `X-Ingest-Key`
+  // header on every position forward; IngestKeyGuard compares it with
+  // crypto.timingSafeEqual and FAILS CLOSED — while this is unset the
+  // /telematics/ingest/* route answers 503, never open. Min 32 chars when set
+  // (mirrors BETTER_AUTH_SECRET's floor; generate with `openssl rand -hex 32`).
+  //
+  // Tier 1 secret per ADR-0013: lives ONLY in the on-box .env (ADR-0014), never
+  // committed, never logged (the `*.key` pino redact path backstops; the guard
+  // never logs it). OPTIONAL so dev/test/CI boot without it — there is no
+  // gateway outside production. Chosen over a machine user + bearer session
+  // (ADR-0042 c5): better-auth 1.6.11 has no api-key plugin, bearer tokens
+  // expire and would need a stored password + re-login state machine, and the
+  // hop is compose-network-internal (this key is defense-in-depth, not the
+  // only wall). Empty-string -> undefined, like SENTRY_DSN.
+  INGEST_API_KEY: z.preprocess(emptyStringAsUndefined, z.string().min(32).optional()),
 });
 
 export type Env = z.infer<typeof envSchema>;
