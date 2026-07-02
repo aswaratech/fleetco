@@ -1,3 +1,17 @@
 packages:
   - "apps/*"
   - "packages/*"
+
+# Supply-chain posture (semgrep package_managers.pnpm.* rules, ADR-0012
+# baseline; pnpm 10.33 supports all three):
+# - minimumReleaseAge: resolve only package versions published >= 7 days ago
+#   (10080 minutes) - brand-new releases are where compromised-package
+#   incidents live. No effect on frozen-lockfile installs (CI) - only on new
+#   resolutions.
+# - trustPolicy no-downgrade: a dependency update may not silently downgrade
+#   security-relevant settings.
+# - blockExoticSubdeps: transitive deps must come from the registry, never
+#   git/URL sources (both lockfiles verified to contain none).
+minimumReleaseAge: 10080
+trustPolicy: no-downgrade
+blockExoticSubdeps: true

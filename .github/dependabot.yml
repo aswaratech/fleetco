@@ -18,6 +18,11 @@ updates:
       time: "08:00"
       timezone: Asia/Kathmandu
     open-pull-requests-limit: 5
+    # Supply-chain cooldown (semgrep dependabot-missing-cooldown, ADR-0012
+    # baseline): wait 7 days before proposing newly published versions -
+    # brand-new releases are where compromised-package incidents live.
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: chore(deps)
       include: scope
@@ -61,6 +66,11 @@ updates:
       time: "08:00"
       timezone: Asia/Kathmandu
     open-pull-requests-limit: 3
+    # Supply-chain cooldown (semgrep dependabot-missing-cooldown, ADR-0012
+    # baseline): wait 7 days before proposing newly published versions -
+    # brand-new releases are where compromised-package incidents live.
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: chore(deps)
       include: scope
@@ -78,6 +88,11 @@ updates:
       time: "08:00"
       timezone: Asia/Kathmandu
     open-pull-requests-limit: 5
+    # Supply-chain cooldown (semgrep dependabot-missing-cooldown, ADR-0012
+    # baseline): wait 7 days before proposing newly published versions -
+    # brand-new releases are where compromised-package incidents live.
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: chore(deps)
       include: scope
