@@ -12,6 +12,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest"
 
 import { ZodValidationPipe } from "../src/common/zod-validation.pipe";
 import { AuthGuard } from "../src/modules/auth/auth.guard";
+import { RolesGuard } from "../src/modules/auth/roles.guard";
 import { AUTH } from "../src/modules/auth/auth.tokens";
 import type { AuthenticatedRequest } from "../src/modules/auth/auth.types";
 import { CustomersController } from "../src/modules/customers/customers.controller";
@@ -179,6 +180,8 @@ describe("CustomersController.list (integration, real Prisma)", () => {
         { provide: AUTH, useValue: { api: { getSession: () => null } } },
       ],
     })
+      .overrideGuard(RolesGuard)
+      .useValue({ canActivate: () => true })
       .overrideGuard(AuthGuard)
       .useValue({ canActivate: () => true })
       .compile();
@@ -308,6 +311,8 @@ describe("CustomersController.getById (integration, real Prisma)", () => {
         { provide: AUTH, useValue: { api: { getSession: () => null } } },
       ],
     })
+      .overrideGuard(RolesGuard)
+      .useValue({ canActivate: () => true })
       .overrideGuard(AuthGuard)
       .useValue({ canActivate: () => true })
       .compile();
@@ -566,6 +571,8 @@ describe("CustomersController.create / update / remove (integration, real Prisma
         { provide: AUTH, useValue: { api: { getSession: () => null } } },
       ],
     })
+      .overrideGuard(RolesGuard)
+      .useValue({ canActivate: () => true })
       .overrideGuard(AuthGuard)
       .useValue({ canActivate: () => true })
       .compile();

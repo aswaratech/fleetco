@@ -160,27 +160,34 @@ describe("RolesGuard (unit: stubbed Reflector + mock ExecutionContext)", () => {
     );
   });
 
-  test("DRIVER is inert — reserved role holds no capability → ForbiddenException", () => {
-    // DRIVER is reserved-but-undefined (ADR-0028 c1): even the derived-GPS view
-    // every live role has is denied, because DRIVER's capability set is empty.
+  test("DRIVER lacks the derived-GPS capability (deferred to D4–D6) → ForbiddenException", () => {
+    // DRIVER is live as of D2 but holds only trips:*/fuel-logs:* — the GPS caps
+    // are deferred until their row-scopes land (ADR-0034 c5).
     expect(() => evaluate({ permission: "gps:read-derived" }, { role: UserRole.DRIVER })).toThrow(
       ForbiddenException,
     );
   });
 
   test("an unexpected session role fails closed — denied a sensitive capability", () => {
-    // A corrupted/empty role narrows to OFFICE_STAFF (toUserRole), so an
+    // A corrupted/empty role narrows to DRIVER (toUserRole), so an
     // ADMIN-only capability is denied, never silently widened.
     expect(() => evaluate({ permission: "gps:read-raw" }, { role: "SUPER_USER" })).toThrow(
       ForbiddenException,
     );
   });
 
-  test("an unexpected session role still satisfies the operational floor (OFFICE_STAFF)", () => {
-    // The same fail-closed value (OFFICE_STAFF) DOES hold operational caps, so
-    // an unknown value is denied sensitive caps but keeps operational access —
-    // pinning exactly where the fail-closed floor sits.
-    expect(evaluate({ permission: "vehicles:*" }, { role: "SUPER_USER" })).toBe(true);
+  test("an unexpected session role is denied the operational floor (coerces to DRIVER)", () => {
+    // Since the 2026-07-02 hardening the fail-closed value is DRIVER — the
+    // least-privileged LIVE role — so an unknown value no longer keeps
+    // operational access (the pre-D2 coercion to OFFICE_STAFF would now be an
+    // ESCALATION: every operational controller carries @RequirePermission and
+    // OFFICE_STAFF passes them all). It keeps only the DRIVER pair, which the
+    // service-layer own-record scope further constrains (403 with no Driver
+    // link) — pinning exactly where the fail-closed floor sits now.
+    expect(() => evaluate({ permission: "vehicles:*" }, { role: "SUPER_USER" })).toThrow(
+      ForbiddenException,
+    );
+    expect(evaluate({ permission: "trips:*" }, { role: "SUPER_USER" })).toBe(true);
   });
 });
 
@@ -190,8 +197,9 @@ describe("RolesGuard (unit: stubbed Reflector + mock ExecutionContext)", () => {
 
 // Throwaway controller — exists ONLY in this test to exercise the real
 // @UseGuards(AuthGuard, RolesGuard) chain end-to-end. It is never registered in
-// the application (ADR-0028 c5: no sensitive surface exists yet; Phase-1
-// controllers stay ungated). One route per decorator shape plus one undecorated
+// the application. (Since the 2026-07-02 hardening every real domain controller
+// carries the chain too — rbac.matrix.test.ts pins that wiring; this file pins
+// the guard MACHINERY.) One route per decorator shape plus one undecorated
 // route to prove the opt-in default.
 @Controller("__test-rbac")
 class TestRbacController {

@@ -15,6 +15,8 @@ import {
 
 import { ZodValidationPipe } from "../../common/zod-validation.pipe";
 import { AuthGuard } from "../auth/auth.guard";
+import { RequirePermission } from "../auth/decorators";
+import { RolesGuard } from "../auth/roles.guard";
 import type { AuthenticatedRequest } from "../auth/auth.types";
 
 import {
@@ -71,7 +73,11 @@ export interface ExpenseLogsListResponse {
 // the same way Fuel logs iter 19 → iter 20 and Jobs iter 17 → iter 18
 // staged.
 @Controller("api/v1/expense-logs")
-@UseGuards(AuthGuard)
+// RBAC (2026-07-02 hardening): the expense-logs:* capability gates every route in this
+// controller on the composed AuthGuard + RolesGuard chain (ADR-0028 c5). Before
+// this, the controller was AuthGuard-only and open to any signed-in role.
+@RequirePermission("expense-logs:*")
+@UseGuards(AuthGuard, RolesGuard)
 export class ExpenseLogsController {
   constructor(private readonly expenseLogs: ExpenseLogsService) {}
 

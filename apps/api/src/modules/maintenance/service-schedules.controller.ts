@@ -19,6 +19,8 @@ import type { ServiceSchedule } from "@prisma/client";
 
 import { ZodValidationPipe } from "../../common/zod-validation.pipe";
 import { AuthGuard } from "../auth/auth.guard";
+import { RequirePermission } from "../auth/decorators";
+import { RolesGuard } from "../auth/roles.guard";
 import type { AuthenticatedRequest } from "../auth/auth.types";
 
 // ServiceSchedulesService is injected by NestJS via emitDecoratorMetadata; the
@@ -61,7 +63,11 @@ export interface ServiceSchedulesListResponse {
 // a maintenance:write capability, would add RolesGuard the same opt-in way the
 // geofences controller does.)
 @Controller("api/v1/service-schedules")
-@UseGuards(AuthGuard)
+// RBAC (2026-07-02 hardening): the maintenance:* capability gates every route in this
+// controller on the composed AuthGuard + RolesGuard chain (ADR-0028 c5). Before
+// this, the controller was AuthGuard-only and open to any signed-in role.
+@RequirePermission("maintenance:*")
+@UseGuards(AuthGuard, RolesGuard)
 export class ServiceSchedulesController {
   constructor(private readonly schedules: ServiceSchedulesService) {}
 

@@ -2,6 +2,8 @@ import { Controller, Get, Query, UseGuards } from "@nestjs/common";
 
 import { ZodValidationPipe } from "../../common/zod-validation.pipe";
 import { AuthGuard } from "../auth/auth.guard";
+import { RequirePermission } from "../auth/decorators";
+import { RolesGuard } from "../auth/roles.guard";
 
 import { ReportsQuerySchema, type ReportsQuery } from "./reports.schemas";
 
@@ -32,7 +34,11 @@ import {
 // future Phase-2 surface (e.g., a public ledger summary) would
 // override per-route.
 @Controller("api/v1/reports")
-@UseGuards(AuthGuard)
+// RBAC (2026-07-02 hardening): the reports:read capability gates every route in this
+// controller on the composed AuthGuard + RolesGuard chain (ADR-0028 c5). Before
+// this, the controller was AuthGuard-only and open to any signed-in role.
+@RequirePermission("reports:read")
+@UseGuards(AuthGuard, RolesGuard)
 export class ReportsController {
   constructor(private readonly reports: ReportsService) {}
 

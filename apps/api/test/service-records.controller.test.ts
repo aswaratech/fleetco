@@ -6,6 +6,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest"
 
 import { ZodValidationPipe } from "../src/common/zod-validation.pipe";
 import { AuthGuard } from "../src/modules/auth/auth.guard";
+import { RolesGuard } from "../src/modules/auth/roles.guard";
 import { AUTH } from "../src/modules/auth/auth.tokens";
 import type { AuthenticatedRequest } from "../src/modules/auth/auth.types";
 import { ServiceRecordsController } from "../src/modules/maintenance/service-records.controller";
@@ -153,6 +154,8 @@ describe("ServiceRecordsController (integration, real Prisma)", () => {
         { provide: AUTH, useValue: { api: { getSession: () => null } } },
       ],
     })
+      .overrideGuard(RolesGuard)
+      .useValue({ canActivate: () => true })
       .overrideGuard(AuthGuard)
       .useValue({ canActivate: () => true })
       .compile();

@@ -11,6 +11,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from "vit
 
 import { ZodValidationPipe } from "../src/common/zod-validation.pipe";
 import { AuthGuard } from "../src/modules/auth/auth.guard";
+import { RolesGuard } from "../src/modules/auth/roles.guard";
 import { AUTH } from "../src/modules/auth/auth.tokens";
 import type { AuthenticatedRequest } from "../src/modules/auth/auth.types";
 import { DriverScopeService, type Actor } from "../src/modules/auth/driver-scope.service";
@@ -185,6 +186,8 @@ describe("TripsController.list / getById (integration, real Prisma)", () => {
         { provide: Logger, useValue: { log: () => undefined } },
       ],
     })
+      .overrideGuard(RolesGuard)
+      .useValue({ canActivate: () => true })
       .overrideGuard(AuthGuard)
       .useValue({ canActivate: () => true })
       .compile();
@@ -208,7 +211,12 @@ describe("TripsController.list / getById (integration, real Prisma)", () => {
     // The list/getById handlers now read the session to build the actor
     // (ADR-0034). No role → OFFICE_STAFF via toUserRole, so these read-path
     // tests assert the unchanged non-DRIVER behavior.
-    fakeRequest = { session: { user: { id: adminId } } } as unknown as AuthenticatedRequest;
+    fakeRequest = {
+      // Explicit ADMIN role: since the 2026-07-02 hardening, toUserRole coerces
+      // a role-less session to DRIVER (fail-closed), which would trip the
+      // service-layer driver scope in these non-driver test sections.
+      session: { user: { id: adminId, role: "ADMIN" } },
+    } as unknown as AuthenticatedRequest;
   });
 
   test("list() returns the documented response shape { items, total, skip, take, sortBy, sortDir }", async () => {
@@ -546,6 +554,8 @@ describe("TripsController.create / update / remove (integration, real Prisma)", 
         { provide: Logger, useValue: fakeLogger },
       ],
     })
+      .overrideGuard(RolesGuard)
+      .useValue({ canActivate: () => true })
       .overrideGuard(AuthGuard)
       .useValue({ canActivate: () => true })
       .compile();
@@ -573,7 +583,12 @@ describe("TripsController.create / update / remove (integration, real Prisma)", 
     // is overridden, so we hand the controller a minimal fake. Cast is
     // necessary because AuthenticatedRequest extends express.Request,
     // which we don't construct in full.
-    fakeRequest = { session: { user: { id: adminId } } } as unknown as AuthenticatedRequest;
+    fakeRequest = {
+      // Explicit ADMIN role: since the 2026-07-02 hardening, toUserRole coerces
+      // a role-less session to DRIVER (fail-closed), which would trip the
+      // service-layer driver scope in these non-driver test sections.
+      session: { user: { id: adminId, role: "ADMIN" } },
+    } as unknown as AuthenticatedRequest;
   });
 
   test("create() persists the trip with createdById from the session (HTTP 201)", async () => {

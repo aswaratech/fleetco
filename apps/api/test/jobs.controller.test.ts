@@ -6,6 +6,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest"
 
 import { ZodValidationPipe } from "../src/common/zod-validation.pipe";
 import { AuthGuard } from "../src/modules/auth/auth.guard";
+import { RolesGuard } from "../src/modules/auth/roles.guard";
 import { AUTH } from "../src/modules/auth/auth.tokens";
 import type { AuthenticatedRequest } from "../src/modules/auth/auth.types";
 import { JobsController } from "../src/modules/jobs/jobs.controller";
@@ -184,6 +185,8 @@ describe("JobsController.list (integration, real Prisma)", () => {
         { provide: AUTH, useValue: { api: { getSession: () => null } } },
       ],
     })
+      .overrideGuard(RolesGuard)
+      .useValue({ canActivate: () => true })
       .overrideGuard(AuthGuard)
       .useValue({ canActivate: () => true })
       .compile();
@@ -357,6 +360,8 @@ describe("JobsController.getById (integration, real Prisma)", () => {
         { provide: AUTH, useValue: { api: { getSession: () => null } } },
       ],
     })
+      .overrideGuard(RolesGuard)
+      .useValue({ canActivate: () => true })
       .overrideGuard(AuthGuard)
       .useValue({ canActivate: () => true })
       .compile();
@@ -522,6 +527,8 @@ describe("JobsController.create / update / remove (integration, real Prisma)", (
         { provide: AUTH, useValue: { api: { getSession: () => null } } },
       ],
     })
+      .overrideGuard(RolesGuard)
+      .useValue({ canActivate: () => true })
       .overrideGuard(AuthGuard)
       .useValue({ canActivate: () => true })
       .compile();
