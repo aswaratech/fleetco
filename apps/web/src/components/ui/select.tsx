@@ -32,12 +32,16 @@ import { cn } from "@/lib/utils";
 //           DESIGN.md §Iconography "Stroke width" (1.5/1.75 — NOT Lucide's
 //           default of 2). A true null visual diff; no size class changed.
 //       (b) Aligned import paths to project convention (`@/lib/utils`).
-//       (c) Kept Tailwind class strings byte-for-byte from upstream; the
-//           CSS variable aliases in apps/web/src/app/globals.css already
-//           map `--background`, `--muted-foreground`, `--border`,
-//           `--popover`, `--input`, etc. into the project tokens, so
-//           the component renders correctly against DESIGN.md tokens
-//           without further substitution.
+//       (c) Class strings are RE-POINTED from upstream's `:root` alias
+//           utilities to the live `@theme` tokens. (An earlier version of
+//           this note claimed the `:root` aliases "already map into the
+//           project tokens so upstream classes render correctly" — that was
+//           false and is exactly the failure the token-consumption guard
+//           exists to catch: in Tailwind 4 only `@theme --color-*` variables
+//           emit utilities, so `border-input` / `bg-popover` etc. compile to
+//           NOTHING. The 2026-07-02 audit found 27 route files that had
+//           copied class strings on that false assurance. Never keep
+//           upstream color classes byte-for-byte; re-point them.)
 //   - When upstream changes meaningfully (animation tokens, new size
 //     variant, accessibility fix), re-fetch the source and re-apply the
 //     edits above in a separate PR per ADR-0016's "manual upstream
