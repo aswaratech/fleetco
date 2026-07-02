@@ -85,7 +85,7 @@ export function PerVehicleCostFilters({
         </label>
         <select
           id="report-filter-vehicle"
-          className="border-input focus-visible:border-ring focus-visible:ring-ring/50 h-9 w-56 rounded-md border bg-transparent px-3 py-1 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:ring-[3px]"
+          className="border-border-strong focus-visible:border-border-focus focus-visible:ring-border-focus/50 h-9 w-56 rounded-md border bg-transparent px-3 py-1 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:ring-[length:var(--focus-ring-width)]"
           value={vehicleId}
           onChange={(e) => {
             setParam("vehicleId", e.target.value);
