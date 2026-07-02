@@ -18,6 +18,8 @@ The orchestration loop design lives at `docs/runbook/orchestration-loop-design.m
 
 The API error-mapping convention lives at `docs/runbook/api-error-mapping.md`. It documents how Prisma error codes (P2002, P2003, P2025) translate to HTTP status codes (409, 404) across modules, how zod validation failures surface as 400, and how new modules should implement the mapping without inventing per-module response shapes. Introduced during the Vehicles write-path slice (iter 2) when the first unique-constraint violation needed an honest 4xx response; updated whenever the mapping table changes.
 
+The main branch-protection ruleset lives at `docs/runbook/branch-protection.md`. It records the GitHub repository ruleset that enforces CLAUDE.md's "`main` is always green / PRs are required to merge" rules at the server layer (PR-required, no direct or force-push or deletion, the eight CI checks green) — the backstop the autonomous loop's merge authority (ADR-0022) depends on. It carries the exact required-check contexts plus a load-bearing warning to re-pull them from a live PR before applying, because a wrong context name deadlocks every future merge. Applied out-of-band by the operator (repo-admin); it is `STATUS: DRAFT` until that apply.
+
 ## Procedures we know we will need
 
 The following procedures will be needed at known points in the project's life. We create stubs now so that the file paths exist and future PRs can fill them in rather than inventing path conventions on the fly.
