@@ -1,6 +1,11 @@
 import { InjectQueue } from "@nestjs/bullmq";
 import { Injectable, NotFoundException } from "@nestjs/common";
-import { type GeofenceType, type Prisma } from "@prisma/client";
+import {
+  type GeofenceType,
+  type Prisma,
+  type VehicleKind,
+  type VehicleStatus,
+} from "@prisma/client";
 import { type Queue } from "bullmq";
 
 import { type GpsPingInput, type PingSortColumn, type PingSortDir } from "./telematics.schemas";
@@ -116,6 +121,47 @@ const LOCATION_SELECT = {
 } satisfies Prisma.GpsPingSelect;
 
 export type LocationFix = Prisma.GpsPingGetPayload<{ select: typeof LOCATION_SELECT }>;
+
+// FLEET-WIDE latest-positions projection (gps:read-derived) — the live map's
+// poll target (ADR-0042 c10, ticket M7). One latest fix per NON-RETIRED
+// vehicle (never trails — ADR-0027 c6 keeps a dense trail Tier 5; this is the
+// per-vehicle `latestLocation` derived view widened to the fleet), plus a
+// SERVER-computed `fixAgeSeconds` so the map's staleness treatment never
+// trusts a client clock. Vehicles with no fix appear with `fix: null`
+// (absence-of-data is data — the DESIGN.md §Live map untracked list).
+export interface LatestPositionFix {
+  latitude: number;
+  longitude: number;
+  speed: number | null;
+  heading: number | null;
+  ignition: boolean | null;
+  timestamp: Date;
+}
+
+export interface LatestPosition {
+  vehicleId: string;
+  registrationNumber: string;
+  kind: VehicleKind;
+  status: VehicleStatus;
+  fix: LatestPositionFix | null;
+  fixAgeSeconds: number | null;
+}
+
+// The flat row the SQL below returns; latestPositions() folds it into the
+// nested LatestPosition shape (a LEFT-JOIN miss leaves every fix column null).
+interface LatestPositionRow {
+  vehicleId: string;
+  registrationNumber: string;
+  kind: VehicleKind;
+  status: VehicleStatus;
+  latitude: number | null;
+  longitude: number | null;
+  speed: number | null;
+  heading: number | null;
+  ignition: boolean | null;
+  timestamp: Date | null;
+  fixAgeSeconds: number | null;
+}
 
 // A geofence to classify the vehicle's LATEST fix against. THREE kinds:
 //   • circle  — proximity (ST_DWithin), caller-parameterized per request.
@@ -307,6 +353,80 @@ export class TelematicsService {
       orderBy: [{ timestamp: "desc" }, { id: "desc" }],
       select: LOCATION_SELECT,
     });
+  }
+
+  /**
+   * FLEET-WIDE latest positions (gps:read-derived) — the live map's ~20 s poll
+   * target (ADR-0042 c10, M7). One row per non-retired vehicle (ACTIVE +
+   * IN_MAINTENANCE; RETIRED / SOLD are excluded — they are not "the fleet"),
+   * LEFT-joined to its single latest fix so untracked / no-fix vehicles appear
+   * with `fix: null` rather than silently vanishing from the fleet picture.
+   *
+   * Raw SQL because Prisma cannot express a per-vehicle top-1 join. The shape
+   * is a LEFT JOIN LATERAL … ORDER BY timestamp DESC LIMIT 1 — the join-shaped
+   * equivalent of ADR-0042's `DISTINCT ON` sketch, and the form that actually
+   * drives from the vehicles side (which the LEFT JOIN needs) — each lateral
+   * probe is a single descent of the M3 composite (vehicleId, timestamp DESC)
+   * index. The `id DESC` tiebreaker matches `latestLocation` above so the two
+   * derived views can never disagree about which same-timestamp fix is
+   * "latest".
+   *
+   * `fixAgeSeconds` is computed SERVER-side (NOW() - timestamp, floored,
+   * clamped ≥ 0 against clock skew) so the map's staleness thresholds never
+   * depend on a client clock. Tier-5 egress discipline: one fix per vehicle,
+   * never the generated geometry column, coordinates go to the authorized
+   * caller only (this query logs nothing; the redact/scrub denylists cover the
+   * coordinate keys as a backstop). No pagination: the result is bounded by
+   * fleet size (one row per vehicle), not by ping volume.
+   */
+  async latestPositions(): Promise<LatestPosition[]> {
+    const rows = await this.prisma.$queryRaw<LatestPositionRow[]>`
+      SELECT
+        v."id"                 AS "vehicleId",
+        v."registrationNumber" AS "registrationNumber",
+        v."kind"               AS "kind",
+        v."status"             AS "status",
+        p."latitude"           AS "latitude",
+        p."longitude"          AS "longitude",
+        p."speed"              AS "speed",
+        p."heading"            AS "heading",
+        p."ignition"           AS "ignition",
+        p."timestamp"          AS "timestamp",
+        CASE
+          WHEN p."timestamp" IS NULL THEN NULL
+          ELSE GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - p."timestamp"))))::int
+        END                    AS "fixAgeSeconds"
+      FROM "vehicle" v
+      LEFT JOIN LATERAL (
+        SELECT gp."latitude", gp."longitude", gp."speed", gp."heading",
+               gp."ignition", gp."timestamp"
+        FROM "gps_ping" gp
+        WHERE gp."vehicleId" = v."id"
+        ORDER BY gp."timestamp" DESC, gp."id" DESC
+        LIMIT 1
+      ) p ON TRUE
+      WHERE v."status" NOT IN ('RETIRED', 'SOLD')
+      ORDER BY v."registrationNumber" ASC
+    `;
+
+    return rows.map((row) => ({
+      vehicleId: row.vehicleId,
+      registrationNumber: row.registrationNumber,
+      kind: row.kind,
+      status: row.status,
+      fix:
+        row.timestamp === null || row.latitude === null || row.longitude === null
+          ? null
+          : {
+              latitude: row.latitude,
+              longitude: row.longitude,
+              speed: row.speed,
+              heading: row.heading,
+              ignition: row.ignition,
+              timestamp: row.timestamp,
+            },
+      fixAgeSeconds: row.fixAgeSeconds,
+    }));
   }
 
   /**

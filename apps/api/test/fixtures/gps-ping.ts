@@ -30,6 +30,9 @@ export interface SeedGpsPingParams {
   altitude?: number | null;
   speed?: number | null;
   heading?: number | null;
+  // Engine ignition state (ADR-0042 M3). Defaults null — the pre-hardware
+  // producer shape — so every existing seed is unchanged.
+  ignition?: boolean | null;
   timestamp?: Date;
 }
 
@@ -47,6 +50,7 @@ export async function seedGpsPing(
       altitude: params.altitude === undefined ? null : params.altitude,
       speed: params.speed === undefined ? null : params.speed,
       heading: params.heading === undefined ? null : params.heading,
+      ignition: params.ignition === undefined ? null : params.ignition,
       timestamp: params.timestamp ?? new Date("2026-02-15T08:00:00Z"),
     },
   });
