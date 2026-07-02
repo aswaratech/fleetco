@@ -19,8 +19,14 @@
  *
  * Exit 1 with a per-file report when anything dangles.
  */
+// Node globals (URL/console/process) are imported explicitly from node:
+// modules — the root eslint flat config lints this file without node globals
+// declared, and explicit imports beat a per-path config carve-out.
+import console from "node:console";
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import process from "node:process";
+import { URL } from "node:url";
 
 const ROOT = resolve(dirname(new URL(import.meta.url).pathname), "..");
 
