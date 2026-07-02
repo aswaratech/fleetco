@@ -1,0 +1,282 @@
+// RBAC capability-matrix tests for the 2026-07-02 hardening.
+//
+// Context: the whole-project audit found 12 of 16 controllers AuthGuard-only —
+// RolesGuard is opt-in (no decorator → any signed-in role), so the live DRIVER
+// role's phone bearer credential could CRUD vehicles, drivers (Tier-2 PII),
+// customers, jobs, expense-logs, invoices (including the irreversible
+// issue/cancel lifecycle), and maintenance, and read reports. The hardening
+// wires `@RequirePermission` + RolesGuard onto every domain controller, mints
+// the missing `maintenance:*` / `invoices:read` / `invoices:write` tokens, and
+// re-targets the `toUserRole` fail-closed coercion at DRIVER (the
+// least-privileged LIVE role — the old OFFICE_STAFF target would now be an
+// escalation).
+//
+// Three layers, cheapest-exhaustive first:
+//   1. permissions.ts unit — the new tokens sit in exactly the right role sets,
+//      and the coercion fails closed to DRIVER.
+//   2. Reflection — EVERY gated controller class (and every invoices handler)
+//      carries the AuthGuard + RolesGuard pair and the expected token. This is
+//      the exhaustive wiring proof: a controller dropped from this table or a
+//      typo'd token fails here without booting anything.
+//   3. HTTP boundary — one real end-to-end matrix over the composed chain
+//      (vehicles for the deny/allow split, trips for DRIVER continuity), since
+//      metadata alone doesn't prove the chain executes. The guard MACHINERY
+//      itself is pinned by roles.guard.test.ts; the per-module read/write
+//      splits for geofences/telematics/notification-logs are pinned by their
+//      own controller tests.
+import type { AddressInfo } from "node:net";
+import { type INestApplication } from "@nestjs/common";
+import { Test } from "@nestjs/testing";
+import { UserRole } from "@prisma/client";
+import { Logger } from "nestjs-pino";
+import { afterAll, beforeAll, describe, expect, test } from "vitest";
+
+import { AuthGuard } from "../src/modules/auth/auth.guard";
+import { AUTH } from "../src/modules/auth/auth.tokens";
+import { REQUIRE_PERMISSION_KEY } from "../src/modules/auth/decorators";
+import { DriverScopeService } from "../src/modules/auth/driver-scope.service";
+import { roleHasCapability, toUserRole, type Capability } from "../src/modules/auth/permissions";
+import { RolesGuard } from "../src/modules/auth/roles.guard";
+import { AuthController } from "../src/modules/auth/auth.controller";
+import { CustomersController } from "../src/modules/customers/customers.controller";
+import { DriversController } from "../src/modules/drivers/drivers.controller";
+import { ExpenseLogsController } from "../src/modules/expense-logs/expense-logs.controller";
+import { FuelLogsController } from "../src/modules/fuel-logs/fuel-logs.controller";
+import { InvoicesController } from "../src/modules/invoices/invoices.controller";
+import { JobsController } from "../src/modules/jobs/jobs.controller";
+import { ServiceRecordsController } from "../src/modules/maintenance/service-records.controller";
+import { ServiceSchedulesController } from "../src/modules/maintenance/service-schedules.controller";
+import { ReportsController } from "../src/modules/reports/reports.controller";
+import { TripsController } from "../src/modules/trips/trips.controller";
+import { TripsService } from "../src/modules/trips/trips.service";
+import { VehiclesController } from "../src/modules/vehicles/vehicles.controller";
+import { VehiclesService } from "../src/modules/vehicles/vehicles.service";
+import { PrismaService } from "../src/modules/prisma/prisma.service";
+import { resetDb } from "./db";
+import { seedDriver, seedUser } from "./fixtures/trip";
+
+// ---------------------------------------------------------------------------
+// 1 — permissions.ts: the newly-minted tokens and the re-targeted coercion
+// ---------------------------------------------------------------------------
+
+describe("newly-minted capability tokens (2026-07-02 hardening)", () => {
+  test("maintenance:* is on the operational floor (ADMIN + OFFICE_STAFF), not DRIVER", () => {
+    expect(roleHasCapability(UserRole.ADMIN, "maintenance:*")).toBe(true);
+    expect(roleHasCapability(UserRole.OFFICE_STAFF, "maintenance:*")).toBe(true);
+    expect(roleHasCapability(UserRole.DRIVER, "maintenance:*")).toBe(false);
+  });
+
+  test("invoices:read is on the operational floor; invoices:write is ADMIN-only", () => {
+    expect(roleHasCapability(UserRole.ADMIN, "invoices:read")).toBe(true);
+    expect(roleHasCapability(UserRole.OFFICE_STAFF, "invoices:read")).toBe(true);
+    expect(roleHasCapability(UserRole.DRIVER, "invoices:read")).toBe(false);
+
+    expect(roleHasCapability(UserRole.ADMIN, "invoices:write")).toBe(true);
+    // The load-bearing half of the split: an office-staff session reads and
+    // downloads invoices but cannot create/issue/cancel/credit one.
+    expect(roleHasCapability(UserRole.OFFICE_STAFF, "invoices:write")).toBe(false);
+    expect(roleHasCapability(UserRole.DRIVER, "invoices:write")).toBe(false);
+  });
+});
+
+describe("toUserRole fails closed to DRIVER (the least-privileged live role)", () => {
+  test("exact live values pass through", () => {
+    expect(toUserRole(UserRole.ADMIN)).toBe(UserRole.ADMIN);
+    expect(toUserRole(UserRole.OFFICE_STAFF)).toBe(UserRole.OFFICE_STAFF);
+    expect(toUserRole(UserRole.DRIVER)).toBe(UserRole.DRIVER);
+  });
+
+  test("null / undefined / unknown coerce to DRIVER, never to an operational role", () => {
+    // Coercing to OFFICE_STAFF (the pre-D2 behavior) would ESCALATE now that
+    // every operational controller requires a capability OFFICE_STAFF holds.
+    expect(toUserRole(null)).toBe(UserRole.DRIVER);
+    expect(toUserRole(undefined)).toBe(UserRole.DRIVER);
+    expect(toUserRole("")).toBe(UserRole.DRIVER);
+    expect(toUserRole("SUPER_USER")).toBe(UserRole.DRIVER);
+    expect(toUserRole("admin")).toBe(UserRole.DRIVER); // case-sensitive on purpose
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2 — Reflection: every domain controller is wired, with the right token
+// ---------------------------------------------------------------------------
+
+// NestJS stores @UseGuards metadata under this key (GUARDS_METADATA in
+// @nestjs/common/constants — inlined here to avoid the deep package import).
+const GUARDS_METADATA = "__guards__";
+
+// The exhaustive class-level wiring table. Adding a domain controller without
+// adding it here is deliberate friction: the new controller's PR must state
+// its capability.
+const CLASS_TOKEN_TABLE: readonly [string, object, Capability][] = [
+  ["VehiclesController", VehiclesController, "vehicles:*"],
+  ["DriversController", DriversController, "drivers:*"],
+  ["CustomersController", CustomersController, "customers:*"],
+  ["JobsController", JobsController, "jobs:*"],
+  ["TripsController", TripsController, "trips:*"],
+  ["FuelLogsController", FuelLogsController, "fuel-logs:*"],
+  ["ExpenseLogsController", ExpenseLogsController, "expense-logs:*"],
+  ["ReportsController", ReportsController, "reports:read"],
+  ["ServiceSchedulesController", ServiceSchedulesController, "maintenance:*"],
+  ["ServiceRecordsController", ServiceRecordsController, "maintenance:*"],
+];
+
+// The invoices per-route split (the geofences read/write pattern applied to
+// money): reads for both office roles, writes ADMIN-only.
+const INVOICES_HANDLER_TABLE: readonly [string, Capability][] = [
+  ["list", "invoices:read"],
+  ["getById", "invoices:read"],
+  ["getPdf", "invoices:read"],
+  ["create", "invoices:write"],
+  ["update", "invoices:write"],
+  ["cancel", "invoices:write"],
+  ["issue", "invoices:write"],
+  ["createCreditNote", "invoices:write"],
+  ["addLine", "invoices:write"],
+  ["buildFromJob", "invoices:write"],
+  ["updateLine", "invoices:write"],
+  ["removeLine", "invoices:write"],
+];
+
+describe("controller wiring (reflection over guard + permission metadata)", () => {
+  test.each(CLASS_TOKEN_TABLE)(
+    "%s requires its capability at class level",
+    (_name, ctor, token) => {
+      expect(Reflect.getMetadata(REQUIRE_PERMISSION_KEY, ctor)).toBe(token);
+    },
+  );
+
+  test.each(CLASS_TOKEN_TABLE)("%s runs the AuthGuard + RolesGuard chain", (_name, ctor) => {
+    const guards: unknown[] = Reflect.getMetadata(GUARDS_METADATA, ctor) ?? [];
+    expect(guards).toContain(AuthGuard);
+    expect(guards).toContain(RolesGuard);
+  });
+
+  test("InvoicesController runs the chain at class level with the per-route split", () => {
+    const guards: unknown[] = Reflect.getMetadata(GUARDS_METADATA, InvoicesController) ?? [];
+    expect(guards).toContain(AuthGuard);
+    expect(guards).toContain(RolesGuard);
+    // No class-level token: every route declares its own side of the split.
+    expect(Reflect.getMetadata(REQUIRE_PERMISSION_KEY, InvoicesController)).toBeUndefined();
+  });
+
+  test.each(INVOICES_HANDLER_TABLE)("InvoicesController.%s requires %s", (method, token) => {
+    const handler: unknown = InvoicesController.prototype[method as keyof InvoicesController];
+    expect(typeof handler).toBe("function");
+    expect(Reflect.getMetadata(REQUIRE_PERMISSION_KEY, handler as object)).toBe(token);
+  });
+
+  test("GET /me stays capability-free — any authenticated role reads its own role", () => {
+    expect(Reflect.getMetadata(REQUIRE_PERMISSION_KEY, AuthController)).toBeUndefined();
+    expect(
+      Reflect.getMetadata(REQUIRE_PERMISSION_KEY, AuthController.prototype.me),
+    ).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3 — HTTP boundary: the composed chain enforces the matrix end-to-end
+// ---------------------------------------------------------------------------
+
+// AUTH stub per the geofences/telematics precedent: AuthGuard calls
+// getSession({ headers }); `x-test-role` drives the role, `x-test-user` the
+// user id (so the DRIVER-continuity case can be a user with a real Driver
+// link). No header → null session → 401.
+const AUTH_STUB = {
+  api: {
+    getSession: async ({ headers }: { headers: Headers }) => {
+      const role = headers.get("x-test-role");
+      if (role === null) return null;
+      const userId = headers.get("x-test-user") ?? "user_rbac_admin";
+      return {
+        session: {
+          id: "sess_test",
+          token: "tok_test",
+          userId,
+          expiresAt: new Date(Date.now() + 60_000),
+        },
+        user: { id: userId, email: `${userId}@fleetco.test`, name: "Test", role },
+      };
+    },
+  },
+};
+
+describe("RBAC HTTP matrix (real AuthGuard + RolesGuard over gated controllers)", () => {
+  let app: INestApplication;
+  let baseUrl: string;
+  let linkedDriverUserId: string;
+
+  beforeAll(async () => {
+    const moduleRef = await Test.createTestingModule({
+      controllers: [VehiclesController, TripsController],
+      providers: [
+        VehiclesService,
+        TripsService,
+        DriverScopeService,
+        PrismaService,
+        AuthGuard,
+        RolesGuard,
+        { provide: AUTH, useValue: AUTH_STUB },
+        // TripsController injects nestjs-pino's Logger (T_SLI2). This module
+        // does not import LoggerModule, so bind a no-op fake; this matrix
+        // never asserts on SLI logging.
+        { provide: Logger, useValue: { log: () => undefined } },
+      ],
+    }).compile();
+
+    app = moduleRef.createNestApplication({ logger: false });
+    await app.listen(0);
+    const address: AddressInfo | string | null = app.getHttpServer().address();
+    if (typeof address !== "object" || address === null) {
+      throw new Error("expected the test server to bind a TCP port");
+    }
+    baseUrl = `http://127.0.0.1:${address.port}`;
+
+    const prisma = moduleRef.get(PrismaService);
+    await resetDb(prisma);
+    // A DRIVER user WITH a Driver link — the continuity case: the route gate
+    // admits trips:* and the row scope then resolves their own records.
+    const adminId = await seedUser(prisma);
+    linkedDriverUserId = await seedUser(prisma, UserRole.DRIVER);
+    await seedDriver(prisma, adminId, { userId: linkedDriverUserId });
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  async function get(path: string, role?: string, userId?: string): Promise<number> {
+    const headers: Record<string, string> = {};
+    if (role !== undefined) headers["x-test-role"] = role;
+    if (userId !== undefined) headers["x-test-user"] = userId;
+    const res = await fetch(`${baseUrl}${path}`, { headers });
+    return res.status;
+  }
+
+  test("anonymous on /vehicles → 401 (AuthGuard, unchanged)", async () => {
+    expect(await get("/api/v1/vehicles")).toBe(401);
+  });
+
+  test("DRIVER on /vehicles → 403 — the audit's headline gap, closed", async () => {
+    // Before the hardening this returned 200 with the full fleet register.
+    expect(await get("/api/v1/vehicles", UserRole.DRIVER)).toBe(403);
+  });
+
+  test("OFFICE_STAFF and ADMIN keep /vehicles (operational floor)", async () => {
+    expect(await get("/api/v1/vehicles", UserRole.OFFICE_STAFF)).toBe(200);
+    expect(await get("/api/v1/vehicles", UserRole.ADMIN)).toBe(200);
+  });
+
+  test("DRIVER continuity: a linked driver still lists their own trips → 200", async () => {
+    // The route gate admits DRIVER (trips:* is theirs); DriverScopeService
+    // then scopes rows. The phone app's flows survive the hardening.
+    expect(await get("/api/v1/trips", UserRole.DRIVER, linkedDriverUserId)).toBe(200);
+  });
+
+  test("DRIVER without a Driver link on /trips → 403 (row scope fails closed)", async () => {
+    // Passes the route gate (trips:* held) and is then rejected by the
+    // service-layer own-record predicate — proving both layers are live and
+    // ordered as designed (gate = operation class, scope = records).
+    expect(await get("/api/v1/trips", UserRole.DRIVER, "user_rbac_unlinked")).toBe(403);
+  });
+});

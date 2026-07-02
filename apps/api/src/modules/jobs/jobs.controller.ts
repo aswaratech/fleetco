@@ -17,6 +17,8 @@ import {
 
 import { ZodValidationPipe } from "../../common/zod-validation.pipe";
 import { AuthGuard } from "../auth/auth.guard";
+import { RequirePermission } from "../auth/decorators";
+import { RolesGuard } from "../auth/roles.guard";
 import type { AuthenticatedRequest } from "../auth/auth.types";
 
 // JobsService is injected by NestJS via emitDecoratorMetadata; the
@@ -68,7 +70,11 @@ export interface JobsListResponse {
 // the same way Trips iter 8 → iter 9 and Customers iter 15 → iter 16
 // staged.
 @Controller("api/v1/jobs")
-@UseGuards(AuthGuard)
+// RBAC (2026-07-02 hardening): the jobs:* capability gates every route in this
+// controller on the composed AuthGuard + RolesGuard chain (ADR-0028 c5). Before
+// this, the controller was AuthGuard-only and open to any signed-in role.
+@RequirePermission("jobs:*")
+@UseGuards(AuthGuard, RolesGuard)
 export class JobsController {
   constructor(private readonly jobs: JobsService) {}
 

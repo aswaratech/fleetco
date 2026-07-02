@@ -16,6 +16,8 @@ import {
 import type { Vehicle } from "@prisma/client";
 
 import { AuthGuard } from "../auth/auth.guard";
+import { RequirePermission } from "../auth/decorators";
+import { RolesGuard } from "../auth/roles.guard";
 import type { AuthenticatedRequest } from "../auth/auth.types";
 
 // VehiclesService and TripsService are injected by NestJS via
@@ -81,7 +83,11 @@ export interface VehicleStatsResponse {
 // future-proofs the URL space without coupling unrelated controllers
 // to the same prefix.
 @Controller("api/v1/vehicles")
-@UseGuards(AuthGuard)
+// RBAC (2026-07-02 hardening): the vehicles:* capability gates every route in this
+// controller on the composed AuthGuard + RolesGuard chain (ADR-0028 c5). Before
+// this, the controller was AuthGuard-only and open to any signed-in role.
+@RequirePermission("vehicles:*")
+@UseGuards(AuthGuard, RolesGuard)
 export class VehiclesController {
   constructor(
     private readonly vehicles: VehiclesService,

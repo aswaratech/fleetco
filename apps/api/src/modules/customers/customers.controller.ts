@@ -19,6 +19,8 @@ import type { Customer } from "@prisma/client";
 
 import { ZodValidationPipe } from "../../common/zod-validation.pipe";
 import { AuthGuard } from "../auth/auth.guard";
+import { RequirePermission } from "../auth/decorators";
+import { RolesGuard } from "../auth/roles.guard";
 import type { AuthenticatedRequest } from "../auth/auth.types";
 
 // CustomersService is injected by NestJS via emitDecoratorMetadata; the
@@ -68,7 +70,11 @@ export interface CustomersListResponse {
 // conventions so the web client's API helpers and form patterns
 // transfer across both modules without surprises.
 @Controller("api/v1/customers")
-@UseGuards(AuthGuard)
+// RBAC (2026-07-02 hardening): the customers:* capability gates every route in this
+// controller on the composed AuthGuard + RolesGuard chain (ADR-0028 c5). Before
+// this, the controller was AuthGuard-only and open to any signed-in role.
+@RequirePermission("customers:*")
+@UseGuards(AuthGuard, RolesGuard)
 export class CustomersController {
   constructor(private readonly customers: CustomersService) {}
 

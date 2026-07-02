@@ -45,10 +45,11 @@ export class RolesGuard implements CanActivate {
 
     // Opt-in restriction (ADR-0028 c5): no decorator -> allow. AuthGuard has
     // already rejected anonymous callers with 401, so a route with no RBAC
-    // decorator is correctly open to any signed-in user (the right default for
-    // ADMIN + OFFICE_STAFF, both of whom do operational CRUD — which is what
-    // keeps this model a near no-op for the existing Phase-1 controllers). The
-    // session is not even read in this path.
+    // decorator is open to any signed-in user. Since the 2026-07-02 RBAC
+    // hardening every domain controller carries @RequirePermission (the
+    // opt-in default had left all 12 Phase-1-era controllers open to the live
+    // DRIVER role), so this branch now serves only genuinely role-agnostic
+    // authenticated routes like GET /me. The session is not even read here.
     if (requiredRole === undefined && requiredPermission === undefined) {
       return true;
     }
