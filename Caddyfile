@@ -18,6 +18,31 @@
 
 	encode zstd gzip
 
+	# Security headers (2026-07-02 audit, pre-deploy hardening). One central
+	# block covering both the api and web upstreams — the reverse proxy is the
+	# right single place for response-header policy on a same-origin deploy.
+	#   - HSTS: the session-cookie-authenticated admin must never downgrade to
+	#     plain HTTP after first contact (Caddy already redirects 80→443; HSTS
+	#     removes the attackable first hop on return visits).
+	#   - X-Frame-Options DENY: no surface here is ever legitimately framed;
+	#     kills clickjacking outright.
+	#   - nosniff: responses are served with correct types; never let a browser
+	#     second-guess them.
+	#   - Referrer-Policy: cross-origin requests (e.g. OSM tile fetches on map
+	#     surfaces) get origin-only referrers; the URL path never leaks.
+	#   - -Server: drop the server banner; no free fingerprinting.
+	# A Content-Security-Policy is deliberately NOT set here: a meaningful CSP
+	# for the Next.js app needs nonce wiring in the app itself (a naive policy
+	# breaks Next's inline runtime scripts) — an app-level follow-up, not a
+	# proxy-level header.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
 	# Same-origin split (ADR-0014 §2). better-auth is mounted at /auth/{*splat}
 	# and the health probes live at the root (/health, /health/ready), both
 	# outside the Next.js app — so all three prefixes route to the api.
