@@ -27,6 +27,13 @@ import { PrismaClient } from "@prisma/client";
 // user). The actual TRUNCATE uses CASCADE so order has no effect on
 // correctness.
 const TABLES = [
+  // ADR-0043 A2: the AI agent's persistence + audit spine. agent_action FKs
+  // into agent_conversation + agent_message (SetNull) and user (Restrict), so
+  // it precedes all three; agent_message FKs into agent_conversation
+  // (Cascade); agent_conversation FKs into user. CASCADE makes order cosmetic.
+  "agent_action",
+  "agent_message",
+  "agent_conversation",
   // No FK into any other table (a scan is a background job, not a user action),
   // so it truncates independently; listed first as a standalone leaf.
   "notification_log",
