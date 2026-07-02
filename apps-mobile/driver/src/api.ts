@@ -1,5 +1,6 @@
 import { authClient } from "./auth";
 import type { FuelLogPayload } from "./fuel";
+import { markSessionExpired } from "./session-expired";
 import type { DriverTrip, TripStartPayload, TripStopPayload } from "./trips";
 
 // The FleetCo API base URL — the same env the auth client reads (auth.ts), so a
@@ -34,6 +35,23 @@ async function apiFetch<T>(
     },
     body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
   });
+  if (response.status === 401) {
+    // Expired or revoked session (ADR-0034 c3a). Mark WHY before signing out
+    // so the LoginForm can explain; then sign out so useSession() flips to
+    // null and App.tsx routes to the login screen — without this, the cached
+    // session kept rendering the trip screens and every request dead-ended in
+    // a generic error with no way back (the 2026-07-02 audit finding).
+    markSessionExpired();
+    try {
+      await authClient.signOut();
+    } catch {
+      // Best-effort: with the session already dead server-side, the sign-out
+      // round-trip may itself fail; the local credential clear + session-state
+      // flip is what matters for routing, and the thrown ApiError below still
+      // surfaces the failure to the caller either way.
+    }
+    throw new ApiError(401, "Your session has expired. Please sign in again.");
+  }
   if (!response.ok) {
     throw new ApiError(response.status, `Request failed (${response.status}).`);
   }

@@ -15,6 +15,7 @@ import {
 import { createFuelLog, listMyTrips, patchTrip } from "./src/api";
 import { authClient } from "./src/auth";
 import { fuelLogPayload, previewTotalCostPaisa } from "./src/fuel";
+import { consumeSessionExpired } from "./src/session-expired";
 import {
   isStartable,
   isStoppable,
@@ -412,6 +413,11 @@ function LoginForm() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Read-and-clear on first render (a lazy initializer, not an effect — the
+  // expo-SDK56 react-hooks rules ban setState-in-effect patterns): true when
+  // apiFetch hit a 401 and signed us out, so the driver learns WHY they are
+  // back here (ADR-0034 c3a) instead of facing an unexplained login screen.
+  const [sessionExpired] = useState(() => consumeSessionExpired());
 
   async function submit() {
     setBusy(true);
@@ -426,6 +432,9 @@ function LoginForm() {
   return (
     <View style={styles.panel}>
       <Text style={styles.title}>FleetCo Driver</Text>
+      {sessionExpired ? (
+        <Text style={styles.error}>Your session has expired. Please sign in again.</Text>
+      ) : null}
       <TextInput
         style={styles.input}
         placeholder="Email"
