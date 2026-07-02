@@ -99,6 +99,38 @@ echo "backup: uploading ${object} -> ${R2_REMOTE}:${R2_BUCKET}/ ..."
 # docs/runbook/restore-from-backup.md.)
 rclone copy "${tmpfile}" "${R2_REMOTE}:${R2_BUCKET}/"
 
+# --- the Traccar gateway database (ADR-0042 c3) -------------------------------
+# The gateway keeps its own decoded-position store in the separate `traccar`
+# database of the same postgres container; ADR-0042 c3 extends this nightly
+# dump to it. Same pipe discipline, distinct object name. The database is
+# created manually per docs/runbook/traccar.md and may legitimately not exist
+# yet (the first deploy precedes the gateway bring-up), so its absence SKIPS
+# with a loud note rather than failing the main backup — once created, the
+# dump self-activates on the next run.
+traccar_exists="$(docker compose -f "${COMPOSE_FILE}" exec -T postgres \
+  psql -U "${DB_USER}" -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = 'traccar'")"
+if [ "${traccar_exists}" = "1" ]; then
+  traccar_object="fleetco-traccar-$(date -u +%F).sql.gz.age"
+  traccar_tmpfile="${workdir}/${traccar_object}"
+
+  echo "backup: dumping traccar -> gzip -> age -> ${traccar_object} ..."
+  docker compose -f "${COMPOSE_FILE}" exec -T postgres \
+    pg_dump -U "${DB_USER}" -d traccar --no-owner --clean --if-exists \
+    | gzip \
+    | age -r "${AGE_RECIPIENT}" \
+    >"${traccar_tmpfile}"
+
+  if [ ! -s "${traccar_tmpfile}" ]; then
+    echo "backup: FAIL — encrypted traccar dump ${traccar_tmpfile} is empty; not uploading." >&2
+    exit 1
+  fi
+
+  echo "backup: uploading ${traccar_object} -> ${R2_REMOTE}:${R2_BUCKET}/ ..."
+  rclone copy "${traccar_tmpfile}" "${R2_REMOTE}:${R2_BUCKET}/"
+else
+  echo "backup: NOTE — traccar database not present; skipping its dump (one-time creation: docs/runbook/traccar.md)."
+fi
+
 echo "backup: pruning ${R2_REMOTE}:${R2_BUCKET}/ older than 30d ..."
 rclone delete --min-age 30d "${R2_REMOTE}:${R2_BUCKET}/"
 
