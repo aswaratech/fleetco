@@ -4,8 +4,11 @@ import { Module } from "@nestjs/common";
 import { AuthModule } from "../auth/auth.module";
 import { GeofencesModule } from "../geofences/geofences.module";
 import { GpsIngestProcessor } from "./gps-ingest.processor";
+import { IngestKeyGuard, ingestApiKeyProvider } from "./ingest-key.guard";
 import { TelematicsController } from "./telematics.controller";
 import { GPS_INGEST_QUEUE, TelematicsService } from "./telematics.service";
+import { TraccarIngestController } from "./traccar-ingest.controller";
+import { TraccarIngestService } from "./traccar-ingest.service";
 
 // TelematicsModule — the first Phase-2 telematics feature slice (ADR-0029 T3).
 // It OWNS the `gps-ingest` queue per ADR-0029 commitment 2's per-feature queue
@@ -30,10 +33,22 @@ import { GPS_INGEST_QUEUE, TelematicsService } from "./telematics.service";
 // geofence-status query (the geofenceId branch). GeofencesModule does not
 // import TelematicsModule, so there is no circular dependency; the geofence
 // aggregate is reached through its public service interface, not its table.
+// The M5 Traccar gateway adapter (ADR-0042) rides in this module too: a
+// second, MACHINE-authenticated controller (TraccarIngestController behind
+// IngestKeyGuard alone — no session chain) feeding the SAME gps-ingest queue
+// through TraccarIngestService. ingestApiKeyProvider binds the Tier-1
+// INGEST_API_KEY from the typed env, so tests exercise the guard's
+// configured/unconfigured branches by overriding one provider.
 @Module({
   imports: [AuthModule, GeofencesModule, BullModule.registerQueue({ name: GPS_INGEST_QUEUE })],
-  controllers: [TelematicsController],
-  providers: [TelematicsService, GpsIngestProcessor],
+  controllers: [TelematicsController, TraccarIngestController],
+  providers: [
+    TelematicsService,
+    GpsIngestProcessor,
+    TraccarIngestService,
+    IngestKeyGuard,
+    ingestApiKeyProvider,
+  ],
   exports: [TelematicsService],
 })
 export class TelematicsModule {}
