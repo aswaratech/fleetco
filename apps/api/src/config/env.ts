@@ -145,6 +145,28 @@ const envSchema = z.object({
   // hop is compose-network-internal (this key is defense-in-depth, not the
   // only wall). Empty-string -> undefined, like SENTRY_DSN.
   INGEST_API_KEY: z.preprocess(emptyStringAsUndefined, z.string().min(32).optional()),
+
+  // DeepSeek hosted-LLM API key for the AI chat agent (ADR-0043 commitment 2).
+  // Read here through the typed env exactly as RESEND_API_KEY is, and consumed
+  // only by the agent module's LLM-client factory (A3).
+  //
+  // Tier 1 secret per ADR-0013: it lives ONLY in the production secret store
+  // (ADR-0014), is NEVER committed to any file, and is NEVER logged (the
+  // `*.key` / `*.secret` pino redact paths are the backstop; the primary
+  // defense is that DeepSeekClient never logs it). OPTIONAL so the app boots
+  // without it in dev / test / CI: when unset the DI factory binds
+  // MockLlmClient everywhere, so dev/CI never touch the network — and
+  // UNSETTING the key in production is the agent's kill switch (ADR-0043 c2:
+  // "unsetting the key is the production kill switch"). Empty-string ->
+  // undefined, like SENTRY_DSN.
+  DEEPSEEK_API_KEY: z.preprocess(emptyStringAsUndefined, z.string().optional()),
+
+  // The DeepSeek model name the agent requests (ADR-0043 c2 — env-configurable
+  // so a model swap is an env edit, not a deploy). Tier-4 config, defaulted
+  // like CORS_ORIGIN. deepseek-v4-flash is the day-one target; the legacy
+  // deepseek-chat / deepseek-reasoner names deprecate 2026-07-24 per the
+  // provider's published schedule (verified 2026-07-02 in ADR-0043).
+  DEEPSEEK_MODEL: z.string().default("deepseek-v4-flash"),
 });
 
 export type Env = z.infer<typeof envSchema>;
