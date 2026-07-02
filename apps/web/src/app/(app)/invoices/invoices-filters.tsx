@@ -30,7 +30,7 @@ export interface InvoicesFiltersProps {
 }
 
 const SELECT_CLASS =
-  "border-input focus-visible:border-ring focus-visible:ring-ring/50 h-9 w-48 rounded-md border bg-transparent px-3 py-1 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:ring-[3px]";
+  "border-border-strong focus-visible:border-border-focus focus-visible:ring-border-focus/50 h-9 w-48 rounded-md border bg-transparent px-3 py-1 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:ring-[length:var(--focus-ring-width)]";
 
 export function InvoicesFilters({
   status,

@@ -37,7 +37,7 @@ interface EditInvoiceHeaderFormProps {
 }
 
 const SELECT_CLASS =
-  "border-input focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 h-9 w-full rounded-md border bg-transparent px-3 py-1 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:ring-[3px]";
+  "border-border-strong focus-visible:border-border-focus focus-visible:ring-border-focus/50 aria-invalid:border-status-error aria-invalid:ring-status-error/20 h-9 w-full rounded-md border bg-transparent px-3 py-1 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:ring-[length:var(--focus-ring-width)]";
 
 // Edit the DRAFT header (D6) — the tax-affecting fields: service type (selects the
 // TDS rate, required before issue), the optional discount, and the optional

@@ -103,6 +103,29 @@ function deadTokensIn(src: string): string[] {
 
 const uiFiles = readdirSync(UI_DIR).filter((f) => f.endsWith(".tsx"));
 
+/**
+ * Recursive walk for the app-wide sweep. The 2026-07-02 audit found the exact
+ * defect class this guard exists for — 68 dead-alias occurrences across 27
+ * route files — living one directory over from the only dir this test used to
+ * scan (`components/ui`), invisible to CI. Route files, shared components, and
+ * lib class-string constants are all consumers; scan them all.
+ */
+function walkSourceFiles(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      out.push(...walkSourceFiles(full));
+    } else if (/\.tsx?$/.test(entry.name)) {
+      out.push(full);
+    }
+  }
+  return out;
+}
+
+const APP_WIDE_DIRS = ["src/app", "src/components", "src/lib"] as const;
+const appWideFiles = APP_WIDE_DIRS.flatMap((d) => walkSourceFiles(join(WEB_ROOT, d)));
+
 describe("design-token consumption: no component consumes a dead :root alias", () => {
   test("the dead-alias set parses from globals.css (guard is not vacuous)", () => {
     // If the parse ever breaks, deadAliases empties and every file trivially
@@ -126,6 +149,32 @@ describe("design-token consumption: no component consumes a dead :root alias", (
           `--color-* tokens; these live in the :root alias block). Re-point to the @theme ` +
           `semantic utilities as apps/web/src/components/ui/popover.tsx does. See DESIGN.md ` +
           `§"How this file relates to code" → "Token consumption, not just definition".`,
+      ).toEqual([]);
+    });
+  }
+});
+
+describe("design-token consumption: the app-wide sweep (src/app + src/components + src/lib)", () => {
+  test("the walker finds a plausible file count (guard is not vacuous)", () => {
+    // The (app) route group alone holds ~25 aggregates' pages; a collapse of
+    // this number means the walk broke, not that the app shrank.
+    expect(appWideFiles.length).toBeGreaterThan(50);
+  });
+
+  // One test per file keeps the failure report actionable (the offending file
+  // and its dead tokens are named directly).
+  for (const file of appWideFiles) {
+    const rel = file.slice(WEB_ROOT.length + 1);
+    test(`${rel} consumes only live @theme utilities`, () => {
+      const dead = deadTokensIn(readFileSync(file, "utf-8"));
+      expect(
+        dead,
+        `${rel} references dead shadcn-alias utilities ${JSON.stringify(dead)} that ` +
+          `generate no CSS here (only @theme --color-* tokens emit utilities; the :root ` +
+          `aliases do not). Re-point to the live pattern ui/input.tsx uses — e.g. ` +
+          `border-input → border-border-strong, focus-visible:border-ring → ` +
+          `focus-visible:border-border-focus, aria-invalid:border-destructive → ` +
+          `aria-invalid:border-status-error.`,
       ).toEqual([]);
     });
   }

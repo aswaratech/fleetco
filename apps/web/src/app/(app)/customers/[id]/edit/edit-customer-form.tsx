@@ -141,7 +141,7 @@ export function EditCustomerForm({ customer }: EditCustomerFormProps): React.Rea
                 <FormLabel>Status</FormLabel>
                 <FormControl>
                   <select
-                    className="border-input focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 h-9 w-full rounded-md border bg-transparent px-3 py-1 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:ring-[3px]"
+                    className="border-border-strong focus-visible:border-border-focus focus-visible:ring-border-focus/50 aria-invalid:border-status-error aria-invalid:ring-status-error/20 h-9 w-full rounded-md border bg-transparent px-3 py-1 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:ring-[length:var(--focus-ring-width)]"
                     {...field}
                   >
                     {CUSTOMER_STATUS_OPTIONS.map((opt) => (
