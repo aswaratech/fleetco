@@ -152,6 +152,11 @@ export interface AgentTranscript {
   actions: AgentAction[];
 }
 
+/** An activity-ledger row: the action plus its acting user (A8). */
+export type AgentActionWithUser = AgentAction & {
+  user: { id: string; email: string; name: string | null };
+};
+
 // Sentinel for the turn wall-clock abort, so the catch can tell "our budget
 // fired" from a provider-side failure (the deepseek.client.ts sentinel idea,
 // one layer up).
@@ -231,6 +236,52 @@ export class AgentService {
       }),
     ]);
     return { conversation, messages, actions };
+  }
+
+  /**
+   * The cross-user activity ledger (ticket A8, DESIGN.md §"Agent activity"):
+   * AgentAction rows across ALL users — deliberately NOT actor-scoped,
+   * unlike every transcript read above. A conversation is one person's
+   * working context; the ledger is the organization's audit trail ("what
+   * did the agent do last week"), and rows outlive their pruned transcripts
+   * (SetNull). Authorization is the controller's agent:use gate (ADMIN-only
+   * in v1) — if that grant ever widens, mint a dedicated audit token first.
+   * Items include the acting user (id/email/name via select — never the full
+   * auth row) for the ledger's attribution column.
+   */
+  async listActions(params: {
+    toolName?: string;
+    status?: string;
+    startDate?: Date;
+    endDate?: Date;
+    sortDir: "asc" | "desc";
+    skip: number;
+    take: number;
+  }): Promise<{ items: AgentActionWithUser[]; total: number }> {
+    const createdAtFilter: { gte?: Date; lt?: Date } = {};
+    if (params.startDate !== undefined) createdAtFilter.gte = params.startDate;
+    // Inclusive through end-of-day (the notification-logs UTC-day rule): a
+    // date-only endDate coerces to midnight UTC, so filter strictly-before
+    // the NEXT UTC day.
+    if (params.endDate !== undefined) createdAtFilter.lt = startOfNextUtcDay(params.endDate);
+
+    const where = {
+      ...(params.toolName !== undefined ? { toolName: params.toolName } : {}),
+      ...(params.status !== undefined ? { status: params.status } : {}),
+      ...(Object.keys(createdAtFilter).length > 0 ? { createdAt: createdAtFilter } : {}),
+    };
+
+    const [items, total] = await this.prisma.$transaction([
+      this.prisma.agentAction.findMany({
+        where,
+        orderBy: [{ createdAt: params.sortDir }, { id: params.sortDir }],
+        skip: params.skip,
+        take: params.take,
+        include: { user: { select: { id: true, email: true, name: true } } },
+      }),
+      this.prisma.agentAction.count({ where }),
+    ]);
+    return { items, total };
   }
 
   /**
@@ -488,11 +539,17 @@ export class AgentService {
     const startedAt = Date.now();
     let result: unknown;
     let entity: ToolDispatchEntity | null = null;
+    let preImage: unknown;
     if (refusal === null) {
       try {
         const outcome = await this.registry.dispatch(toolName, args, actor);
         result = outcome.result;
         entity = outcome.entity;
+        // The update pre-image (A8, c4b): present only on a SUCCEEDED update
+        // dispatch — failures throw out of dispatch before the envelope
+        // returns, which is honest (a failed update changed nothing, so
+        // there is nothing to undo).
+        preImage = outcome.preImage;
       } catch (error) {
         // A ForbiddenException maps to `denied` — an authorization refusal at
         // ANY layer: the registry's capability check, or a service-level role
@@ -530,6 +587,7 @@ export class AgentService {
       toolName,
       args,
       entity,
+      preImage,
       status,
       latencyMs,
       userId: actor.userId,
@@ -555,6 +613,11 @@ export class AgentService {
      * it, ticket A7) — the action card's / activity ledger's deep-link. Null
      * for reads, refusals, and failures (nothing was affected). */
     entity: ToolDispatchEntity | null;
+    /** An update tool's RAW pre-image from the envelope (ticket A8, c4b) —
+     * persisted to previousJson on succeeded updates only; undefined
+     * everywhere else. Tier 2 like transcript content: never logged (pino
+     * redacts *.previousJson), never sent to the model. */
+    preImage?: unknown;
     status: "succeeded" | "failed" | "denied";
     latencyMs: number;
     userId: string;
@@ -569,12 +632,28 @@ export class AgentService {
         argsJson: params.args === null ? Prisma.JsonNull : (params.args as Prisma.InputJsonValue),
         resultEntityType: params.entity?.type ?? null,
         resultEntityId: params.entity?.id ?? null,
+        // The JSON round-trip converts Dates → ISO strings deterministically
+        // for the Json column. Deliberately NOT redactForModel — a pre-image
+        // exists to be restored from, so it must be faithful (redaction is a
+        // model-context boundary; this value never goes there).
+        previousJson:
+          params.preImage === undefined || params.preImage === null
+            ? undefined
+            : (JSON.parse(JSON.stringify(params.preImage)) as Prisma.InputJsonValue),
         status: params.status,
         latencyMs: params.latencyMs,
         userId: params.userId,
       },
     });
   }
+}
+
+// Midnight UTC of the day AFTER `date` — the notification-logs helper for
+// inclusive-through-end-of-day date filtering, copied file-locally.
+function startOfNextUtcDay(date: Date): Date {
+  return new Date(
+    Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + 1, 0, 0, 0, 0),
+  );
 }
 
 /**

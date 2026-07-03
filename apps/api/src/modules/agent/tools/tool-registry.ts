@@ -226,6 +226,16 @@ export class AgentToolRegistry {
     }
 
     const args = new ZodValidationPipe(tool.argsSchema).transform(rawArgs);
+
+    // The A8 pre-image: captured AFTER wrapper validation, BEFORE execute —
+    // the raw prior row an update is about to overwrite (c4b). The window
+    // between capture and execute is an accepted TOCTOU (single-operator
+    // system; a concurrent manual edit in that window would leave a slightly
+    // stale pre-image, not a broken one). Rides the envelope UNREDACTED and
+    // never touches the redaction → model pipe.
+    const preImage =
+      tool.capturePreImage !== undefined ? await tool.capturePreImage(args, actor) : undefined;
+
     let raw: unknown;
     try {
       raw = await tool.execute(args, actor);
@@ -253,7 +263,7 @@ export class AgentToolRegistry {
       }
     }
 
-    return { result: redactForModel(raw), entity };
+    return { result: redactForModel(raw), entity, ...(preImage !== undefined ? { preImage } : {}) };
   }
 
   /**

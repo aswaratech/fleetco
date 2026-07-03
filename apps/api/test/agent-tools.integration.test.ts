@@ -407,4 +407,133 @@ describe("agent tools end-to-end (real DB, ADR-0043 A4)", () => {
     });
     expect(advanced.lastServiceOdometerKm).toBe(80_000);
   });
+
+  // --- stage two: the update tools + pre-image (A8) -------------------------
+
+  test("update_vehicle: the envelope carries the entity + the RAW pre-image; the field changes", async () => {
+    const vehicle = await seedVehicle(prisma, adminId, {
+      registrationNumber: "BA 9 KHA 0001",
+      odometerCurrentKm: 12_000,
+    });
+
+    const outcome = await registry.dispatch(
+      "update_vehicle",
+      { id: vehicle.id, odometerCurrentKm: 12_500 },
+      admin,
+    );
+
+    expect(outcome.entity).toEqual({ type: "Vehicle", id: vehicle.id });
+    // The pre-image is the PRIOR row (odometer 12000), raw — dates as ISO
+    // strings from the JSON round-trip, never redacted.
+    const pre = outcome.preImage as { id: string; odometerCurrentKm: number };
+    expect(pre.id).toBe(vehicle.id);
+    expect(pre.odometerCurrentKm).toBe(12_000);
+    // The stored row now carries the new value.
+    const after = await prisma.vehicle.findUniqueOrThrow({ where: { id: vehicle.id } });
+    expect(after.odometerCurrentKm).toBe(12_500);
+  });
+
+  test("update_vehicle: status → RETIRED auto-stamps retiredAt (the service transition)", async () => {
+    const vehicle = await seedVehicle(prisma, adminId, { status: "ACTIVE" });
+    const outcome = await registry.dispatch(
+      "update_vehicle",
+      { id: vehicle.id, status: "RETIRED" },
+      admin,
+    );
+    const result = outcome.result as { status: string; retiredAt: string | null };
+    expect(result.status).toBe("RETIRED");
+    expect(result.retiredAt).not.toBeNull();
+  });
+
+  test("update_driver: the pre-image keeps PII raw while the redacted RESULT masks/strips it (c6)", async () => {
+    const driver = await seedDriver(prisma, adminId, {
+      fullName: "Old Name",
+      licenseNumber: "07-100-200300",
+      dateOfBirth: new Date("1988-03-03T00:00:00Z"),
+    });
+
+    const outcome = await registry.dispatch(
+      "update_driver",
+      { id: driver.id, fullName: "New Name" },
+      admin,
+    );
+
+    // The result crosses to the model: masked/stripped.
+    const result = outcome.result as Record<string, unknown>;
+    expect(result.fullName).toBe("New Name");
+    expect("dateOfBirth" in result).toBe(false);
+    expect(result.licenseNumber).toBe("***0300");
+    // The pre-image is the undo source: faithful, unredacted. At the dispatch
+    // envelope it is the RAW Prisma row (Date objects); the JSON round-trip to
+    // ISO strings happens only when the loop persists it to previousJson
+    // (asserted in agent-loop.test.ts).
+    const pre = outcome.preImage as { fullName: string; licenseNumber: string; dateOfBirth: Date };
+    expect(pre.fullName).toBe("Old Name");
+    expect(pre.licenseNumber).toBe("07-100-200300");
+    expect(pre.dateOfBirth.toISOString()).toBe("1988-03-03T00:00:00.000Z");
+  });
+
+  test("update_trip: IN_PROGRESS → COMPLETED bumps the vehicle meter in the same transaction", async () => {
+    const vehicle = await seedVehicle(prisma, adminId, { odometerCurrentKm: 50_000 });
+    const trip = await seedTrip(prisma, {
+      vehicleId: vehicle.id,
+      driverId: (await seedDriver(prisma, adminId)).id,
+      createdById: adminId,
+      status: "IN_PROGRESS",
+      startedAt: new Date("2026-07-01T06:00:00Z"),
+      startOdometerKm: 50_000,
+    });
+
+    // Completing a km-metered trip requires both timestamps and the end
+    // odometer (the service's meter-aware cross-field rule on the merged
+    // shape).
+    const outcome = await registry.dispatch(
+      "update_trip",
+      {
+        id: trip.id,
+        status: "COMPLETED",
+        endedAt: "2026-07-01T14:00:00Z",
+        endOdometerKm: 50_420,
+      },
+      admin,
+    );
+    expect(outcome.entity).toEqual({ type: "Trip", id: trip.id });
+    // The pre-image caught the IN_PROGRESS row.
+    expect((outcome.preImage as { status: string }).status).toBe("IN_PROGRESS");
+    // The vehicle's odometer advanced to the trip's end reading.
+    const after = await prisma.vehicle.findUniqueOrThrow({ where: { id: vehicle.id } });
+    expect(after.odometerCurrentKm).toBe(50_420);
+  });
+
+  test("update_trip: an illegal status transition → BadRequest (the service transition matrix)", async () => {
+    const vehicle = await seedVehicle(prisma, adminId);
+    const trip = await seedTrip(prisma, {
+      vehicleId: vehicle.id,
+      driverId: (await seedDriver(prisma, adminId)).id,
+      createdById: adminId,
+      status: "COMPLETED",
+    });
+    // COMPLETED is terminal — no reverse transition.
+    await expect(
+      registry.dispatch("update_trip", { id: trip.id, status: "IN_PROGRESS" }, admin),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  test("update_vehicle on a missing id → NotFound (nothing to capture, nothing changed)", async () => {
+    await expect(
+      registry.dispatch("update_vehicle", { id: "c00000000000000000000000", make: "X" }, admin),
+    ).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  test("update_vehicle: a duplicate registrationNumber → ConflictException (P2002 → 409)", async () => {
+    await seedVehicle(prisma, adminId, { registrationNumber: "BA 1 PA 1111" });
+    const other = await seedVehicle(prisma, adminId, { registrationNumber: "BA 1 PA 2222" });
+    await expect(
+      registry.dispatch(
+        "update_vehicle",
+        { id: other.id, registrationNumber: "BA 1 PA 1111" },
+        admin,
+      ),
+    ).rejects.toBeInstanceOf(ConflictException);
+  });
 });

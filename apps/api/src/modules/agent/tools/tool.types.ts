@@ -70,6 +70,18 @@ export interface ToolDefinition {
   /** The transform-free wrapper schema (see above). */
   argsSchema: z.ZodType;
   /**
+   * UPDATE tools only (ADR-0043 c3/c4b, ticket A8): fetch the RAW prior row
+   * before execute runs — the pre-image that makes every agent update
+   * cheaply reversible. The registry calls this AFTER wrapper validation
+   * and BEFORE execute; the value rides the dispatch envelope UNREDACTED
+   * (a redacted pre-image could not be restored from), is persisted to
+   * AgentAction.previousJson on a SUCCEEDED dispatch only, and NEVER enters
+   * model context (redactForModel runs on the result, and the loop's tool
+   * message carries only that). Returns null when the row does not exist —
+   * execute will throw its 404 right after.
+   */
+  capturePreImage?(args: unknown, actor: Actor): Promise<unknown>;
+  /**
    * Run the tool. `args` has already passed the wrapper schema at the
    * registry seam; implementations re-parse defensively (cheap, and keeps a
    * directly-invoked tool safe in tests) and then re-validate through the
@@ -88,15 +100,18 @@ export interface ToolDispatchEntity {
 }
 
 /**
- * What one registry dispatch produced (A5's loop consumes this; ticket A7).
- * `result` is REDACTED — the only member that may cross to the provider as
- * a tool message. `entity` derives from the PRE-redaction result, so the
- * audit spine never depends on what redaction happens to preserve. A8
- * extends this envelope with the update pre-image.
+ * What one registry dispatch produced (A5's loop consumes this; tickets
+ * A7/A8). `result` is REDACTED — the only member that may cross to the
+ * provider as a tool message. `entity` derives from the PRE-redaction
+ * result, so the audit spine never depends on what redaction happens to
+ * preserve. `preImage` is an update tool's RAW prior row (undefined for
+ * every other tool) — persisted to AgentAction.previousJson, never sent to
+ * the model.
  */
 export interface ToolDispatchOutcome {
   result: unknown;
   entity: ToolDispatchEntity | null;
+  preImage?: unknown;
 }
 
 /**

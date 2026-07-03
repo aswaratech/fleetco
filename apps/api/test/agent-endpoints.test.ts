@@ -26,6 +26,7 @@ import { ServiceSchedulesService } from "../src/modules/maintenance/service-sche
 import { TripsService } from "../src/modules/trips/trips.service";
 import { VehiclesService } from "../src/modules/vehicles/vehicles.service";
 import { resetDb } from "./db";
+import { seedAgentAction } from "./fixtures/agent-transcript";
 import { seedUser } from "./fixtures/trip";
 
 // The agent HTTP surface (ADR-0043 c1/c4/c7, ticket A5): the composed
@@ -295,5 +296,139 @@ describe("agent endpoints (real guards + Postgres, mock LLM)", () => {
         })
       ).status,
     ).toBe(404);
+  });
+
+  // --- activity ledger (A8) -------------------------------------------------
+
+  interface ActionsResponse {
+    items: {
+      id: string;
+      toolName: string;
+      status: string;
+      argsJson: unknown;
+      previousJson: unknown;
+      user: { id: string; email: string; name: string | null };
+    }[];
+    total: number;
+    skip: number;
+    take: number;
+    sortBy: string;
+    sortDir: string;
+  }
+
+  test("the activity ledger rides the agent:use gate: 401 / 403 / 403 / 200", async () => {
+    expect((await call("GET", "/api/v1/agent/actions")).status).toBe(401);
+    expect(
+      (await call("GET", "/api/v1/agent/actions", { role: UserRole.OFFICE_STAFF })).status,
+    ).toBe(403);
+    expect((await call("GET", "/api/v1/agent/actions", { role: UserRole.DRIVER })).status).toBe(
+      403,
+    );
+    expect(
+      (await call("GET", "/api/v1/agent/actions", { role: UserRole.ADMIN, userId: adminId }))
+        .status,
+    ).toBe(200);
+  });
+
+  test("the ledger is CROSS-USER: both admins' actions are listed, with the acting user and args", async () => {
+    await seedAgentAction(prisma, adminId, { toolName: "create_vehicle", status: "succeeded" });
+    await seedAgentAction(prisma, otherAdminId, { toolName: "update_trip", status: "failed" });
+
+    const res = await call("GET", "/api/v1/agent/actions", {
+      role: UserRole.ADMIN,
+      userId: adminId,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ActionsResponse;
+
+    expect(body.total).toBe(2);
+    expect(body.sortBy).toBe("createdAt");
+    expect(body.sortDir).toBe("desc");
+    // The acting user rides each row (id/email/name only — never the auth row).
+    const userIds = body.items.map((a) => a.user.id).sort();
+    expect(userIds).toEqual([adminId, otherAdminId].sort());
+    expect(body.items.every((a) => typeof a.user.email === "string")).toBe(true);
+    // argsJson is on the wire to the authorized ADMIN.
+    expect(body.items.every((a) => a.argsJson !== undefined)).toBe(true);
+  });
+
+  test("filters compose: toolName + status narrow the ledger", async () => {
+    await seedAgentAction(prisma, adminId, { toolName: "create_vehicle", status: "succeeded" });
+    await seedAgentAction(prisma, adminId, { toolName: "create_vehicle", status: "failed" });
+    await seedAgentAction(prisma, adminId, { toolName: "update_trip", status: "succeeded" });
+
+    const res = await call(
+      "GET",
+      "/api/v1/agent/actions?toolName=create_vehicle&status=succeeded",
+      { role: UserRole.ADMIN, userId: adminId },
+    );
+    const body = (await res.json()) as ActionsResponse;
+    expect(body.total).toBe(1);
+    expect(body.items[0]?.toolName).toBe("create_vehicle");
+    expect(body.items[0]?.status).toBe("succeeded");
+  });
+
+  test("an unknown status filter returns zero rows, never a 400 (the open-string rule)", async () => {
+    await seedAgentAction(prisma, adminId, { status: "succeeded" });
+    const res = await call("GET", "/api/v1/agent/actions?status=exploded", {
+      role: UserRole.ADMIN,
+      userId: adminId,
+    });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as ActionsResponse).total).toBe(0);
+  });
+
+  test("date range is inclusive through end-of-day; a row at 00:00 the next day is excluded", async () => {
+    // Three rows across two calendar days; filter startDate=endDate=day one.
+    await seedAgentAction(prisma, adminId, {
+      toolName: "a",
+      createdAt: new Date("2026-07-01T09:00:00Z"),
+    });
+    await seedAgentAction(prisma, adminId, {
+      toolName: "b",
+      createdAt: new Date("2026-07-01T23:59:59Z"),
+    });
+    await seedAgentAction(prisma, adminId, {
+      toolName: "c",
+      createdAt: new Date("2026-07-02T00:00:00Z"),
+    });
+
+    const res = await call("GET", "/api/v1/agent/actions?startDate=2026-07-01&endDate=2026-07-01", {
+      role: UserRole.ADMIN,
+      userId: adminId,
+    });
+    const body = (await res.json()) as ActionsResponse;
+    // Both July-1 rows (incl. 23:59:59), NOT the July-2 00:00 row.
+    expect(body.total).toBe(2);
+    expect(body.items.map((a) => a.toolName).sort()).toEqual(["a", "b"]);
+  });
+
+  test("pagination is stable (createdAt + id tiebreaker) and a bogus query key → 400", async () => {
+    const sharedTime = new Date("2026-07-01T12:00:00Z");
+    for (let i = 0; i < 3; i += 1) {
+      await seedAgentAction(prisma, adminId, { toolName: `t${i}`, createdAt: sharedTime });
+    }
+    const page1 = (await (
+      await call("GET", "/api/v1/agent/actions?take=2&skip=0", {
+        role: UserRole.ADMIN,
+        userId: adminId,
+      })
+    ).json()) as ActionsResponse;
+    const page2 = (await (
+      await call("GET", "/api/v1/agent/actions?take=2&skip=2", {
+        role: UserRole.ADMIN,
+        userId: adminId,
+      })
+    ).json()) as ActionsResponse;
+    // No row appears on both pages — the id tiebreaker makes equal-createdAt
+    // ordering deterministic.
+    const ids = [...page1.items, ...page2.items].map((a) => a.id);
+    expect(new Set(ids).size).toBe(3);
+
+    const bad = await call("GET", "/api/v1/agent/actions?sort=asc", {
+      role: UserRole.ADMIN,
+      userId: adminId,
+    });
+    expect(bad.status).toBe(400);
   });
 });

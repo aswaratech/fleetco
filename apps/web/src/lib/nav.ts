@@ -27,6 +27,7 @@ import {
   ClipboardList,
   Fuel,
   Gauge,
+  History,
   LayoutDashboard,
   Map,
   MapPin,
@@ -86,7 +87,8 @@ export const HOME: NavItem = {
 // reports their own group); ADR-0042 M4 added Trackers (Logs, beside
 // Geofences — telematics configuration) and M9 added Live map (Operations,
 // per the DESIGN.md §"Live map" spec) for 17; ADR-0043 A6 added Agent
-// (Operations, ADMIN-only per DESIGN.md §"Agent chat") for 18.
+// (Operations, ADMIN-only per DESIGN.md §"Agent chat") for 18 and A8 added
+// Agent activity (Logs, ADMIN-only per DESIGN.md §"Agent activity") for 19.
 export const NAV: readonly NavGroup[] = [
   {
     id: "operations",
@@ -168,6 +170,15 @@ export const NAV: readonly NavGroup[] = [
         icon: Bell,
         allowedRoles: ADMIN_OFFICE,
       },
+      // ADMIN-only (ADR-0043 c5 / DESIGN.md §"Agent activity"): the agent's
+      // audit ledger, beside the reminder ledger — the second gate-divergent
+      // item after /chat.
+      {
+        href: "/agent/activity",
+        label: "Agent activity",
+        icon: History,
+        allowedRoles: ADMIN_ONLY,
+      },
     ],
   },
 ];
@@ -179,9 +190,9 @@ export const NAV: readonly NavGroup[] = [
  * quick-links strip and the command palette flatten the result.
  *
  * Examples:
- *   navForRole("ADMIN")        → all 5 groups, all 18 items
+ *   navForRole("ADMIN")        → all 5 groups, all 19 items
  *   navForRole("OFFICE_STAFF") → all 5 groups, 17 items (all but the
- *                                ADMIN-only Agent — the first divergence)
+ *                                ADMIN-only Agent + Agent activity)
  *   navForRole("DRIVER")       → [] (DRIVER has no web surface; uses the Expo app)
  */
 export function navForRole(role: Role): NavGroup[] {
