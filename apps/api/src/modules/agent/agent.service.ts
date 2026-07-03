@@ -27,6 +27,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { LlmClient } from "./llm-client";
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports
 import { AgentToolRegistry } from "./tools/tool-registry";
+import { type ToolDispatchEntity } from "./tools/tool.types";
 
 // The agent turn loop + conversation persistence (ADR-0043 c4/c5, ticket A5).
 // This service composes the two seams the parallel A3/A4 tickets built —
@@ -126,6 +127,9 @@ export function buildAgentSystemPrompt(now: Date): string {
       "human units (NPR, liters) and say so.",
     "- If a tool returns an error, fix the arguments and retry, or explain the failure " +
       "plainly. Never invent data a tool did not return.",
+    "- A create tool's result includes the new record's id: the write has already " +
+      "happened, exactly once. Never call the same create tool again for the same " +
+      "request; report the record's app path instead.",
     "- Deleting records, invoice operations, raw GPS traces, and user management are " +
       "structurally excluded from your tools. If asked, say you cannot do it and why.",
   ].join("\n");
@@ -326,7 +330,8 @@ export class AgentService {
         { role: "user", content },
       ];
       // The A4 registry's capability-filtered specs feed `tools` verbatim
-      // (c1: the model never sees a tool the requesting human cannot run).
+      // (c1: the model never sees a tool the requesting human cannot run BY
+      // CAPABILITY — see listToolDefinitions on the service-level exception).
       const tools = this.registry.listToolDefinitions(actor.role);
 
       let toolExecutions = 0;
@@ -482,15 +487,19 @@ export class AgentService {
 
     const startedAt = Date.now();
     let result: unknown;
+    let entity: ToolDispatchEntity | null = null;
     if (refusal === null) {
       try {
-        result = await this.registry.execute(toolName, args, actor);
+        const outcome = await this.registry.dispatch(toolName, args, actor);
+        result = outcome.result;
+        entity = outcome.entity;
       } catch (error) {
-        // The registry's pipeline order (authz before validation) makes the
-        // mapping exact: ForbiddenException IS the capability denial; every
-        // other HttpException (unknown tool 404, wrapper/module-schema 400,
-        // service-level 404/409) is a failed execution the model may correct
-        // and retry within the loop.
+        // A ForbiddenException maps to `denied` — an authorization refusal at
+        // ANY layer: the registry's capability check, or a service-level role
+        // rule reached through it (e.g. TripsService.create rejecting a
+        // DRIVER actor). Every other HttpException (unknown tool 404,
+        // wrapper/module-schema 400, service-level 404/409) is a failed
+        // execution the model may correct and retry within the loop.
         status = error instanceof ForbiddenException ? "denied" : "failed";
         refusal =
           error instanceof HttpException
@@ -504,6 +513,7 @@ export class AgentService {
             messageId,
             toolName,
             args,
+            entity: null,
             status: "failed",
             latencyMs: Date.now() - startedAt,
             userId: actor.userId,
@@ -519,6 +529,7 @@ export class AgentService {
       messageId,
       toolName,
       args,
+      entity,
       status,
       latencyMs,
       userId: actor.userId,
@@ -540,6 +551,10 @@ export class AgentService {
     messageId: string;
     toolName: string;
     args: unknown;
+    /** The affected entity from the dispatch envelope (write tools declare
+     * it, ticket A7) — the action card's / activity ledger's deep-link. Null
+     * for reads, refusals, and failures (nothing was affected). */
+    entity: ToolDispatchEntity | null;
     status: "succeeded" | "failed" | "denied";
     latencyMs: number;
     userId: string;
@@ -552,11 +567,8 @@ export class AgentService {
         // JSON.parse can yield null/scalars; the column is non-nullable Json,
         // so a null payload stores as JSON null explicitly.
         argsJson: params.args === null ? Prisma.JsonNull : (params.args as Prisma.InputJsonValue),
-        // Stage one is reads: no single entity is AFFECTED, so the deep-link
-        // fields stay null (their schema comment's "list tools, reports"
-        // case). The A7/A8 write tools populate them.
-        resultEntityType: null,
-        resultEntityId: null,
+        resultEntityType: params.entity?.type ?? null,
+        resultEntityId: params.entity?.id ?? null,
         status: params.status,
         latencyMs: params.latencyMs,
         userId: params.userId,

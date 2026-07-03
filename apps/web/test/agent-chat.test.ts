@@ -3,6 +3,7 @@ import { describe, expect, test } from "vitest";
 import {
   actionBadgeVariant,
   AGENT_MESSAGE_MAX_LENGTH,
+  entityPathFor,
   formatLatencyMs,
   linkifyAppPaths,
 } from "../src/lib/agent-chat";
@@ -91,5 +92,31 @@ describe("formatLatencyMs", () => {
 describe("AGENT_MESSAGE_MAX_LENGTH mirrors the API bound", () => {
   test("is 8000 (agent.schemas.ts — keep in sync)", () => {
     expect(AGENT_MESSAGE_MAX_LENGTH).toBe(8_000);
+  });
+});
+
+describe("entityPathFor (A7 — the action card's server-derived deep-link)", () => {
+  test("maps every write-tool entity type to its detail route", () => {
+    expect(entityPathFor("Vehicle", "cveh1")).toBe("/vehicles/cveh1");
+    expect(entityPathFor("Driver", "cdrv1")).toBe("/drivers/cdrv1");
+    expect(entityPathFor("Customer", "ccus1")).toBe("/customers/ccus1");
+    expect(entityPathFor("Job", "cjob1")).toBe("/jobs/cjob1");
+    expect(entityPathFor("Trip", "ctrip1")).toBe("/trips/ctrip1");
+    expect(entityPathFor("FuelLog", "cfl1")).toBe("/fuel-logs/cfl1");
+    expect(entityPathFor("ExpenseLog", "cel1")).toBe("/expense-logs/cel1");
+    expect(entityPathFor("ServiceRecord", "csr1")).toBe("/service-records/csr1");
+  });
+
+  test("fails closed: unknown entity types render no link", () => {
+    expect(entityPathFor("Invoice", "cinv1")).toBeNull();
+    expect(entityPathFor("User", "cusr1")).toBeNull();
+    expect(entityPathFor("", "cid1")).toBeNull();
+  });
+
+  test("fails closed: hostile or malformed ids render no link", () => {
+    expect(entityPathFor("Vehicle", "../admin")).toBeNull();
+    expect(entityPathFor("Vehicle", "a/b")).toBeNull();
+    expect(entityPathFor("Vehicle", "")).toBeNull();
+    expect(entityPathFor("Vehicle", "id?x=1")).toBeNull();
   });
 });

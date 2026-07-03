@@ -4,6 +4,7 @@ import { z } from "zod";
 import { type ServiceRecordsService } from "../../maintenance/service-records.service";
 import { type ServiceSchedulesService } from "../../maintenance/service-schedules.service";
 import {
+  CreateServiceRecordSchema,
   ListServiceRecordsQuerySchema,
   type ServiceRecordSortColumn,
 } from "../../maintenance/service-records.schemas";
@@ -14,9 +15,12 @@ import {
 import { toQueryShape } from "./query-shape";
 import { GetByIdArgs, type ToolDefinition } from "./tool.types";
 
-// Maintenance read tools (ADR-0043 c3 stage one): the two aggregates the
-// MaintenanceModule exports. Interval semantics ride the descriptions so the
-// model reasons in the right units (ADR-0037's integer-minor-units rule).
+// Maintenance tools (ADR-0043 c3: A4 reads, A7 create): the two aggregates
+// the MaintenanceModule exports. Interval semantics ride the descriptions so
+// the model reasons in the right units (ADR-0037's integer-minor-units rule).
+// The A7 create covers SERVICE RECORDS only (recording work performed —
+// operational data entry); creating/retuning SCHEDULES is configuration and
+// stays out of the registry for now.
 
 const SCHEDULE_SORT = ["name", "createdAt"] as const satisfies readonly ServiceScheduleSortColumn[];
 
@@ -44,6 +48,20 @@ const ListServiceRecordsArgs = z
     sortDir: z.enum(["asc", "desc"]).optional(),
     skip: z.number().int().min(0).optional(),
     take: z.number().int().min(1).max(200).optional(),
+  })
+  .strict();
+
+// Mirrors CreateServiceRecordSchema field-for-field. The same-vehicle rules
+// for serviceScheduleId/expenseLogId re-validate in the service at execute.
+const CreateServiceRecordArgs = z
+  .object({
+    vehicleId: z.string().trim().min(1),
+    serviceScheduleId: z.string().trim().min(1).nullable().optional(),
+    expenseLogId: z.string().trim().min(1).nullable().optional(),
+    performedAt: z.iso.date(),
+    odometerKm: z.number().int().min(0).max(100_000_000).nullable().optional(),
+    engineHours: z.number().int().min(0).max(100_000_000).nullable().optional(),
+    notes: z.string().max(4096).nullable().optional(),
   })
   .strict();
 
@@ -110,6 +128,26 @@ export function buildMaintenanceTools(
       async execute(args) {
         const { id } = GetByIdArgs.parse(args);
         return serviceRecords.getById(id);
+      },
+    },
+    {
+      name: "create_service_record",
+      description:
+        "Record maintenance/service work performed on a vehicle. Required: " +
+        "vehicleId (resolve with list_vehicles first — never guess), performedAt " +
+        "(ISO YYYY-MM-DD). Optional: serviceScheduleId (must be a schedule on the " +
+        "SAME vehicle; recording against it advances its last-service anchor), " +
+        "expenseLogId (a MAINTENANCE/REPAIR expense on the same vehicle, for the " +
+        "cost link), odometerKm (integer km), engineHours (integer " +
+        "tenths-of-an-hour), notes. The write happens immediately and exactly " +
+        "once; the result includes the new record's id.",
+      capabilities: ["maintenance:*"],
+      riskTier: "reversible-write",
+      resultEntityType: "ServiceRecord",
+      argsSchema: CreateServiceRecordArgs,
+      async execute(args, actor) {
+        const input = CreateServiceRecordSchema.parse(CreateServiceRecordArgs.parse(args));
+        return serviceRecords.create(input, actor.userId);
       },
     },
   ];

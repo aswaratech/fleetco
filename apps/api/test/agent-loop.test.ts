@@ -568,4 +568,77 @@ describe("agent turn loop (real registry + Postgres, MockLlmClient queue)", () =
     expect(total).toBe(2);
     expect(items.map((c) => c.id)).toEqual([mineNew.id, mineOld.id]);
   });
+
+  // --- stage two: write dispatches through the loop (A7) ---------------------
+
+  test("a write turn records the affected entity on the action row (c4c/c5)", async () => {
+    const mock = new MockLlmClient({
+      results: [
+        toolCallsResult([
+          {
+            id: "call_1",
+            name: "create_vehicle",
+            args: {
+              registrationNumber: "BA 3 KHA 7777",
+              kind: "TRUCK",
+              make: "Tata",
+              model: "LPT 1613",
+              year: 2023,
+              acquiredAt: "2026-02-01",
+            },
+          },
+        ]),
+        textResult("Registered BA 3 KHA 7777 — see /vehicles/<id>."),
+      ],
+    });
+    const service = serviceWith(mock);
+    const conversation = await service.createConversation(admin);
+
+    const turn = await service.runTurn(conversation.id, "Register BA 3 KHA 7777", admin);
+
+    const created = await prisma.vehicle.findUniqueOrThrow({
+      where: { registrationNumber: "BA 3 KHA 7777" },
+    });
+    expect(created.createdById).toBe(adminId);
+
+    expect(turn.actions).toHaveLength(1);
+    const action = turn.actions[0];
+    expect(action?.toolName).toBe("create_vehicle");
+    expect(action?.status).toBe("succeeded");
+    expect(action?.resultEntityType).toBe("Vehicle");
+    expect(action?.resultEntityId).toBe(created.id);
+
+    // The tool message the provider saw carries the REDACTED result — with
+    // the created row's id, so the model can state the app path (c4e).
+    const toolMessage = mock.requests[1]?.messages.find((m) => m.role === "tool");
+    const payload = JSON.parse(toolMessage?.content ?? "") as { id: string };
+    expect(payload.id).toBe(created.id);
+  });
+
+  test("a failed write records failed with NULL entity fields (nothing was affected)", async () => {
+    const mock = new MockLlmClient({
+      results: [
+        toolCallsResult([
+          {
+            id: "call_1",
+            name: "create_job",
+            // A cuid-shaped customerId that exists nowhere: the module
+            // schema passes, the FK insert fails (P2003 → 400).
+            args: { customerId: "c00000000000000000000000", description: "Haul gravel" },
+          },
+        ]),
+        textResult("That customer does not exist."),
+      ],
+    });
+    const service = serviceWith(mock);
+    const conversation = await service.createConversation(admin);
+
+    const turn = await service.runTurn(conversation.id, "Create a job for them", admin);
+
+    expect(turn.actions).toHaveLength(1);
+    expect(turn.actions[0]?.status).toBe("failed");
+    expect(turn.actions[0]?.resultEntityType).toBeNull();
+    expect(turn.actions[0]?.resultEntityId).toBeNull();
+    expect(await prisma.job.count()).toBe(0);
+  });
 });

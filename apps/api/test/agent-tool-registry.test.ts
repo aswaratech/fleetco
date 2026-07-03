@@ -20,11 +20,12 @@ import { TripsService } from "../src/modules/trips/trips.service";
 import { VehiclesService } from "../src/modules/vehicles/vehicles.service";
 import { resetDb } from "./db";
 
-// Registry-level tests for the agent tool registry (ADR-0043 c1–c3, ticket
-// A4): the boot-time guarantees (every wrapper converts to JSON Schema —
-// c2's drift-becomes-loud-errors promise), the dispatch pipeline's
-// authorization (capability before validation, mirroring guard-before-pipe),
-// and the role-filtered tool listing the A5 loop will hand to the model.
+// Registry-level tests for the agent tool registry (ADR-0043 c1–c3, tickets
+// A4/A7): the boot-time guarantees (every wrapper converts to JSON Schema —
+// c2's drift-becomes-loud-errors promise; name↔tier coherence; every write
+// declares its entity type), the dispatch pipeline's authorization
+// (capability before validation, mirroring guard-before-pipe), and the
+// role-filtered tool listing the A5 loop hands to the model.
 //
 // The registry is built from the REAL services via the providers-direct
 // pattern (the trips.service.test.ts precedent — no AuthModule/HTTP): the
@@ -35,28 +36,38 @@ const ADMIN: Actor = { userId: "user_admin", role: UserRole.ADMIN };
 const OFFICE: Actor = { userId: "user_office", role: UserRole.OFFICE_STAFF };
 const DRIVER: Actor = { userId: "user_driver", role: UserRole.DRIVER };
 
-// Stage one's full registry surface (c3): 22 domain read tools + fleet_snapshot.
+// The full curated surface (c3): 22 domain read tools + fleet_snapshot (A4)
+// + the 8 stage-two creates (A7). A new tool is added HERE and in its
+// builder in the same commit — deliberate friction against silent growth.
 const EXPECTED_TOOLS = [
   "list_vehicles",
   "get_vehicle",
+  "create_vehicle",
   "list_drivers",
   "get_driver",
+  "create_driver",
   "list_customers",
   "get_customer",
+  "create_customer",
   "list_jobs",
   "get_job",
+  "create_job",
   "list_trips",
   "get_trip",
+  "create_trip",
   "list_fuel_logs",
   "get_fuel_log",
+  "create_fuel_log",
   "list_expense_logs",
   "get_expense_log",
+  "create_expense_log",
   "list_geofences",
   "get_geofence",
   "list_service_schedules",
   "get_service_schedule",
   "list_service_records",
   "get_service_record",
+  "create_service_record",
   "report_per_vehicle_cost",
   "report_per_vehicle_efficiency",
   "fleet_snapshot",
@@ -99,12 +110,14 @@ describe("AgentToolRegistry (ADR-0043 A4)", () => {
     await resetDb(prisma);
   });
 
-  test("registers exactly the stage-one curated surface — and NOTHING invoice/GPS/user shaped (c3)", () => {
+  test("registers exactly the curated surface — and NOTHING invoice/GPS/user/delete shaped (c3)", () => {
     expect(registry.listToolNames().sort()).toEqual([...EXPECTED_TOOLS].sort());
     // The structural absences, asserted by name-shape: no invoice tools, no
-    // raw-GPS/telematics tools, no user/role tools, no deletes, no writes yet.
+    // raw-GPS/telematics tools, no user/role tools, and NO DELETES — the c3
+    // exclusions that stay absent forever (creates/updates are stage two,
+    // no longer excluded).
     for (const name of registry.listToolNames()) {
-      expect(name).not.toMatch(/invoice|gps|ping|telematic|user|role|delete|create|update/);
+      expect(name).not.toMatch(/invoice|gps|ping|telematic|user|role|delete/);
     }
   });
 
@@ -130,21 +143,34 @@ describe("AgentToolRegistry (ADR-0043 A4)", () => {
     }
   });
 
-  test("listToolDefinitions filters by role: the model never sees a tool the human cannot run", () => {
+  test("listToolDefinitions filters by role (capability-exact; the create_trip caveat pinned)", () => {
     const adminTools = registry.listToolDefinitions(UserRole.ADMIN).map((s) => s.function.name);
     const officeTools = registry
       .listToolDefinitions(UserRole.OFFICE_STAFF)
       .map((s) => s.function.name);
     const driverTools = registry.listToolDefinitions(UserRole.DRIVER).map((s) => s.function.name);
 
-    // ADMIN and OFFICE_STAFF both hold the full operational floor the
-    // stage-one tools require.
+    // ADMIN and OFFICE_STAFF both hold the full operational floor every
+    // registered tool requires (agent:use — who may CHAT — is the route
+    // gate, not a tool capability).
     expect(adminTools.sort()).toEqual([...EXPECTED_TOOLS].sort());
     expect(officeTools.sort()).toEqual([...EXPECTED_TOOLS].sort());
-    // DRIVER holds exactly trips:* + fuel-logs:* — four tools, and emphatically
-    // not fleet_snapshot (its multi-token AND requires the whole floor).
+    // DRIVER holds exactly trips:* + fuel-logs:* — six tools now, and
+    // emphatically not fleet_snapshot (its multi-token AND requires the
+    // whole floor). create_trip IS listed (the capability filter is coarse
+    // by design, ADR-0028) even though TripsService.create rejects DRIVER
+    // actors at the service layer — the loop records that as `denied`; moot
+    // while agent:use is ADMIN-only. create_fuel_log genuinely works for a
+    // DRIVER (own-trip pairing enforced in the service).
     expect(driverTools.sort()).toEqual(
-      ["list_trips", "get_trip", "list_fuel_logs", "get_fuel_log"].sort(),
+      [
+        "list_trips",
+        "get_trip",
+        "create_trip",
+        "list_fuel_logs",
+        "get_fuel_log",
+        "create_fuel_log",
+      ].sort(),
     );
   });
 
@@ -178,9 +204,18 @@ describe("AgentToolRegistry (ADR-0043 A4)", () => {
     ).rejects.toBeInstanceOf(ForbiddenException);
   });
 
-  test("every stage-one tool declares the read tier", () => {
+  test("name ↔ tier coherence: create_* are reversible-write with an entity type; the rest read", () => {
     for (const name of registry.listToolNames()) {
-      expect(registry.getTool(name)?.riskTier).toBe("read");
+      const tool = registry.getTool(name);
+      if (/^(create|update)_/.test(name)) {
+        expect(tool?.riskTier).toBe("reversible-write");
+        // Every write must declare its affected entity type — the audit
+        // row's deep-link derives from it (c4c); also boot-asserted.
+        expect(typeof tool?.resultEntityType).toBe("string");
+      } else {
+        expect(tool?.riskTier).toBe("read");
+        expect(tool?.resultEntityType).toBeUndefined();
+      }
     }
   });
 });

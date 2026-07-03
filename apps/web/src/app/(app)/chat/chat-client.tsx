@@ -10,6 +10,7 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   actionBadgeVariant,
   AGENT_MESSAGE_MAX_LENGTH,
+  entityPathFor,
   formatLatencyMs,
   linkifyAppPaths,
 } from "@/lib/agent-chat";
@@ -278,10 +279,14 @@ function AssistantText({ content }: { content: string }): React.ReactElement {
 }
 
 // The c4c honesty rule: this card renders from the server's AgentAction row,
-// never from model text. Stage one (read tools) has no entity deep-link;
-// A7/A8 populate resultEntityType/Id and the card gains its one contextual
-// link (anti-pattern #3).
+// never from model text. Write tools (A7) populate resultEntityType/Id and
+// the card carries its ONE contextual link to the affected record
+// (anti-pattern #3); read dispatches have no entity and render no link.
 function ActionCard({ action }: { action: AgentAction }): React.ReactElement {
+  const entityHref =
+    action.resultEntityType !== null && action.resultEntityId !== null
+      ? entityPathFor(action.resultEntityType, action.resultEntityId)
+      : null;
   return (
     <div className="border-border-subtle bg-surface-raised rounded border p-3">
       <div className="flex items-center gap-2">
@@ -290,6 +295,11 @@ function ActionCard({ action }: { action: AgentAction }): React.ReactElement {
         <span className="text-text-muted text-xs tabular-nums">
           {formatLatencyMs(action.latencyMs)}
         </span>
+        {entityHref !== null ? (
+          <Link href={entityHref} className="text-text-accent text-xs underline underline-offset-2">
+            {entityHref}
+          </Link>
+        ) : null}
       </div>
       <details className="mt-2">
         <summary className="text-text-muted cursor-pointer text-xs">Details</summary>
