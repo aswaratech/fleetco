@@ -1,4 +1,9 @@
-import { ForbiddenException, NotFoundException } from "@nestjs/common";
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  NotFoundException,
+} from "@nestjs/common";
 import { Test } from "@nestjs/testing";
 import { UserRole } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
@@ -18,7 +23,7 @@ import { ServiceSchedulesService } from "../src/modules/maintenance/service-sche
 import { TripsService } from "../src/modules/trips/trips.service";
 import { VehiclesService } from "../src/modules/vehicles/vehicles.service";
 import { resetDb } from "./db";
-import { seedFuelLog } from "./fixtures/agent";
+import { seedCustomer, seedFuelLog, seedServiceSchedule } from "./fixtures/agent";
 import { seedDriver, seedTrip, seedUser, seedVehicle } from "./fixtures/trip";
 
 // End-to-end registry dispatch against real Postgres (ADR-0043 c1/c6, ticket
@@ -215,5 +220,191 @@ describe("agent tools end-to-end (real DB, ADR-0043 A4)", () => {
     expect(result.items).toHaveLength(1);
     expect(result.items[0].name).toBe("Kalimati depot");
     expect("boundaryWkt" in result.items[0]).toBe(false);
+  });
+
+  // --- stage two: the create tools end-to-end (A7) --------------------------
+
+  test("create_fuel_log derives totalCostPaisa server-side and the envelope carries the entity (c1/c4c)", async () => {
+    const vehicle = await seedVehicle(prisma, adminId);
+
+    // The FuelLogsService docblock's worked example: 12345 mL × 11055
+    // paisa/L = 136473.975 → half-up 136474 — the derivation the wrapper
+    // structurally cannot override.
+    const outcome = await registry.dispatch(
+      "create_fuel_log",
+      {
+        vehicleId: vehicle.id,
+        date: "2026-07-01",
+        litersMl: 12_345,
+        pricePerLiterPaisa: 11_055,
+      },
+      admin,
+    );
+
+    const result = outcome.result as { id: string; totalCostPaisa: number };
+    expect(result.totalCostPaisa).toBe(136_474);
+    expect(outcome.entity).toEqual({ type: "FuelLog", id: result.id });
+
+    // c1 for writes: createdById is the requesting HUMAN, never a synthetic
+    // actor and never a body field.
+    const row = await prisma.fuelLog.findUniqueOrThrow({ where: { id: result.id } });
+    expect(row.createdById).toBe(adminId);
+  });
+
+  test("create_job generates the JOB-YYYY-NNNNN number server-side", async () => {
+    const customer = await seedCustomer(prisma, adminId);
+
+    const outcome = await registry.dispatch(
+      "create_job",
+      { customerId: customer.id, description: "Haul aggregate Kalimati -> site" },
+      admin,
+    );
+
+    const result = outcome.result as { id: string; jobNumber: string; customer: { id: string } };
+    expect(result.jobNumber).toMatch(/^JOB-\d{4}-\d{5}$/);
+    expect(result.customer.id).toBe(customer.id);
+    expect(outcome.entity).toEqual({ type: "Job", id: result.id });
+  });
+
+  test("create_vehicle: duplicate registrationNumber → ConflictException (P2002 → 409 passthrough)", async () => {
+    const args = {
+      registrationNumber: "BA 2 KHA 5555",
+      kind: "TIPPER",
+      make: "Tata",
+      model: "LPK 2518",
+      year: 2024,
+      acquiredAt: "2026-01-15",
+    };
+    const first = await registry.dispatch("create_vehicle", args, admin);
+    expect(first.entity?.type).toBe("Vehicle");
+
+    await expect(registry.dispatch("create_vehicle", args, admin)).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+  });
+
+  test("create_trip as a DRIVER actor → ForbiddenException (the service-level role rule, pinned)", async () => {
+    // The coarse capability filter LISTS create_trip for DRIVER (trips:*),
+    // but TripsService.create rejects DRIVER actors — the loop records this
+    // as a `denied` action. Moot while agent:use is ADMIN-only; pinned so
+    // the behavior is deliberate, not accidental.
+    const vehicle = await seedVehicle(prisma, adminId);
+    const driverUserId = await seedUser(prisma, UserRole.DRIVER);
+    const ownDriver = await seedDriver(prisma, adminId, { userId: driverUserId });
+    const driverActor: Actor = { userId: driverUserId, role: UserRole.DRIVER };
+
+    await expect(
+      registry.dispatch(
+        "create_trip",
+        { vehicleId: vehicle.id, driverId: ownDriver.id, status: "PLANNED" },
+        driverActor,
+      ),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  test("DRIVER create_fuel_log: own-trip pairing enforced; foreign trip 404s (failed, not denied)", async () => {
+    const vehicle = await seedVehicle(prisma, adminId);
+    const driverUserId = await seedUser(prisma, UserRole.DRIVER);
+    const ownDriver = await seedDriver(prisma, adminId, { userId: driverUserId });
+    const otherDriver = await seedDriver(prisma, adminId);
+    const ownTrip = await seedTrip(prisma, {
+      vehicleId: vehicle.id,
+      driverId: ownDriver.id,
+      createdById: adminId,
+    });
+    const foreignTrip = await seedTrip(prisma, {
+      vehicleId: vehicle.id,
+      driverId: otherDriver.id,
+      createdById: adminId,
+    });
+    const driverActor: Actor = { userId: driverUserId, role: UserRole.DRIVER };
+    const baseArgs = {
+      vehicleId: vehicle.id,
+      date: "2026-07-01",
+      litersMl: 40_000,
+      pricePerLiterPaisa: 16_500,
+    };
+
+    // No trip → the service's DRIVER must-pair rule rejects (400-shaped).
+    await expect(
+      registry.dispatch("create_fuel_log", baseArgs, driverActor),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    // A foreign trip 404s (existence-hiding — a failed execution).
+    await expect(
+      registry.dispatch("create_fuel_log", { ...baseArgs, tripId: foreignTrip.id }, driverActor),
+    ).rejects.toBeInstanceOf(NotFoundException);
+
+    // Their OWN trip on the same vehicle succeeds — the D2 row-scope
+    // inherited on a WRITE path, for free.
+    const outcome = await registry.dispatch(
+      "create_fuel_log",
+      { ...baseArgs, tripId: ownTrip.id },
+      driverActor,
+    );
+    expect(outcome.entity?.type).toBe("FuelLog");
+  });
+
+  test("create_driver: the redacted RESULT masks/strips PII while the DB row stores it (c6)", async () => {
+    const outcome = await registry.dispatch(
+      "create_driver",
+      {
+        fullName: "Sita Kumari Thapa",
+        licenseNumber: "03-066-041999",
+        licenseClass: "HMV",
+        phone: "+977-9812345678",
+        dateOfBirth: "1990-04-12",
+        hiredAt: "2026-07-01",
+        licenseExpiresAt: "2028-04-11",
+      },
+      admin,
+    );
+
+    const result = outcome.result as Record<string, unknown>;
+    expect("dateOfBirth" in result).toBe(false);
+    expect(result.licenseNumber).toBe("***1999");
+
+    const row = await prisma.driver.findUniqueOrThrow({
+      where: { id: (outcome.entity as { id: string }).id },
+    });
+    expect(row.licenseNumber).toBe("03-066-041999");
+    expect(row.dateOfBirth?.toISOString().slice(0, 10)).toBe("1990-04-12");
+  });
+
+  test("create_expense_log: vehicle-agnostic (no vehicleId) is a first-class row", async () => {
+    const outcome = await registry.dispatch(
+      "create_expense_log",
+      { date: "2026-07-01", category: "INSURANCE", amountPaisa: 4_500_000 },
+      admin,
+    );
+    const result = outcome.result as { id: string; vehicleId: string | null };
+    expect(result.vehicleId).toBeNull();
+    expect(outcome.entity).toEqual({ type: "ExpenseLog", id: result.id });
+  });
+
+  test("create_service_record against a schedule advances its anchor (the in-service transaction)", async () => {
+    const vehicle = await seedVehicle(prisma, adminId);
+    const schedule = await seedServiceSchedule(prisma, {
+      vehicleId: vehicle.id,
+      createdById: adminId,
+      lastServiceOdometerKm: 75_000,
+    });
+
+    const outcome = await registry.dispatch(
+      "create_service_record",
+      {
+        vehicleId: vehicle.id,
+        serviceScheduleId: schedule.id,
+        performedAt: "2026-07-01",
+        odometerKm: 80_000,
+      },
+      admin,
+    );
+    expect(outcome.entity?.type).toBe("ServiceRecord");
+
+    const advanced = await prisma.serviceSchedule.findUniqueOrThrow({
+      where: { id: schedule.id },
+    });
+    expect(advanced.lastServiceOdometerKm).toBe(80_000);
   });
 });

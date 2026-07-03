@@ -27,6 +27,8 @@ import {
   TOOL_NAME_PATTERN,
   type LlmToolSpec,
   type ToolDefinition,
+  type ToolDispatchEntity,
+  type ToolDispatchOutcome,
 } from "./tool.types";
 
 // Every service below is injected by NestJS via emitDecoratorMetadata; the
@@ -57,11 +59,12 @@ import { TripsService } from "../../trips/trips.service";
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports
 import { VehiclesService } from "../../vehicles/vehicles.service";
 
-// The AI agent's tool registry (ADR-0043 commitments 1–3, ticket A4): the
+// The AI agent's tool registry (ADR-0043 commitments 1–3, tickets A4/A7): the
 // curated, typed surface the LLM operates through — NOT the whole API.
 // Structurally absent (c3): everything on InvoicesService, raw GPS/telematics
-// traces, user/role management, and every delete. Stage one (this file) is
-// reads + reports; the A7/A8 write tools join the same builders.
+// traces, user/role management, and every delete. Stage one (A4) shipped the
+// reads + reports; stage two (A7) adds the 8 creates on the same builders
+// (A8 adds the 3 updates).
 //
 // Boot-time guarantees (constructor): every wrapper schema converts through
 // z.toJSONSchema — a wrapper that drifts into .transform()/z.coerce (which
@@ -130,10 +133,22 @@ export class AgentToolRegistry {
       if (this.tools.has(tool.name)) {
         throw new Error(`Duplicate agent tool name "${tool.name}"`);
       }
-      if (tool.riskTier !== "read") {
-        // Stage one is reads + reports only (c3); the A7/A8 write tickets
-        // relax this assertion when the reversible-write tier ships.
-        throw new Error(`Agent tool "${tool.name}" declares a non-read tier before A7`);
+      // Name ↔ tier coherence: a `create_`/`update_` name IS the write tier
+      // and vice versa. A misdeclared tool (a write masquerading as `read`,
+      // or a read named like a write) fails the boot loudly rather than
+      // shipping a mislabeled risk surface.
+      const isWriteName = /^(create|update)_/.test(tool.name);
+      if (isWriteName !== (tool.riskTier === "reversible-write")) {
+        throw new Error(
+          `Agent tool "${tool.name}" name/tier mismatch: ${tool.riskTier} (write names are ` +
+            `create_*/update_* and exactly those carry the reversible-write tier)`,
+        );
+      }
+      // Every write must declare its affected entity type — the AgentAction
+      // audit row's deep-link (c4c) derives from it; a write the ledger
+      // cannot link to its record is a compensations regression.
+      if (tool.riskTier === "reversible-write" && tool.resultEntityType === undefined) {
+        throw new Error(`Agent write tool "${tool.name}" declares no resultEntityType`);
       }
       // The boot-time JSON-schema generation — throws on any wrapper that a
       // JSON schema cannot represent (transforms, coercions).
@@ -152,8 +167,13 @@ export class AgentToolRegistry {
   /**
    * The OpenAI-compatible `tools` array for a given role — CAPABILITY-
    * FILTERED, so the model is never shown a tool the requesting human cannot
-   * run (c1: the capability ceiling is the human's role). A5 passes this
-   * straight into the LlmClient request.
+   * run BY CAPABILITY (c1: the capability ceiling is the human's role). A5
+   * passes this straight into the LlmClient request. One deliberate gap in
+   * the filter's promise: capability tokens are coarse (ADR-0028), so a
+   * DRIVER role — holding `trips:*` — is shown create_trip even though
+   * TripsService.create rejects DRIVER actors at the service layer (403 →
+   * a `denied` action row). Moot while agent:use is ADMIN-only; recorded
+   * here because the filter alone is not the whole authorization story.
    */
   listToolDefinitions(role: UserRole): LlmToolSpec[] {
     const specs: LlmToolSpec[] = [];
@@ -182,11 +202,16 @@ export class AgentToolRegistry {
   }
 
   /**
-   * Dispatch one tool call as the requesting user. See the pipeline note in
-   * the file header. Failures are ordinary Nest HttpExceptions so A5 renders
-   * them as tool-error messages with the familiar shapes.
+   * Dispatch one tool call as the requesting user, returning the full
+   * outcome envelope (ticket A7): the REDACTED result (the only member that
+   * may cross to the provider) plus the affected entity for the AgentAction
+   * audit row, derived from the PRE-redaction result when the tool declares
+   * `resultEntityType` — so the audit spine never depends on which keys
+   * redaction preserves. See the pipeline note in the file header. Failures
+   * are ordinary Nest HttpExceptions so A5 renders them as tool-error
+   * messages with the familiar shapes.
    */
-  async execute(name: string, rawArgs: unknown, actor: Actor): Promise<unknown> {
+  async dispatch(name: string, rawArgs: unknown, actor: Actor): Promise<ToolDispatchOutcome> {
     const tool = this.tools.get(name);
     if (tool === undefined) {
       throw new NotFoundException(`Unknown agent tool: ${name}`);
@@ -201,9 +226,9 @@ export class AgentToolRegistry {
     }
 
     const args = new ZodValidationPipe(tool.argsSchema).transform(rawArgs);
-    let result: unknown;
+    let raw: unknown;
     try {
-      result = await tool.execute(args, actor);
+      raw = await tool.execute(args, actor);
     } catch (error) {
       // The owning module's re-validation runs INSIDE execute (c2). A
       // ZodError escaping here is that second layer rejecting what the
@@ -219,6 +244,24 @@ export class AgentToolRegistry {
       }
       throw error;
     }
-    return redactForModel(result);
+
+    let entity: ToolDispatchEntity | null = null;
+    if (tool.resultEntityType !== undefined && typeof raw === "object" && raw !== null) {
+      const id = (raw as { id?: unknown }).id;
+      if (typeof id === "string") {
+        entity = { type: tool.resultEntityType, id };
+      }
+    }
+
+    return { result: redactForModel(raw), entity };
+  }
+
+  /**
+   * Result-only dispatch — the A4 surface, kept as a thin delegate so every
+   * pre-envelope caller and test is untouched. New callers that need the
+   * audit envelope use {@link dispatch}.
+   */
+  async execute(name: string, rawArgs: unknown, actor: Actor): Promise<unknown> {
+    return (await this.dispatch(name, rawArgs, actor)).result;
   }
 }

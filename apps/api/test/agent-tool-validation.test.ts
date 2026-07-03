@@ -137,4 +137,89 @@ describe("agent tool validation (ADR-0043 A4)", () => {
     expect(page.total).toBe(3);
     expect(page.items).toHaveLength(1);
   });
+
+  // --- stage two: the create wrappers (A7) ---------------------------------
+
+  test("create wrappers reject unknown keys with the field named (.strict())", async () => {
+    const error = await registry
+      .execute("create_vehicle", { registrationNumber: "BA 1 KHA 1234", totalPaisa: 1 }, ADMIN)
+      .catch((thrown: unknown) => thrown);
+    expect(error).toBeInstanceOf(BadRequestException);
+    expect((error as BadRequestException).message).toContain("totalPaisa");
+  });
+
+  test("create_expense_log rejects a bad category enum member", async () => {
+    await expect(
+      registry.execute(
+        "create_expense_log",
+        { date: "2026-07-01", category: "BRIBE", amountPaisa: 100 },
+        ADMIN,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  test("create_fuel_log rejects a non-ISO date", async () => {
+    await expect(
+      registry.execute(
+        "create_fuel_log",
+        { vehicleId: "cvehicle123", date: "01/07/2026", litersMl: 1000, pricePerLiterPaisa: 100 },
+        ADMIN,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  test("nullability mirrors the module exactly: notes: null on create_trip is rejected", async () => {
+    // CreateTripSchema's `notes` is optional but NOT nullable — the wrapper
+    // mirrors field-for-field, so an explicit null fails at the wrapper.
+    await expect(
+      registry.execute(
+        "create_trip",
+        { vehicleId: "cveh1", driverId: "cdrv1", status: "PLANNED", notes: null },
+        ADMIN,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  test("create_job inherits the module superRefine: end before start → house 400 (c2)", async () => {
+    // The wrapper has no cross-field rules; the module schema re-validates
+    // at execute and its end-≥-start refine rejects through the registry's
+    // ZodError → house-400 arm.
+    const error = await registry
+      .execute(
+        "create_job",
+        {
+          customerId: "ccustomer123",
+          description: "Haul aggregate",
+          scheduledStartDate: "2026-07-10",
+          scheduledEndDate: "2026-07-01",
+        },
+        ADMIN,
+      )
+      .catch((thrown: unknown) => thrown);
+    expect(error).toBeInstanceOf(BadRequestException);
+    expect((error as BadRequestException).message).toContain("scheduledEndDate");
+  });
+
+  test("server-derived fields are structurally absent: jobNumber and totalCostPaisa rejected", async () => {
+    await expect(
+      registry.execute(
+        "create_job",
+        { customerId: "ccustomer123", description: "x", jobNumber: "JOB-2026-00001" },
+        ADMIN,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    await expect(
+      registry.execute(
+        "create_fuel_log",
+        {
+          vehicleId: "cvehicle123",
+          date: "2026-07-01",
+          litersMl: 1000,
+          pricePerLiterPaisa: 100,
+          totalCostPaisa: 999,
+        },
+        ADMIN,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
 });

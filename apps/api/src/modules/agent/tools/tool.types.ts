@@ -10,9 +10,11 @@ import { type Actor } from "../../auth/driver-scope.service";
 // (capability → validate → execute-as-actor → redact) on dispatch.
 
 /**
- * The risk tier a tool declares (ADR-0043 c3). Stage one (A4) ships ONLY
- * `read` tools; `reversible-write` arrives with the A7/A8 create/update
- * tools. Deletes and invoice operations have no tier — they are structurally
+ * The risk tier a tool declares (ADR-0043 c3). Stage one (A4) shipped the
+ * `read` tools; stage two's `reversible-write` tier covers the A7 creates
+ * (and A8's updates) — reversible by design: creates can be corrected or
+ * retired through the normal surfaces, updates carry a pre-image (c4b).
+ * Deletes and invoice operations have no tier — they are structurally
  * absent from the registry (c3).
  */
 export type ToolRiskTier = "read" | "reversible-write";
@@ -55,6 +57,16 @@ export interface ToolDefinition {
    */
   capabilities: readonly Capability[];
   riskTier: ToolRiskTier;
+  /**
+   * The Prisma model name of the entity a SUCCESSFUL execution affects
+   * (e.g. `"Vehicle"`) — declared by write tools only, and required for
+   * them (a boot assertion): the AgentAction audit row's deep-link fields
+   * derive from it (ADR-0043 c4c/c5). Convention: the affected row's id is
+   * the execute result's top-level `id` (every module create/update returns
+   * the affected row). Absent on read tools — a list/get/report affects no
+   * single entity.
+   */
+  resultEntityType?: string;
   /** The transform-free wrapper schema (see above). */
   argsSchema: z.ZodType;
   /**
@@ -64,6 +76,27 @@ export interface ToolDefinition {
    * owning module's schema where one exists.
    */
   execute(args: unknown, actor: Actor): Promise<unknown>;
+}
+
+/** The entity a dispatched write affected — the action card's deep-link. */
+export interface ToolDispatchEntity {
+  /** Prisma model name (the tool's declared {@link ToolDefinition.resultEntityType}). */
+  type: string;
+  /** The affected row's id. Deliberately NOT a FK downstream (audit rows
+   * survive the entity's later deletion). */
+  id: string;
+}
+
+/**
+ * What one registry dispatch produced (A5's loop consumes this; ticket A7).
+ * `result` is REDACTED — the only member that may cross to the provider as
+ * a tool message. `entity` derives from the PRE-redaction result, so the
+ * audit spine never depends on what redaction happens to preserve. A8
+ * extends this envelope with the update pre-image.
+ */
+export interface ToolDispatchOutcome {
+  result: unknown;
+  entity: ToolDispatchEntity | null;
 }
 
 /**

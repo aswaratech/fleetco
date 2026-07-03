@@ -104,3 +104,31 @@ export function formatLatencyMs(latencyMs: number): string {
   if (latencyMs < 1000) return `${latencyMs} ms`;
   return `${(latencyMs / 1000).toFixed(1)} s`;
 }
+
+// The AgentAction entity-type → detail-route map (ADR-0043 c4c, ticket A7).
+// Keys are the Prisma model names the API's write tools declare as
+// `resultEntityType`; every route has a detail page at `<prefix>/[id]`. A
+// second allowlist beside LINKABLE_ROUTE_PREFIXES on purpose: this one maps
+// SERVER-recorded audit fields, that one gates UNTRUSTED model prose.
+const ENTITY_ROUTES: Readonly<Record<string, string>> = {
+  Vehicle: "/vehicles",
+  Driver: "/drivers",
+  Customer: "/customers",
+  Job: "/jobs",
+  Trip: "/trips",
+  FuelLog: "/fuel-logs",
+  ExpenseLog: "/expense-logs",
+  ServiceRecord: "/service-records",
+};
+
+const ENTITY_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+/**
+ * The app path for an AgentAction's affected entity, or null when the type
+ * is unknown or the id is not a plain record id (fail-closed: an action card
+ * / activity row without a mapping simply renders no link).
+ */
+export function entityPathFor(entityType: string, id: string): string | null {
+  const prefix = ENTITY_ROUTES[entityType];
+  return prefix !== undefined && ENTITY_ID_PATTERN.test(id) ? `${prefix}/${id}` : null;
+}
