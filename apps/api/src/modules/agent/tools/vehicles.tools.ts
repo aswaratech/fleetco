@@ -6,6 +6,7 @@ import { type VehiclesService } from "../../vehicles/vehicles.service";
 import {
   CreateVehicleSchema,
   ListVehiclesQuerySchema,
+  UpdateVehicleSchema,
   type VehicleSortColumn,
 } from "../../vehicles/vehicles.schemas";
 import { toQueryShape } from "./query-shape";
@@ -69,6 +70,37 @@ const CreateVehicleArgs = z
   })
   .strict();
 
+// Mirrors UpdateVehicleSchema field-for-field plus the wrapper-only `id`.
+// Explicit null CLEARS a clearable field (engine hours, retiredAt, the
+// compliance strings/dates/type); meterType is reclassified, never cleared.
+// The module schema's empty-patch refine re-validates at execute.
+const UpdateVehicleArgs = z
+  .object({
+    id: z.string().trim().min(1),
+    registrationNumber: z.string().trim().min(1).max(64).optional(),
+    kind: z.enum(VehicleKind).optional(),
+    make: z.string().trim().min(1).max(64).optional(),
+    model: z.string().trim().min(1).max(64).optional(),
+    year: z.number().int().min(1980).optional(),
+    status: z.enum(VehicleStatus).optional(),
+    odometerStartKm: z.number().int().min(0).max(10_000_000).optional(),
+    odometerCurrentKm: z.number().int().min(0).max(10_000_000).optional(),
+    meterType: z.enum(MeterType).optional(),
+    engineHoursStart: z.number().int().min(0).max(10_000_000).nullable().optional(),
+    engineHoursCurrent: z.number().int().min(0).max(10_000_000).nullable().optional(),
+    acquiredAt: z.iso.date().optional(),
+    retiredAt: z.iso.date().nullable().optional(),
+    bluebookNumber: z.string().trim().min(1).max(64).nullable().optional(),
+    bluebookExpiresAt: z.iso.date().nullable().optional(),
+    insurer: z.string().trim().min(1).max(64).nullable().optional(),
+    insurancePolicyNumber: z.string().trim().min(1).max(64).nullable().optional(),
+    insuranceType: z.enum(InsuranceType).nullable().optional(),
+    insuranceExpiresAt: z.iso.date().nullable().optional(),
+    routePermitNumber: z.string().trim().min(1).max(64).nullable().optional(),
+    routePermitExpiresAt: z.iso.date().nullable().optional(),
+  })
+  .strict();
+
 export function buildVehiclesTools(vehicles: VehiclesService): ToolDefinition[] {
   return [
     {
@@ -119,6 +151,34 @@ export function buildVehiclesTools(vehicles: VehiclesService): ToolDefinition[] 
       async execute(args, actor) {
         const input = CreateVehicleSchema.parse(CreateVehicleArgs.parse(args));
         return vehicles.create(input, actor.userId);
+      },
+    },
+    {
+      name: "update_vehicle",
+      description:
+        "Update fields on an existing vehicle (partial update — send only what " +
+        "changes; the prior row is captured for undo). Explicit null CLEARS a " +
+        "clearable field (engine hours, retiredAt, compliance fields). Setting " +
+        "status to RETIRED or SOLD stamps retiredAt automatically. " +
+        "registrationNumber stays unique (a duplicate fails with a conflict). " +
+        "Units: integer km, integer tenths-of-an-hour, ISO YYYY-MM-DD dates. " +
+        "The write happens immediately and exactly once.",
+      capabilities: ["vehicles:*"],
+      riskTier: "reversible-write",
+      resultEntityType: "Vehicle",
+      argsSchema: UpdateVehicleArgs,
+      async capturePreImage(args) {
+        const { id } = UpdateVehicleArgs.parse(args);
+        return vehicles.getById(id);
+      },
+      async execute(args) {
+        const { id, ...patch } = UpdateVehicleArgs.parse(args);
+        const input = UpdateVehicleSchema.parse(patch);
+        const updated = await vehicles.update(id, input);
+        if (updated === null) {
+          throw new NotFoundException(`Vehicle ${id} not found.`);
+        }
+        return updated;
       },
     },
   ];

@@ -6,6 +6,7 @@ import { type DriversService } from "../../drivers/drivers.service";
 import {
   CreateDriverSchema,
   ListDriversQuerySchema,
+  UpdateDriverSchema,
   type DriverSortColumn,
 } from "../../drivers/drivers.schemas";
 import { toQueryShape } from "./query-shape";
@@ -52,6 +53,25 @@ const CreateDriverArgs = z
     hiredAt: z.iso.date(),
     licenseExpiresAt: z.iso.date(),
     status: z.enum(DriverStatus).optional(),
+  })
+  .strict();
+
+// Mirrors UpdateDriverSchema field-for-field plus the wrapper-only `id`
+// (Create partial + terminatedAt, with dateOfBirth/terminatedAt clearable
+// via explicit null). The module schema's empty-patch refine re-validates
+// at execute.
+const UpdateDriverArgs = z
+  .object({
+    id: z.string().trim().min(1),
+    fullName: z.string().trim().min(1).max(128).optional(),
+    licenseNumber: z.string().trim().min(1).max(64).optional(),
+    licenseClass: z.enum(LicenseClass).optional(),
+    phone: z.string().trim().min(1).optional(),
+    dateOfBirth: z.iso.date().nullable().optional(),
+    hiredAt: z.iso.date().optional(),
+    licenseExpiresAt: z.iso.date().optional(),
+    status: z.enum(DriverStatus).optional(),
+    terminatedAt: z.iso.date().nullable().optional(),
   })
   .strict();
 
@@ -104,6 +124,34 @@ export function buildDriversTools(drivers: DriversService): ToolDefinition[] {
       async execute(args, actor) {
         const input = CreateDriverSchema.parse(CreateDriverArgs.parse(args));
         return drivers.create(input, actor.userId);
+      },
+    },
+    {
+      name: "update_driver",
+      description:
+        "Update fields on an existing driver (partial update — send only what " +
+        "changes; the prior row is captured for undo). Explicit null CLEARS " +
+        "dateOfBirth or terminatedAt. Setting status to TERMINATED stamps " +
+        "terminatedAt automatically. licenseNumber stays unique (a duplicate " +
+        "fails with a conflict) and comes back masked to its last 4 in the " +
+        "result. Dates are ISO YYYY-MM-DD. The write happens immediately and " +
+        "exactly once.",
+      capabilities: ["drivers:*"],
+      riskTier: "reversible-write",
+      resultEntityType: "Driver",
+      argsSchema: UpdateDriverArgs,
+      async capturePreImage(args) {
+        const { id } = UpdateDriverArgs.parse(args);
+        return drivers.findById(id);
+      },
+      async execute(args) {
+        const { id, ...patch } = UpdateDriverArgs.parse(args);
+        const input = UpdateDriverSchema.parse(patch);
+        const updated = await drivers.update(id, input);
+        if (updated === null) {
+          throw new NotFoundException(`Driver ${id} not found.`);
+        }
+        return updated;
       },
     },
   ];

@@ -641,4 +641,65 @@ describe("agent turn loop (real registry + Postgres, MockLlmClient queue)", () =
     expect(turn.actions[0]?.resultEntityId).toBeNull();
     expect(await prisma.job.count()).toBe(0);
   });
+
+  // --- stage two: update pre-image through the loop (A8) --------------------
+
+  test("a succeeded update persists previousJson; the provider never saw the pre-image (c4b/c6)", async () => {
+    const vehicle = await seedVehicle(prisma, adminId, { odometerCurrentKm: 8_000 });
+    const mock = new MockLlmClient({
+      results: [
+        toolCallsResult([
+          {
+            id: "call_1",
+            name: "update_vehicle",
+            args: { id: vehicle.id, odometerCurrentKm: 8_250 },
+          },
+        ]),
+        textResult("Updated the odometer — see /vehicles/<id>."),
+      ],
+    });
+    const service = serviceWith(mock);
+    const conversation = await service.createConversation(admin);
+
+    const turn = await service.runTurn(conversation.id, "Set the odometer to 8250", admin);
+
+    expect(turn.actions).toHaveLength(1);
+    const action = turn.actions[0];
+    expect(action?.status).toBe("succeeded");
+    expect(action?.resultEntityType).toBe("Vehicle");
+    // The pre-image (prior odometer 8000) persisted on the audit row, raw.
+    const pre = action?.previousJson as { odometerCurrentKm: number };
+    expect(pre.odometerCurrentKm).toBe(8_000);
+
+    // The tool message the provider saw carries the REDACTED RESULT (new
+    // value) — and NOT the pre-image content (odometer 8000 must not appear
+    // as a "previousJson" the model could read).
+    const toolMessage = mock.requests[1]?.messages.find((m) => m.role === "tool");
+    expect(toolMessage?.content).not.toContain("previousJson");
+    const payload = JSON.parse(toolMessage?.content ?? "") as { odometerCurrentKm: number };
+    expect(payload.odometerCurrentKm).toBe(8_250);
+  });
+
+  test("a failed update records failed with previousJson NULL (nothing changed, nothing to undo)", async () => {
+    const mock = new MockLlmClient({
+      results: [
+        toolCallsResult([
+          {
+            id: "call_1",
+            name: "update_vehicle",
+            args: { id: "c00000000000000000000000", make: "Ghost" },
+          },
+        ]),
+        textResult("That vehicle does not exist."),
+      ],
+    });
+    const service = serviceWith(mock);
+    const conversation = await service.createConversation(admin);
+
+    const turn = await service.runTurn(conversation.id, "Rename a vehicle", admin);
+
+    expect(turn.actions[0]?.status).toBe("failed");
+    expect(turn.actions[0]?.previousJson).toBeNull();
+    expect(turn.actions[0]?.resultEntityType).toBeNull();
+  });
 });

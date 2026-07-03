@@ -37,15 +37,18 @@ const OFFICE: Actor = { userId: "user_office", role: UserRole.OFFICE_STAFF };
 const DRIVER: Actor = { userId: "user_driver", role: UserRole.DRIVER };
 
 // The full curated surface (c3): 22 domain read tools + fleet_snapshot (A4)
-// + the 8 stage-two creates (A7). A new tool is added HERE and in its
-// builder in the same commit — deliberate friction against silent growth.
+// + the 8 stage-two creates (A7) + the 3 updates (A8). A new tool is added
+// HERE and in its builder in the same commit — deliberate friction against
+// silent growth.
 const EXPECTED_TOOLS = [
   "list_vehicles",
   "get_vehicle",
   "create_vehicle",
+  "update_vehicle",
   "list_drivers",
   "get_driver",
   "create_driver",
+  "update_driver",
   "list_customers",
   "get_customer",
   "create_customer",
@@ -55,6 +58,7 @@ const EXPECTED_TOOLS = [
   "list_trips",
   "get_trip",
   "create_trip",
+  "update_trip",
   "list_fuel_logs",
   "get_fuel_log",
   "create_fuel_log",
@@ -155,18 +159,20 @@ describe("AgentToolRegistry (ADR-0043 A4)", () => {
     // gate, not a tool capability).
     expect(adminTools.sort()).toEqual([...EXPECTED_TOOLS].sort());
     expect(officeTools.sort()).toEqual([...EXPECTED_TOOLS].sort());
-    // DRIVER holds exactly trips:* + fuel-logs:* — six tools now, and
-    // emphatically not fleet_snapshot (its multi-token AND requires the
-    // whole floor). create_trip IS listed (the capability filter is coarse
-    // by design, ADR-0028) even though TripsService.create rejects DRIVER
-    // actors at the service layer — the loop records that as `denied`; moot
-    // while agent:use is ADMIN-only. create_fuel_log genuinely works for a
-    // DRIVER (own-trip pairing enforced in the service).
+    // DRIVER holds exactly trips:* + fuel-logs:* — seven tools now (list/get/
+    // create/update trips + list/get/create fuel-logs), and emphatically not
+    // fleet_snapshot (its multi-token AND requires the whole floor).
+    // create_trip / update_trip ARE listed (the capability filter is coarse
+    // by design, ADR-0028) even though TripsService rejects DRIVER creates at
+    // the service layer — the loop records that as `denied`; moot while
+    // agent:use is ADMIN-only. create_fuel_log genuinely works for a DRIVER
+    // (own-trip pairing enforced in the service).
     expect(driverTools.sort()).toEqual(
       [
         "list_trips",
         "get_trip",
         "create_trip",
+        "update_trip",
         "list_fuel_logs",
         "get_fuel_log",
         "create_fuel_log",

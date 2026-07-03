@@ -1,4 +1,4 @@
-import { NotFoundException } from "@nestjs/common";
+import { BadRequestException, NotFoundException } from "@nestjs/common";
 import { TripStatus } from "@prisma/client";
 import { z } from "zod";
 
@@ -6,6 +6,7 @@ import { type TripsService } from "../../trips/trips.service";
 import {
   CreateTripSchema,
   ListTripsQuerySchema,
+  UpdateTripSchema,
   type TripSortColumn,
 } from "../../trips/trips.schemas";
 import { toQueryShape } from "./query-shape";
@@ -50,6 +51,28 @@ const CreateTripArgs = z
     vehicleId: z.string().min(1),
     driverId: z.string().min(1),
     status: z.enum(TripStatus),
+    startedAt: z.iso.datetime({ offset: true, local: true }).nullable().optional(),
+    endedAt: z.iso.datetime({ offset: true, local: true }).nullable().optional(),
+    startOdometerKm: z.number().int().min(0).max(9_999_999).nullable().optional(),
+    endOdometerKm: z.number().int().min(0).max(9_999_999).nullable().optional(),
+    startEngineHours: z.number().int().min(0).max(10_000_000).nullable().optional(),
+    endEngineHours: z.number().int().min(0).max(10_000_000).nullable().optional(),
+    notes: z.string().max(1000).optional(),
+  })
+  .strict();
+
+// Mirrors UpdateTripSchema field-for-field plus the wrapper-only `id`:
+// vehicleId/driverId are MUTABLE (reassignment) but never null; timestamps
+// and meter readings are clearable via explicit null; notes is NOT nullable
+// (the module contract — clear it by sending ""). UpdateTripSchema has no
+// empty-patch refine (the service merges then re-validates), so the tool's
+// execute guards id-only calls itself.
+const UpdateTripArgs = z
+  .object({
+    id: z.string().trim().min(1),
+    vehicleId: z.string().min(1).optional(),
+    driverId: z.string().min(1).optional(),
+    status: z.enum(TripStatus).optional(),
     startedAt: z.iso.datetime({ offset: true, local: true }).nullable().optional(),
     endedAt: z.iso.datetime({ offset: true, local: true }).nullable().optional(),
     startOdometerKm: z.number().int().min(0).max(9_999_999).nullable().optional(),
@@ -112,6 +135,38 @@ export function buildTripsTools(trips: TripsService): ToolDefinition[] {
       async execute(args, actor) {
         const input = CreateTripSchema.parse(CreateTripArgs.parse(args));
         return trips.create(input, actor.userId, actor);
+      },
+    },
+    {
+      name: "update_trip",
+      description:
+        "Update fields on an existing trip (partial update — send only what " +
+        "changes; the prior row is captured for undo). Status transitions are " +
+        "enforced: PLANNED → IN_PROGRESS → COMPLETED, CANCELLED from any " +
+        "non-terminal state; COMPLETED and CANCELLED are final. Completing a " +
+        "trip updates the vehicle's meter automatically. vehicleId/driverId " +
+        "REASSIGN the trip — omit them unless reassignment is intended. " +
+        "Explicit null clears timing/meter readings; clear notes by sending an " +
+        "empty string. The write happens immediately and exactly once.",
+      capabilities: ["trips:*"],
+      riskTier: "reversible-write",
+      resultEntityType: "Trip",
+      argsSchema: UpdateTripArgs,
+      async capturePreImage(args) {
+        // The RAW row (no nested relations) — the faithful undo source.
+        const { id } = UpdateTripArgs.parse(args);
+        return trips.findByIdRaw(id);
+      },
+      async execute(args, actor) {
+        const { id, ...patch } = UpdateTripArgs.parse(args);
+        // UpdateTripSchema carries no empty-body refine (the service
+        // re-validates the MERGED shape instead), so guard id-only calls
+        // here — a no-op "update" must not mint a succeeded audit row.
+        if (Object.keys(patch).length === 0) {
+          throw new BadRequestException("At least one field besides id is required.");
+        }
+        const input = UpdateTripSchema.parse(patch);
+        return trips.update(id, input, actor);
       },
     },
   ];

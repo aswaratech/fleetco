@@ -75,3 +75,55 @@ export const ListAgentConversationsQuerySchema = z
   .strict();
 
 export type ListAgentConversationsQuery = z.infer<typeof ListAgentConversationsQuerySchema>;
+
+// Bounded string filter (trim + 64-char cap; empty → undefined) — the
+// notification-logs.schemas.ts helper, copied file-locally per the house
+// duplication budget. toolName/status are OPEN STRINGS on the model (the
+// NotificationLog forward-compat rule): an unknown value returns zero rows,
+// never a 400, so a future tool name or status needs no schema edit here.
+function stringFilter(fieldLabel: string) {
+  return z
+    .string()
+    .optional()
+    .transform((raw, ctx): string | undefined => {
+      if (raw === undefined) return undefined;
+      const trimmed = raw.trim();
+      if (trimmed.length === 0) return undefined;
+      if (trimmed.length > 64) {
+        ctx.addIssue({ code: "custom", message: `${fieldLabel} is too long.` });
+        return z.NEVER;
+      }
+      return trimmed;
+    });
+}
+
+// Coerced optional date — the fuel-logs/notification-logs DateFilter shape.
+const DateFilter = z.coerce
+  .date({ error: () => "Must be a valid date (YYYY-MM-DD or ISO 8601)." })
+  .optional();
+
+const ACTION_SORTABLE_COLUMNS = ["createdAt"] as const;
+const SORT_DIRECTIONS = ["asc", "desc"] as const;
+
+/**
+ * GET /api/v1/agent/actions query parameters (ticket A8 — the activity
+ * ledger, DESIGN.md §"Agent activity"). Filters: toolName (exact match),
+ * status (succeeded/failed/denied as open strings), and a createdAt date
+ * range with the endDate inclusive through end-of-day (the house rule).
+ */
+export const ListAgentActionsQuerySchema = z
+  .object({
+    toolName: stringFilter("toolName"),
+    status: stringFilter("status"),
+    startDate: DateFilter,
+    endDate: DateFilter,
+    sortBy: z.enum(ACTION_SORTABLE_COLUMNS).optional(),
+    sortDir: z.enum(SORT_DIRECTIONS).optional(),
+    skip: intParam(0, Number.MAX_SAFE_INTEGER, "skip"),
+    take: intParam(1, QUERY_MAX_TAKE, "take"),
+  })
+  .strict();
+
+export type ListAgentActionsQuery = z.infer<typeof ListAgentActionsQuerySchema>;
+export type AgentActionSortColumn = (typeof ACTION_SORTABLE_COLUMNS)[number];
+export type AgentActionSortDir = (typeof SORT_DIRECTIONS)[number];

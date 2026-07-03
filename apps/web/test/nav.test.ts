@@ -42,6 +42,7 @@ const QUICK_LINKS_TODAY: readonly { href: string; label: string }[] = [
   { href: "/reports/per-vehicle-efficiency", label: "Fuel efficiency" },
   { href: "/notification-logs", label: "Reminder history" },
   { href: "/chat", label: "Agent" },
+  { href: "/agent/activity", label: "Agent activity" },
 ];
 
 const key = (i: { href: string; label: string }): string => `${i.href}\t${i.label}`;
@@ -79,7 +80,7 @@ describe("NAV structure", () => {
 });
 
 describe("navForRole", () => {
-  test("ADMIN sees all five groups and all eighteen items", () => {
+  test("ADMIN sees all five groups and all nineteen items", () => {
     const groups = navForRole("ADMIN");
     expect(groups.map((g) => g.id)).toEqual([
       "operations",
@@ -88,18 +89,21 @@ describe("navForRole", () => {
       "reports",
       "logs",
     ]);
-    expect(groups.flatMap((g) => g.items)).toHaveLength(18);
+    expect(groups.flatMap((g) => g.items)).toHaveLength(19);
   });
 
-  test("OFFICE_STAFF sees seventeen items — everything but the ADMIN-only Agent", () => {
-    // The first role divergence on the web (ADR-0043 c1: agent:use is
-    // ADMIN-only in v1). The API is the security boundary; this pins the UI
-    // affordance matching it.
+  test("OFFICE_STAFF sees seventeen items — everything but the two ADMIN-only agent surfaces", () => {
+    // The role divergence on the web (ADR-0043 c1/c5: agent:use is
+    // ADMIN-only in v1, and the activity ledger rides the same gate). The
+    // API is the security boundary; this pins the UI affordance matching it.
     const groups = navForRole("OFFICE_STAFF");
     const items = groups.flatMap((g) => g.items);
     expect(items).toHaveLength(17);
     expect(items.map((i) => i.href)).not.toContain("/chat");
-    expect(navForRole("ADMIN").flatMap((g) => g.items.map((i) => i.href))).toContain("/chat");
+    expect(items.map((i) => i.href)).not.toContain("/agent/activity");
+    const adminHrefs = navForRole("ADMIN").flatMap((g) => g.items.map((i) => i.href));
+    expect(adminHrefs).toContain("/chat");
+    expect(adminHrefs).toContain("/agent/activity");
   });
 
   test("DRIVER sees nothing on the web; empty groups are dropped", () => {
@@ -116,10 +120,10 @@ describe("navForRole", () => {
 });
 
 describe("navItemsForRole", () => {
-  test("prepends HOME for the web roles (ADMIN: 19 = HOME + 18)", () => {
+  test("prepends HOME for the web roles (ADMIN: 20 = HOME + 19)", () => {
     const items = navItemsForRole("ADMIN");
     expect(items[0]).toBe(HOME);
-    expect(items).toHaveLength(19);
+    expect(items).toHaveLength(20);
     expect(navItemsForRole("OFFICE_STAFF")).toHaveLength(18);
   });
 

@@ -222,4 +222,45 @@ describe("agent tool validation (ADR-0043 A4)", () => {
       ),
     ).rejects.toBeInstanceOf(BadRequestException);
   });
+
+  // --- stage two: the update wrappers (A8) ---------------------------------
+
+  test("update wrappers reject an unknown key (.strict())", async () => {
+    const error = await registry
+      .execute("update_vehicle", { id: "cveh1", bogus: true }, ADMIN)
+      .catch((thrown: unknown) => thrown);
+    expect(error).toBeInstanceOf(BadRequestException);
+    expect((error as BadRequestException).message).toContain("bogus");
+  });
+
+  test("empty patch (id only) → 400 for all three update tools", async () => {
+    // vehicle/driver via the module schema's empty-body refine; trip via the
+    // tool's in-execute guard (UpdateTripSchema has no refine). All three
+    // must reject an id-only "update" rather than mint a no-op success.
+    for (const tool of ["update_vehicle", "update_driver", "update_trip"]) {
+      await expect(registry.execute(tool, { id: "cid1" }, ADMIN)).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+    }
+  });
+
+  test("nullability mirrors the module: a nullable field accepts null, a non-nullable one rejects it", async () => {
+    // engineHoursStart is nullable-optional on UpdateVehicleSchema → null is
+    // accepted at the wrapper and the update runs; meterType is
+    // optional-NOT-nullable → null must be rejected at the wrapper (400).
+    const adminId = await seedUser(prisma);
+    const vehicle = await seedVehicle(prisma, adminId);
+    await expect(
+      registry.execute("update_vehicle", { id: vehicle.id, engineHoursStart: null }, ADMIN),
+    ).resolves.toBeDefined();
+    await expect(
+      registry.execute("update_vehicle", { id: vehicle.id, meterType: null }, ADMIN),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  test("update_trip's `notes` is NOT nullable (module contract — clear with an empty string)", async () => {
+    await expect(
+      registry.execute("update_trip", { id: "ctrip1", notes: null }, ADMIN),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
 });

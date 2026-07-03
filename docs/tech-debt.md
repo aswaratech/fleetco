@@ -136,6 +136,14 @@ This section lists active debt entries.
 - **Estimate to discharge:** ~half a day for a bounded in-process buffer in the adapter (flush at N positions or T seconds, whichever first) + tests; the alternative (windowed polling of Traccar's REST API) folds into the reconciliation entry above.
 - **Revisit when:** any of: (a) fleet grows toward ~50 devices (ADR-0042's own "Revisit when" threshold); (b) ingest-request volume becomes visible in API latency or Redis queue metrics; (c) the reconciliation/backfill job (above) is built — the two share the Traccar-API-side plumbing.
 
+### Agent chat is synchronous request/response; SSE token streaming is the named follow-up
+
+- **What is owed:** A streaming transport for `/chat` turns so the assistant's tokens render as they arrive, instead of the whole turn blocking behind a pending composer for 10–60 s. Today a turn is one synchronous server-action round-trip (`apps/web/src/app/(app)/chat/actions.ts` → the API's 90 s-bounded turn loop, under the web action's ~150 s budget); the composer disables and shows a "this can take up to a minute" line until the response lands. The follow-up is an SSE endpoint (or a streamed server action) that emits assistant tokens and server-derived action cards incrementally, with the client rendering as they come.
+- **Where surfaced:** ADR-0043 commitment 7 ("v1 is non-streamed request/response … token streaming is a named tech-debt follow-up") and `docs/design/DESIGN.md` §"Agent chat" §Composer — both reference THIS entry, which did not exist until A8 wrote it.
+- **Why accepted now:** The repo has zero SSE infrastructure, and a realtime channel is a new cross-cutting transport pattern that deserves its own design (ADR-shaped: reconnection, the interplay with the per-conversation in-flight lock and the turn-budget abort, how partial action cards reconcile against the final `AgentAction` rows). For a single user, a pending state with an honest wait line is cheap and correct; streaming is a polish item, not a correctness one.
+- **Estimate to discharge:** ~1–2 days — a streaming endpoint or streamed server action on the API side, incremental client rendering on the web side, and re-testing the budget/lock/abort interplay under a long-lived connection.
+- **Revisit when:** any of: (a) the deploy lands and daily use begins and turns feel slow in practice (ADR-0043's own "Revisit when"); (b) a monthly cost/latency review triggers it; (c) a second streaming consumer appears in the app, making the shared SSE infrastructure worth building once.
+
 ## Paid-off debt
 
 This section is an archive of debts that have been discharged. When an active entry is resolved, it moves here with a note about the PR that resolved it and the date. The archive exists so that future readers can see what kinds of debt the project tends to accumulate and what kinds of fixes tend to discharge them, which is itself a piece of organizational learning.

@@ -69,6 +69,10 @@ export async function seedAgentAction(
       previousJson: overrides.previousJson ?? undefined,
       status: overrides.status ?? "succeeded",
       latencyMs: overrides.latencyMs ?? 42,
+      // Overridable so the A8 activity-ledger date-range tests can seed rows
+      // on both sides of a cutoff deterministically (Prisma honors an
+      // explicit @default value on create, like the conversation helper).
+      ...(overrides.createdAt ? { createdAt: overrides.createdAt } : {}),
     },
   });
 }
