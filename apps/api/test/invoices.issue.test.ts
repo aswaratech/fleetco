@@ -14,8 +14,8 @@ import { InvoiceSettingsService } from "../src/modules/invoices/invoice-settings
 import { computeInvoiceTax } from "../src/modules/invoices/invoice-tax";
 import { InvoicesController } from "../src/modules/invoices/invoices.controller";
 import { InvoicesService } from "../src/modules/invoices/invoices.service";
-import { MockObjectStorage } from "../src/modules/invoices/mock.object-storage";
-import { ObjectStorage } from "../src/modules/invoices/object-storage";
+import { MockObjectStorage } from "../src/modules/storage/mock.object-storage";
+import { ObjectStorage } from "../src/modules/storage/object-storage";
 import { PdfkitInvoiceRenderer } from "../src/modules/invoices/pdfkit.invoice-pdf-renderer";
 import { JobsService } from "../src/modules/jobs/jobs.service";
 import { PrismaService } from "../src/modules/prisma/prisma.service";

@@ -24,7 +24,7 @@ import {
   ObjectStorage,
   ObjectStorageObjectNotFoundError,
   type PutObjectInput,
-} from "../src/modules/invoices/object-storage";
+} from "../src/modules/storage/object-storage";
 import { JobsService } from "../src/modules/jobs/jobs.service";
 import { PrismaService } from "../src/modules/prisma/prisma.service";
 import { TripsService } from "../src/modules/trips/trips.service";

@@ -1,4 +1,9 @@
-import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import {
+  DeleteObjectCommand,
+  GetObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
 
 import { env } from "../../config/env";
 import {
@@ -122,6 +127,13 @@ export class R2ObjectStorage extends ObjectStorage {
     // invoice PDF is tens of KB) and hand back a Buffer the controller streams.
     const bytes = await result.Body.transformToByteArray();
     return Buffer.from(bytes);
+  }
+
+  async delete(key: string): Promise<void> {
+    const { client, bucket } = this.requireConfigured();
+    // S3/R2 DeleteObject succeeds (204) whether or not the key exists — the
+    // port's idempotent-delete contract needs no absent-key special case.
+    await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
   }
 
   private requireConfigured(): { client: Pick<S3Client, "send">; bucket: string } {

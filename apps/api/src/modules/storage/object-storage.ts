@@ -8,10 +8,12 @@
 // (`r2.object-storage.ts`), the wrap-the-vendor discipline of `mailer.ts`,
 // `common/wkt.ts`, and `@fleetco/shared` `nepali-date.ts`.
 //
-// GENERIC ON PURPOSE: this is a key→bytes store, not invoice-specific. It lands
-// in the invoices module as its first user, but is written so ADR-0039's "Revisit
-// when" (promote the first-use R2 wiring into a shared storage module as more R2
-// features land — Bluebook scans, receipt images) is a MOVE, not a rewrite.
+// GENERIC ON PURPOSE: this is a key→bytes store, not invoice-specific. It landed
+// in the invoices module as its first user, written so ADR-0039's "Revisit when"
+// (promote the first-use R2 wiring into a shared storage module as more R2
+// features land — Bluebook scans, receipt images) would be a MOVE, not a rewrite.
+// THAT MOVE HAPPENED (ADR-0044 V2, 2026-07-05): it now lives in modules/storage,
+// wired by StorageModule, with agent chat attachments as the second consumer.
 //
 // WHY AN ABSTRACT CLASS, NOT A BARE `interface` (the Mailer rationale): NestJS
 // resolves providers by a runtime token and a TS `interface` has no runtime
@@ -32,9 +34,10 @@ export interface PutObjectInput {
 }
 
 /**
- * The object-storage port. Three methods. The invoice issue + download paths
- * depend on this — not on R2 / the S3 SDK. See the file header for why this is an
- * abstract class (a runtime DI token), not a bare `interface`.
+ * The object-storage port. Four methods. The invoice issue + download paths and
+ * the agent attachment pipeline depend on this — not on R2 / the S3 SDK. See the
+ * file header for why this is an abstract class (a runtime DI token), not a bare
+ * `interface`.
  */
 export abstract class ObjectStorage {
   /**
@@ -63,6 +66,15 @@ export abstract class ObjectStorage {
    * {@link ObjectStorageNotConfiguredError} when no store is configured.
    */
   abstract get(key: string): Promise<Buffer>;
+
+  /**
+   * Delete an object by key. Deleting an ABSENT key is a no-op (S3/R2
+   * semantics): callers use this for cleanup — the ADR-0044 attachment prune
+   * removes bytes best-effort before the row cascade — so idempotency beats
+   * strictness here. Throws {@link ObjectStorageNotConfiguredError} when no
+   * store is configured.
+   */
+  abstract delete(key: string): Promise<void>;
 }
 
 /**
