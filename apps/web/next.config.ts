@@ -22,6 +22,15 @@ const nextConfig: NextConfig = {
   // hoisted node_modules. Without this, the standalone bundle misses workspace
   // deps. `__dirname` is apps/web; two levels up is the repo root.
   outputFileTracingRoot: path.join(__dirname, "../.."),
+  experimental: {
+    serverActions: {
+      // The chat photo upload rides a server action as FormData (ADR-0044
+      // V5); Next's default 1 MB body cap would reject it. 12 MB = the API's
+      // 10 MB attachment ceiling plus multipart overhead — the API remains
+      // the real enforcement point.
+      bodySizeLimit: "12mb",
+    },
+  },
 };
 
 export default nextConfig;

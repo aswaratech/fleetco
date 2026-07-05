@@ -3,7 +3,7 @@
 import { apiFetch, ApiError } from "@/lib/api";
 import { AGENT_MESSAGE_MAX_LENGTH } from "@/lib/agent-chat";
 
-import type { AgentConversation, AgentTurnResult } from "./types";
+import type { AgentAttachment, AgentConversation, AgentTurnResult } from "./types";
 
 // Server actions for the /chat surface (ADR-0043 A6). Both call the A5 agent
 // endpoints via apiFetch from the server context (cookies forward
@@ -34,6 +34,8 @@ export type CreateConversationResult =
 
 export type PostTurnResult = { ok: true; turn: AgentTurnResult } | AgentActionFailure;
 
+export type UploadAttachmentResult = { ok: true; attachment: AgentAttachment } | AgentActionFailure;
+
 function failureOf(error: unknown): AgentActionFailure {
   if (error instanceof ApiError) {
     return { ok: false, message: error.message, status: error.status };
@@ -56,10 +58,13 @@ export async function createConversationAction(): Promise<CreateConversationResu
 export async function postTurnAction(
   conversationId: string,
   content: string,
+  attachmentId?: string,
 ): Promise<PostTurnResult> {
   const trimmed = content.trim();
-  if (trimmed.length === 0) {
-    return { ok: false, message: "content is required.", status: 400 };
+  // A photo may travel captionless (ADR-0044 c7) — the content-or-attachment
+  // rule the API's schema also enforces.
+  if (trimmed.length === 0 && attachmentId === undefined) {
+    return { ok: false, message: "content or attachmentId is required.", status: 400 };
   }
   if (trimmed.length > AGENT_MESSAGE_MAX_LENGTH) {
     return {
@@ -71,9 +76,37 @@ export async function postTurnAction(
   try {
     const turn = await apiFetch<AgentTurnResult>(
       `/api/v1/agent/conversations/${encodeURIComponent(conversationId)}/turns`,
-      { method: "POST", json: { content: trimmed } },
+      {
+        method: "POST",
+        json: {
+          ...(trimmed.length > 0 ? { content: trimmed } : {}),
+          ...(attachmentId !== undefined ? { attachmentId } : {}),
+        },
+      },
     );
     return { ok: true, turn };
+  } catch (error) {
+    return failureOf(error);
+  }
+}
+
+/**
+ * Upload one photo against a conversation (ADR-0044 V5). The FormData passes
+ * through apiFetch as-is — the multipart boundary survives because apiFetch
+ * only sets content-type for its `json` sugar. Server-side, like every write
+ * (the browser never talks to the API directly); the 12 MB server-action
+ * body limit in next.config.ts covers the 10 MB photo ceiling plus overhead.
+ */
+export async function uploadAttachmentAction(
+  conversationId: string,
+  formData: FormData,
+): Promise<UploadAttachmentResult> {
+  try {
+    const attachment = await apiFetch<AgentAttachment>(
+      `/api/v1/agent/conversations/${encodeURIComponent(conversationId)}/attachments`,
+      { method: "POST", body: formData },
+    );
+    return { ok: true, attachment };
   } catch (error) {
     return failureOf(error);
   }

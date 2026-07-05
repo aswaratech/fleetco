@@ -40,10 +40,24 @@ export interface AgentAction {
   createdAt: string;
 }
 
+/** An uploaded chat attachment (ADR-0044 V4/V5). Bytes are fetched only
+ * through the authed proxy route — never a public URL (Tier 2). */
+export interface AgentAttachment {
+  id: string;
+  conversationId: string;
+  /** Null while pending in the composer; set when a turn claims it. */
+  messageId: string | null;
+  contentType: string;
+  sizeBytes: number;
+  createdAt: string;
+}
+
 export interface AgentTurnResult {
   conversation: AgentConversation;
   /** Messages persisted by THIS turn (user, assistant rounds, notices). */
   messages: AgentMessage[];
+  /** The attachment claimed by this turn's user message, when one was sent. */
+  attachments: AgentAttachment[];
   /** Action rows written by THIS turn — the action cards' server source. */
   actions: AgentAction[];
 }
@@ -51,6 +65,8 @@ export interface AgentTurnResult {
 export interface AgentTranscript {
   conversation: AgentConversation;
   messages: AgentMessage[];
+  /** All the conversation's attachments; joined to messages by messageId. */
+  attachments: AgentAttachment[];
   actions: AgentAction[];
 }
 
