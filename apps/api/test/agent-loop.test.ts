@@ -129,6 +129,13 @@ describe("buildAgentSystemPrompt (c4e)", () => {
     expect(prompt).toContain("integer paisa");
     expect(prompt).toContain("2026-07-02");
   });
+
+  test("carries the ask-when-missing rule for write fields (ADR-0044 P1)", () => {
+    const prompt = buildAgentSystemPrompt(new Date("2026-07-05T10:00:00Z"));
+    expect(prompt).toContain("Never invent a value the user did not give you");
+    expect(prompt).toContain("one consolidated question");
+    expect(prompt).toContain("Optional fields the user did not mention are simply omitted");
+  });
 });
 
 // --- the loop over real registry + DB ---------------------------------------
