@@ -167,6 +167,23 @@ const envSchema = z.object({
   // deepseek-chat / deepseek-reasoner names deprecate 2026-07-24 per the
   // provider's published schedule (verified 2026-07-02 in ADR-0043).
   DEEPSEEK_MODEL: z.string().default("deepseek-v4-flash"),
+
+  // The SELF-HOSTED OCR sidecar's OpenAI-compatible base URL (ADR-0044 Box B:
+  // document images are processed on FleetCo infrastructure and never egress
+  // as pixels) — e.g. http://localhost:12434/engines/llama.cpp/v1 under
+  // Docker Model Runner locally, or the production sidecar's URL on the box.
+  // Tier-4 config (an internal URL, no secret material — the sidecar lives on
+  // the private network). OPTIONAL, and the feature's kill switch (the
+  // DEEPSEEK_API_KEY pattern): unset ⇒ the DI factory binds
+  // MockVisionExtractor (configured=false) ⇒ attachment turns degrade to an
+  // honest "extraction is not configured" notice; nothing is extracted.
+  AGENT_OCR_URL: z.preprocess(emptyStringAsUndefined, z.string().optional()),
+
+  // The OCR model id requested from the sidecar. Tier-4 config, defaulted to
+  // the community GGUF quantization the V0 eval pinned (digest recorded in
+  // ADR-0044 Box B; self-quantizing from the official weights is the recorded
+  // production preference — swapping is an env edit, not a deploy).
+  AGENT_OCR_MODEL: z.string().default("huggingface.co/sahilchachra/unlimited-ocr-gguf:Q4_K_M"),
 });
 
 export type Env = z.infer<typeof envSchema>;
