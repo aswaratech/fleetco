@@ -1,6 +1,6 @@
 # ADR-0044: Agent conversational data entry — registry completion and image intake
 
-- **Status:** Proposed (decisions taken interactively by the PO in the 2026-07-05 session; the PO merging this PR is the durable ratification. **Both decision boxes below — §Decision boxes — were resolved by the PO on 2026-07-05: A = identity documents INCLUDED under local-only processing; B = self-hosted OCR, candidate `baidu/Unlimited-OCR`.**)
+- **Status:** Accepted (ratified by the PO merging PR #208 on 2026-07-05, with both decision boxes resolved; flipped from Proposed in this follow-up docs commit, mirroring the ADR-0040/0041 acceptance pattern. **Both decision boxes below — §Decision boxes — were resolved by the PO on 2026-07-05: A = identity documents INCLUDED under local-only processing; B = self-hosted OCR, candidate `baidu/Unlimited-OCR`.**)
 - **Date:** 2026-07-05
 - **Decider:** Product owner (CEO)
 

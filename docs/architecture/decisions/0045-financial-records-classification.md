@@ -1,6 +1,6 @@
 # ADR-0045: Financial-records data classification — the owed ADR-0013 revisit
 
-- **Status:** Proposed (ratified by the PO merging this PR, alongside ADR-0044)
+- **Status:** Accepted (ratified by the PO merging PR #208 on 2026-07-05, alongside ADR-0044; flipped from Proposed in this follow-up docs commit)
 - **Date:** 2026-07-05
 - **Decider:** Product owner (CEO)
 
