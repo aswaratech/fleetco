@@ -2,14 +2,20 @@ import { JobStatus } from "@prisma/client";
 import { z } from "zod";
 
 import { type JobsService } from "../../jobs/jobs.service";
-import { CreateJobSchema, ListJobsQuerySchema, type JobSortColumn } from "../../jobs/jobs.schemas";
+import {
+  CreateJobSchema,
+  ListJobsQuerySchema,
+  UpdateJobSchema,
+  type JobSortColumn,
+} from "../../jobs/jobs.schemas";
 import { toQueryShape } from "./query-shape";
 import { GetByIdArgs, type ToolDefinition } from "./tool.types";
 
-// Jobs tools (ADR-0043 c3: A4 reads, A7 create). JobsService.getById throws
-// NotFoundException itself — propagated as-is. The jobNumber is generated
-// server-side (JOB-YYYY-NNNNN with a P2002 retry) — the create wrapper
-// structurally cannot supply one, and its description says so.
+// Jobs tools (ADR-0043 c3: A4 reads, A7 create; ADR-0044 P2 update).
+// JobsService.getById/update throw NotFoundException themselves — propagated
+// as-is. The jobNumber is generated server-side (JOB-YYYY-NNNNN with a P2002
+// retry) — the write wrappers structurally cannot supply or change one, and
+// their descriptions say so.
 
 const JOB_SORT = [
   "createdAt",
@@ -35,6 +41,24 @@ const CreateJobArgs = z
   .object({
     customerId: z.string().min(1),
     description: z.string().trim().min(1).max(2048),
+    status: z.enum(JobStatus).optional(),
+    scheduledStartDate: z.iso.date().nullable().optional(),
+    scheduledEndDate: z.iso.date().nullable().optional(),
+    actualStartDate: z.iso.date().nullable().optional(),
+    actualEndDate: z.iso.date().nullable().optional(),
+    notes: z.string().max(4096).nullable().optional(),
+  })
+  .strict();
+
+// Mirrors UpdateJobSchema field-for-field plus the wrapper-only `id` —
+// customerId and jobNumber are structurally absent (not patchable; the module
+// schema's .strict() rejects them too). The end-≥-start date-pair rules and
+// the empty-patch refine re-validate module-side at execute (the service also
+// re-checks the date pairs against the MERGED row).
+const UpdateJobArgs = z
+  .object({
+    id: z.string().trim().min(1),
+    description: z.string().trim().min(1).max(2048).optional(),
     status: z.enum(JobStatus).optional(),
     scheduledStartDate: z.iso.date().nullable().optional(),
     scheduledEndDate: z.iso.date().nullable().optional(),
@@ -89,6 +113,30 @@ export function buildJobsTools(jobs: JobsService): ToolDefinition[] {
       async execute(args, actor) {
         const input = CreateJobSchema.parse(CreateJobArgs.parse(args));
         return jobs.create(input, actor.userId);
+      },
+    },
+    {
+      name: "update_job",
+      description:
+        "Update fields on an existing job (partial update — send only what " +
+        "changes; the prior row is captured for undo). Explicit null CLEARS a " +
+        "date or the notes. Status is PLANNED/IN_PROGRESS/COMPLETED/CANCELLED. " +
+        "Each end date must be on or after its start (checked against the " +
+        "merged row). customerId and the job number cannot be changed. The " +
+        "write happens immediately and exactly once.",
+      capabilities: ["jobs:*"],
+      riskTier: "reversible-write",
+      resultEntityType: "Job",
+      argsSchema: UpdateJobArgs,
+      async capturePreImage(args) {
+        // The RAW row (no nested customer) — the faithful undo source.
+        const { id } = UpdateJobArgs.parse(args);
+        return jobs.findByIdRaw(id);
+      },
+      async execute(args) {
+        const { id, ...patch } = UpdateJobArgs.parse(args);
+        const input = UpdateJobSchema.parse(patch);
+        return jobs.update(id, input);
       },
     },
   ];

@@ -224,6 +224,16 @@ export class ExpenseLogsService {
   }
 
   /**
+   * Plain ExpenseLog lookup without the eager Vehicle/Trip relations — the
+   * raw-row getter the agent's update_expense_log pre-image capture needs
+   * (ADR-0044 P2: AgentAction.previousJson stores the row itself, not a
+   * render shape). Mirror of JobsService.findByIdRaw.
+   */
+  async findByIdRaw(id: string) {
+    return this.prisma.expenseLog.findUnique({ where: { id } });
+  }
+
+  /**
    * Fetch one expense log by id with the relations eager-loaded, or
    * throw NotFoundException. Convenience wrapper used by the
    * controller's GET /:id handler so the 404 shape lives in the

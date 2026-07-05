@@ -1,3 +1,4 @@
+import { NotFoundException } from "@nestjs/common";
 import { ServiceScheduleStatus } from "@prisma/client";
 import { z } from "zod";
 
@@ -6,6 +7,7 @@ import { type ServiceSchedulesService } from "../../maintenance/service-schedule
 import {
   CreateServiceRecordSchema,
   ListServiceRecordsQuerySchema,
+  UpdateServiceRecordSchema,
   type ServiceRecordSortColumn,
 } from "../../maintenance/service-records.schemas";
 import {
@@ -15,12 +17,12 @@ import {
 import { toQueryShape } from "./query-shape";
 import { GetByIdArgs, type ToolDefinition } from "./tool.types";
 
-// Maintenance tools (ADR-0043 c3: A4 reads, A7 create): the two aggregates
-// the MaintenanceModule exports. Interval semantics ride the descriptions so
-// the model reasons in the right units (ADR-0037's integer-minor-units rule).
-// The A7 create covers SERVICE RECORDS only (recording work performed —
-// operational data entry); creating/retuning SCHEDULES is configuration and
-// stays out of the registry for now.
+// Maintenance tools (ADR-0043 c3: A4 reads, A7 create; ADR-0044 P2 update):
+// the two aggregates the MaintenanceModule exports. Interval semantics ride
+// the descriptions so the model reasons in the right units (ADR-0037's
+// integer-minor-units rule). The write tools cover SERVICE RECORDS only
+// (recording/correcting work performed — operational data entry);
+// creating/retuning SCHEDULES is configuration and stays out of the registry.
 
 const SCHEDULE_SORT = ["name", "createdAt"] as const satisfies readonly ServiceScheduleSortColumn[];
 
@@ -59,6 +61,24 @@ const CreateServiceRecordArgs = z
     serviceScheduleId: z.string().trim().min(1).nullable().optional(),
     expenseLogId: z.string().trim().min(1).nullable().optional(),
     performedAt: z.iso.date(),
+    odometerKm: z.number().int().min(0).max(100_000_000).nullable().optional(),
+    engineHours: z.number().int().min(0).max(100_000_000).nullable().optional(),
+    notes: z.string().max(4096).nullable().optional(),
+  })
+  .strict();
+
+// Mirrors UpdateServiceRecordSchema field-for-field plus the wrapper-only
+// `id` — vehicleId is structurally absent (immutable; the module schema's
+// .strict() rejects it too). Explicit null CLEARS a link or reading. The
+// module schema's empty-patch refine re-validates at execute. NOTE: a PATCH
+// does NOT advance a linked schedule's last-service anchor (anchor advance is
+// a create-only event; editing is manual correction).
+const UpdateServiceRecordArgs = z
+  .object({
+    id: z.string().trim().min(1),
+    serviceScheduleId: z.string().trim().min(1).nullable().optional(),
+    expenseLogId: z.string().trim().min(1).nullable().optional(),
+    performedAt: z.iso.date().optional(),
     odometerKm: z.number().int().min(0).max(100_000_000).nullable().optional(),
     engineHours: z.number().int().min(0).max(100_000_000).nullable().optional(),
     notes: z.string().max(4096).nullable().optional(),
@@ -148,6 +168,34 @@ export function buildMaintenanceTools(
       async execute(args, actor) {
         const input = CreateServiceRecordSchema.parse(CreateServiceRecordArgs.parse(args));
         return serviceRecords.create(input, actor.userId);
+      },
+    },
+    {
+      name: "update_service_record",
+      description:
+        "Update fields on an existing service record (partial update — send only " +
+        "what changes; the prior row is captured for undo). vehicleId cannot be " +
+        "changed. Explicit null CLEARS serviceScheduleId, expenseLogId, " +
+        "odometerKm, engineHours, or notes; a non-null link must belong to the " +
+        "record's vehicle (the expense additionally MAINTENANCE/REPAIR). " +
+        "Editing does NOT advance a schedule's last-service anchor. The write " +
+        "happens immediately and exactly once.",
+      capabilities: ["maintenance:*"],
+      riskTier: "reversible-write",
+      resultEntityType: "ServiceRecord",
+      argsSchema: UpdateServiceRecordArgs,
+      async capturePreImage(args) {
+        const { id } = UpdateServiceRecordArgs.parse(args);
+        return serviceRecords.findById(id);
+      },
+      async execute(args) {
+        const { id, ...patch } = UpdateServiceRecordArgs.parse(args);
+        const input = UpdateServiceRecordSchema.parse(patch);
+        const updated = await serviceRecords.update(id, input);
+        if (updated === null) {
+          throw new NotFoundException(`Service record ${id} not found.`);
+        }
+        return updated;
       },
     },
   ];

@@ -1,4 +1,4 @@
-import { BadRequestException } from "@nestjs/common";
+import { BadRequestException, NotFoundException } from "@nestjs/common";
 import { Test } from "@nestjs/testing";
 import { UserRole, VehicleStatus } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
@@ -233,15 +233,37 @@ describe("agent tool validation (ADR-0043 A4)", () => {
     expect((error as BadRequestException).message).toContain("bogus");
   });
 
-  test("empty patch (id only) → 400 for all three update tools", async () => {
-    // vehicle/driver via the module schema's empty-body refine; trip via the
-    // tool's in-execute guard (UpdateTripSchema has no refine). All three
-    // must reject an id-only "update" rather than mint a no-op success.
-    for (const tool of ["update_vehicle", "update_driver", "update_trip"]) {
+  test("empty patch (id only) → 400 for all eight update tools", async () => {
+    // vehicle/driver/customer/job/fuel/expense/service-record via each module
+    // schema's empty-body refine; trip via the tool's in-execute guard
+    // (UpdateTripSchema has no refine). All eight must reject an id-only
+    // "update" rather than mint a no-op success.
+    for (const tool of [
+      "update_vehicle",
+      "update_driver",
+      "update_trip",
+      "update_customer",
+      "update_job",
+      "update_fuel_log",
+      "update_expense_log",
+      "update_service_record",
+    ]) {
       await expect(registry.execute(tool, { id: "cid1" }, ADMIN)).rejects.toBeInstanceOf(
         BadRequestException,
       );
     }
+  });
+
+  test("update_customer nullability mirrors the module: email accepts null; name rejects it (P2)", async () => {
+    // email:null passes the wrapper — validation precedes the DB lookup, so a
+    // fabricated id surfaces NotFound, proof the null was accepted; name is
+    // optional-NOT-nullable → 400 at the wrapper before anything runs.
+    await expect(
+      registry.execute("update_customer", { id: "c00000000000000000000000", email: null }, ADMIN),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    await expect(
+      registry.execute("update_customer", { id: "c00000000000000000000000", name: null }, ADMIN),
+    ).rejects.toBeInstanceOf(BadRequestException);
   });
 
   test("nullability mirrors the module: a nullable field accepts null, a non-nullable one rejects it", async () => {
