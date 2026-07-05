@@ -30,7 +30,7 @@ import { InvoiceSettingsService } from "./invoice-settings.service";
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports
 import { InvoicePdfRenderer, type InvoiceRenderModel } from "./invoice-pdf-renderer";
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports
-import { ObjectStorage } from "./object-storage";
+import { ObjectStorage } from "../storage/object-storage";
 import type {
   BuildFromJobInput,
   CreateInvoiceInput,

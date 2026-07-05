@@ -1,12 +1,12 @@
 import type { S3Client } from "@aws-sdk/client-s3";
 import { describe, expect, test, vi } from "vitest";
 
-import { MockObjectStorage } from "../src/modules/invoices/mock.object-storage";
+import { MockObjectStorage } from "../src/modules/storage/mock.object-storage";
 import {
   ObjectStorageNotConfiguredError,
   ObjectStorageObjectNotFoundError,
-} from "../src/modules/invoices/object-storage";
-import { R2ObjectStorage } from "../src/modules/invoices/r2.object-storage";
+} from "../src/modules/storage/object-storage";
+import { R2ObjectStorage } from "../src/modules/storage/r2.object-storage";
 
 // The ObjectStorage seam tests (Program D / ADR-0039 c7, D5). PURE — no network,
 // no real R2. R2ObjectStorage is exercised with a no-network fake `send` (the
@@ -82,7 +82,20 @@ describe("R2ObjectStorage (fake S3 send, no network)", () => {
     );
   });
 
-  test("with no creds: isConfigured() is false and put/get throw NotConfigured", async () => {
+  test("delete() sends a DeleteObjectCommand with the bucket and key (ADR-0044 V2)", async () => {
+    const { sent, client } = makeFakeS3(new Uint8Array());
+    const storage = new R2ObjectStorage({ client, bucket: "invoices" });
+    await storage.delete("agent-attachments/conv1/a.jpg");
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.constructor.name).toBe("DeleteObjectCommand");
+    expect(sent[0]?.input).toMatchObject({
+      Bucket: "invoices",
+      Key: "agent-attachments/conv1/a.jpg",
+    });
+  });
+
+  test("with no creds: isConfigured() is false and put/get/delete throw NotConfigured", async () => {
     // Explicit undefined for each config value forces the no-creds path
     // regardless of ambient env (the ResendMailer "force no-key" pattern).
     const storage = new R2ObjectStorage({
@@ -96,6 +109,7 @@ describe("R2ObjectStorage (fake S3 send, no network)", () => {
       storage.put({ key: "k", body: Buffer.from("x"), contentType: "application/pdf" }),
     ).rejects.toBeInstanceOf(ObjectStorageNotConfiguredError);
     await expect(storage.get("k")).rejects.toBeInstanceOf(ObjectStorageNotConfiguredError);
+    await expect(storage.delete("k")).rejects.toBeInstanceOf(ObjectStorageNotConfiguredError);
   });
 });
 
@@ -129,5 +143,18 @@ describe("MockObjectStorage (in-memory dev/test/CI default + test double)", () =
     // The call was still recorded, but nothing was stored.
     expect(storage.puts).toHaveLength(1);
     await expect(storage.get("k")).rejects.toBeInstanceOf(ObjectStorageObjectNotFoundError);
+  });
+
+  test("delete() records the key, removes the object, and no-ops on absent keys (ADR-0044 V2)", async () => {
+    const storage = new MockObjectStorage();
+    const body = Buffer.from("bytes");
+    await storage.put({ key: "a", body, contentType: "image/jpeg" });
+
+    await storage.delete("a");
+    await expect(storage.get("a")).rejects.toBeInstanceOf(ObjectStorageObjectNotFoundError);
+
+    // Absent-key delete is an idempotent no-op per the port contract.
+    await expect(storage.delete("never-existed")).resolves.toBeUndefined();
+    expect(storage.deletes).toEqual(["a", "never-existed"]);
   });
 });

@@ -20,6 +20,8 @@ import {
 export class MockObjectStorage extends ObjectStorage {
   /** Every object passed to {@link put}, in call order. Assert against this. */
   readonly puts: PutObjectInput[] = [];
+  /** Every key passed to {@link delete}, in call order. Assert against this. */
+  readonly deletes: string[] = [];
   private readonly store = new Map<string, Buffer>();
 
   /**
@@ -53,5 +55,12 @@ export class MockObjectStorage extends ObjectStorage {
       return Promise.reject(new ObjectStorageObjectNotFoundError(key));
     }
     return Promise.resolve(bytes);
+  }
+
+  delete(key: string): Promise<void> {
+    this.deletes.push(key);
+    // Absent-key deletes are a no-op per the port contract (S3/R2 semantics).
+    this.store.delete(key);
+    return Promise.resolve();
   }
 }
