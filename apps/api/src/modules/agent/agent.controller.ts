@@ -194,7 +194,7 @@ export class AgentController {
     @Body(new ZodValidationPipe(PostAgentTurnSchema)) body: PostAgentTurnInput,
     @Req() request: AuthenticatedRequest,
   ): Promise<AgentTurnResult> {
-    return this.agent.runTurn(id, body.content, this.actorOf(request));
+    return this.agent.runTurn(id, body.content ?? "", this.actorOf(request), body.attachmentId);
   }
 
   /**

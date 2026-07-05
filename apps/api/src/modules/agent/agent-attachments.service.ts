@@ -156,4 +156,44 @@ export class AgentAttachmentsService {
     const buffer = await this.storage.get(attachment.r2Key);
     return { buffer, contentType: attachment.contentType };
   }
+
+  /**
+   * The claim-side validations (ADR-0044 c7), run by the turn loop BEFORE it
+   * persists the user message so an unusable attachment fails the turn fast:
+   * absent/foreign = 404 (existence-hiding); the wrong conversation or an
+   * already-sent attachment = 400 (the caller holds a real-but-unusable id).
+   */
+  async assertClaimable(
+    attachmentId: string,
+    conversationId: string,
+    actor: Actor,
+  ): Promise<AgentAttachment> {
+    const attachment = await this.prisma.agentAttachment.findUnique({
+      where: { id: attachmentId },
+    });
+    if (attachment === null || attachment.userId !== actor.userId) {
+      throw new NotFoundException(`Attachment ${attachmentId} not found.`);
+    }
+    if (attachment.conversationId !== conversationId) {
+      throw new BadRequestException("The attachment belongs to a different conversation.");
+    }
+    if (attachment.messageId !== null) {
+      throw new BadRequestException("The attachment was already sent with an earlier message.");
+    }
+    return attachment;
+  }
+
+  /** Claim the attachment onto the persisted user message (pending → sent). */
+  async claim(attachmentId: string, messageId: string): Promise<AgentAttachment> {
+    return this.prisma.agentAttachment.update({
+      where: { id: attachmentId },
+      data: { messageId },
+    });
+  }
+
+  /** The extraction input for a validated attachment (the turn loop's read). */
+  async readBytes(attachment: AgentAttachment): Promise<{ bytes: Buffer; contentType: string }> {
+    const bytes = await this.storage.get(attachment.r2Key);
+    return { bytes, contentType: attachment.contentType };
+  }
 }

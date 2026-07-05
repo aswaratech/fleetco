@@ -42,22 +42,30 @@ function intParam(min: number, max: number, fieldLabel: string) {
 }
 
 /**
- * POST /api/v1/agent/conversations/:id/turns — one user turn. The single
- * `content` field is the user's chat text (Tier 2 the moment it persists;
- * never logged — pino redacts `*.content`).
+ * POST /api/v1/agent/conversations/:id/turns — one user turn. `content` is
+ * the user's chat text (Tier 2 the moment it persists; never logged — pino
+ * redacts `*.content`); `attachmentId` (ADR-0044 c7) names one previously
+ * uploaded, still-unclaimed attachment to send with this message. At least
+ * one of the two is required — a photo may travel with no caption.
  */
 export const PostAgentTurnSchema = z
   .object({
     content: z
       .string()
       .trim()
-      .min(1, "content is required.")
       .max(
         AGENT_MESSAGE_MAX_LENGTH,
         `content must be ${AGENT_MESSAGE_MAX_LENGTH} characters or fewer.`,
-      ),
+      )
+      .optional(),
+    attachmentId: z.string().trim().min(1).optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (data) =>
+      (data.content !== undefined && data.content.length > 0) || data.attachmentId !== undefined,
+    { message: "content or attachmentId is required." },
+  );
 
 export type PostAgentTurnInput = z.infer<typeof PostAgentTurnSchema>;
 
