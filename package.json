@@ -38,7 +38,9 @@
       "sharp"
     ],
     "overrides": {
-      "multer": "^2.2.0"
+      "multer": "^2.2.0",
+      "protobufjs": "^7.6.3",
+      "postcss": "^8.5.15"
     }
   }
 }
