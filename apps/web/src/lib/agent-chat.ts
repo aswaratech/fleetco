@@ -89,13 +89,15 @@ export function linkifyAppPaths(text: string): LinkifiedSegment[] {
 
 /**
  * The Badge variant for an AgentAction status (DESIGN.md §"Agent chat"):
- * succeeded → success, failed → error, denied (and anything unexpected) →
- * neutral. Fail-closed to neutral: an unknown status must not render as
- * success.
+ * succeeded → success, failed → error, flagged (the ungrounded-claim guard's
+ * sentinel status, ungrounded-claim-guard.ts) → warning, denied (and
+ * anything unexpected) → neutral. Fail-closed to neutral: an unknown status
+ * must not render as success.
  */
-export function actionBadgeVariant(status: string): "success" | "error" | "neutral" {
+export function actionBadgeVariant(status: string): "success" | "error" | "warning" | "neutral" {
   if (status === "succeeded") return "success";
   if (status === "failed") return "error";
+  if (status === "flagged") return "warning";
   return "neutral";
 }
 

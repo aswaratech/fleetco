@@ -18,6 +18,10 @@ import {
 } from "../src/modules/agent/llm-client";
 import { MockLlmClient } from "../src/modules/agent/mock-llm.client";
 import { AgentToolRegistry } from "../src/modules/agent/tools/tool-registry";
+import {
+  UNGROUNDED_CLAIM_STATUS,
+  UNGROUNDED_CLAIM_TOOL_NAME,
+} from "../src/modules/agent/ungrounded-claim-guard";
 import { type Actor, DriverScopeService } from "../src/modules/auth/driver-scope.service";
 import { CustomersService } from "../src/modules/customers/customers.service";
 import { DriversService } from "../src/modules/drivers/drivers.service";
@@ -128,6 +132,13 @@ describe("buildAgentSystemPrompt (c4e)", () => {
     expect(prompt).toContain("/vehicles/<id>");
     expect(prompt).toContain("integer paisa");
     expect(prompt).toContain("2026-07-02");
+  });
+
+  test("carries the write-must-be-true rule (2026-07-05 finding): inventing demo values is not inventing whether the write happened", () => {
+    const prompt = buildAgentSystemPrompt(new Date("2026-07-05T10:00:00Z"));
+    expect(prompt).toContain("must be true, not merely well-formed");
+    expect(prompt).toContain("put in demo data");
+    expect(prompt).toContain("Inventing values never means inventing whether the write happened");
   });
 
   test("carries the ask-when-missing rule for write fields (ADR-0044 P1)", () => {
@@ -708,5 +719,157 @@ describe("agent turn loop (real registry + Postgres, MockLlmClient queue)", () =
     expect(turn.actions[0]?.status).toBe("failed");
     expect(turn.actions[0]?.previousJson).toBeNull();
     expect(turn.actions[0]?.resultEntityType).toBeNull();
+  });
+
+  // --- ungrounded-claim guard (2026-07-05 finding, ADR-0043 annotation) -----
+  //
+  // A real incident: asked to "register a demo driver like that", the model
+  // replied with a complete fabricated "Demo Driver Added!" confirmation —
+  // name, phone, dates, a fake-but-plausible /drivers/<id> link — WITHOUT
+  // ever calling create_driver. Confirmed against the live dev DB: zero
+  // driver rows, zero create_driver actions, ever. These tests replay that
+  // incident and pin the guard's behavior around it.
+
+  describe("ungrounded-claim guard", () => {
+    test("replays the actual incident: a fabricated 'Added!' claim with zero tool calls is flagged, not silently believed", async () => {
+      const mock = new MockLlmClient({
+        results: [
+          textResult(
+            "Sure! Let me add a demo driver.\n\n" +
+              "✅ **Demo Driver Added!**\n\n" +
+              "| Name | Ram Prasad Shrestha |\n\n" +
+              "You can view it at: `/drivers/cfake0000000000000000001`",
+          ),
+        ],
+      });
+      const service = serviceWith(mock);
+      const conversation = await service.createConversation(admin);
+
+      const turn = await service.runTurn(
+        conversation.id,
+        "now register a demo driver like that",
+        admin,
+      );
+
+      // No tool was ever dispatched — the driver table stays untouched,
+      // exactly like the real incident.
+      expect(await prisma.driver.count()).toBe(0);
+
+      // The flag lands on the SAME audit ledger the real tool dispatches use.
+      const flagged = turn.actions.find((a) => a.toolName === UNGROUNDED_CLAIM_TOOL_NAME);
+      expect(flagged?.status).toBe(UNGROUNDED_CLAIM_STATUS);
+      expect(flagged?.resultEntityType).toBeNull();
+      expect(flagged?.resultEntityId).toBeNull();
+      expect((flagged?.argsJson as { rule: string }).rule).toBe("A");
+
+      // Transcript fidelity: the model's fabricated text survives verbatim
+      // (the server must not ventriloquize the model) — a system notice is
+      // APPENDED, never a silent rewrite.
+      expect(turn.messages.map((m) => m.role)).toEqual(["user", "assistant", "system"]);
+      expect(turn.messages[1]?.content).toContain("Demo Driver Added");
+      expect(turn.messages[2]?.content).toContain("unconfirmed");
+    });
+
+    test("an id-less fabrication is still flagged (Rule A doesn't require a mentioned id)", async () => {
+      const mock = new MockLlmClient({
+        results: [textResult("Done! I've added the driver for you.")],
+      });
+      const service = serviceWith(mock);
+      const conversation = await service.createConversation(admin);
+
+      const turn = await service.runTurn(conversation.id, "register a driver", admin);
+
+      const flagged = turn.actions.find((a) => a.toolName === UNGROUNDED_CLAIM_TOOL_NAME);
+      expect(flagged?.status).toBe(UNGROUNDED_CLAIM_STATUS);
+      expect((flagged?.argsJson as { rule: string }).rule).toBe("A");
+    });
+
+    test("a mixed claim — a real write succeeds, but the same final message also fabricates an unrelated one — is flagged (Rule B)", async () => {
+      const mock = new MockLlmClient({
+        results: [
+          toolCallsResult([
+            {
+              id: "call_1",
+              name: "create_vehicle",
+              args: {
+                registrationNumber: "BA 9 KHA 1111",
+                kind: "TRUCK",
+                make: "Tata",
+                model: "LPT 1613",
+                year: 2023,
+                acquiredAt: "2026-02-01",
+              },
+            },
+          ]),
+          textResult(
+            "Registered the vehicle, and I've also added a driver at " +
+              "/drivers/cfake0000000000000000002.",
+          ),
+        ],
+      });
+      const service = serviceWith(mock);
+      const conversation = await service.createConversation(admin);
+
+      const turn = await service.runTurn(conversation.id, "Add a vehicle and a driver", admin);
+
+      expect(await prisma.vehicle.count()).toBe(1); // the vehicle claim was real
+      expect(await prisma.driver.count()).toBe(0); // the driver claim was fake
+
+      const flagged = turn.actions.find((a) => a.toolName === UNGROUNDED_CLAIM_TOOL_NAME);
+      expect(flagged?.status).toBe(UNGROUNDED_CLAIM_STATUS);
+      expect((flagged?.argsJson as { rule: string }).rule).toBe("B");
+    });
+
+    test("an honest refusal is not flagged (the negation window holds)", async () => {
+      const mock = new MockLlmClient({
+        results: [
+          textResult("The driver could not be added because the license number is required."),
+        ],
+      });
+      const service = serviceWith(mock);
+      const conversation = await service.createConversation(admin);
+
+      const turn = await service.runTurn(conversation.id, "Add a driver", admin);
+
+      expect(turn.actions.find((a) => a.toolName === UNGROUNDED_CLAIM_TOOL_NAME)).toBeUndefined();
+      expect(turn.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+    });
+
+    test("a genuine grounded write — the real id in the final text matches this turn's own action — is not flagged", async () => {
+      const vehicle = await seedVehicle(prisma, adminId);
+      const mock = new MockLlmClient({
+        results: [
+          toolCallsResult([
+            { id: "call_1", name: "update_vehicle", args: { id: vehicle.id, make: "Tata" } },
+          ]),
+          textResult(`Updated the vehicle — see /vehicles/${vehicle.id}.`),
+        ],
+      });
+      const service = serviceWith(mock);
+      const conversation = await service.createConversation(admin);
+
+      const turn = await service.runTurn(conversation.id, "Update the vehicle's make", admin);
+
+      expect(turn.actions.find((a) => a.toolName === UNGROUNDED_CLAIM_TOOL_NAME)).toBeUndefined();
+    });
+
+    test("a genuine read summary is not flagged, even when it uses domain language that could look claim-like", async () => {
+      await seedVehicle(prisma, adminId);
+      await seedVehicle(prisma, adminId);
+      const mock = new MockLlmClient({
+        results: [
+          toolCallsResult([{ id: "call_1", name: "list_vehicles", args: {} }]),
+          // "registered" here is descriptive ("on file"), not a claim of
+          // having just performed a write — signal 1 must not fire on it.
+          textResult("You have 2 vehicles registered in the fleet."),
+        ],
+      });
+      const service = serviceWith(mock);
+      const conversation = await service.createConversation(admin);
+
+      const turn = await service.runTurn(conversation.id, "How many vehicles?", admin);
+
+      expect(turn.actions.find((a) => a.toolName === UNGROUNDED_CLAIM_TOOL_NAME)).toBeUndefined();
+    });
   });
 });
