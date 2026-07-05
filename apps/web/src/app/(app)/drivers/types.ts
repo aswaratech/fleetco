@@ -21,6 +21,12 @@ export interface Driver {
   licenseExpiresAt: string;
   status: "ACTIVE" | "ON_LEAVE" | "SUSPENDED" | "TERMINATED";
   terminatedAt: string | null;
+  // The mobile driver-app login this Driver is linked to, if any (nullable
+  // unique FK; ADR-0034 c8's linking write path — POST/DELETE
+  // /api/v1/drivers/:id/login-link). Always present on the wire (a plain
+  // scalar column); `loginEmail` (the resolved email) is a detail-page-only
+  // enrichment, not part of this shared type — see the driver detail page.
+  userId: string | null;
   createdById: string;
   createdAt: string;
   updatedAt: string;

@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { ConflictException } from "@nestjs/common";
+import { BadRequestException, ConflictException, NotFoundException } from "@nestjs/common";
 import { Test, type TestingModule } from "@nestjs/testing";
-import { DriverStatus, LicenseClass } from "@prisma/client";
+import { DriverStatus, LicenseClass, UserRole } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 
 import { PrismaService } from "../src/modules/prisma/prisma.service";
 import { DriversService, type CreateDriverInput } from "../src/modules/drivers/drivers.service";
+import { DriverScopeService } from "../src/modules/auth/driver-scope.service";
 import { resetDb } from "./db";
 
 // Integration tests for DriversService against a real Postgres. The
@@ -47,6 +48,18 @@ function makeCreateInput(overrides: Partial<CreateDriverInput> = {}): CreateDriv
   };
 }
 
+// Create a login User row for the linkLogin()/unlinkLogin() tests. Mirrors
+// this file's own adminId-seeding convention (direct prisma.user.create)
+// rather than importing the fixtures/trip.ts helper, for consistency with
+// the rest of this file.
+async function makeUser(prisma: PrismaService, role: UserRole = UserRole.DRIVER): Promise<string> {
+  const id = `user_${randomUUID()}`;
+  await prisma.user.create({
+    data: { id, email: `login-${id}@fleetco.test`, name: "Test Login", role },
+  });
+  return id;
+}
+
 describe("DriversService (integration, real Postgres)", () => {
   let module: TestingModule;
   let prisma: PrismaService;
@@ -55,7 +68,7 @@ describe("DriversService (integration, real Postgres)", () => {
 
   beforeAll(async () => {
     module = await Test.createTestingModule({
-      providers: [DriversService, PrismaService],
+      providers: [DriversService, DriverScopeService, PrismaService],
     }).compile();
     await module.init();
 
@@ -509,6 +522,146 @@ describe("DriversService (integration, real Postgres)", () => {
       // delete from happening.
       const refetched = await prisma.driver.findUnique({ where: { id: driver.id } });
       expect(refetched).not.toBeNull();
+    });
+  });
+
+  // ADR-0034 c8's linking write path — closing the gap where Driver.userId
+  // (what DriverScopeService.resolveOwnDriverId reads for own-record
+  // trip/fuel-log scoping) had no writer anywhere in the app until now.
+  describe("linkLogin() / unlinkLogin()", () => {
+    test("links an unlinked driver to an existing DRIVER-role login", async () => {
+      const driver = await service.create(makeCreateInput(), adminId);
+      const loginId = await makeUser(prisma, UserRole.DRIVER);
+      const login = await prisma.user.findUniqueOrThrow({ where: { id: loginId } });
+
+      const updated = await service.linkLogin(driver.id, login.email);
+
+      expect(updated.userId).toBe(loginId);
+    });
+
+    test("linkLogin on a nonexistent driver id throws NotFoundException", async () => {
+      const loginId = await makeUser(prisma, UserRole.DRIVER);
+      const login = await prisma.user.findUniqueOrThrow({ where: { id: loginId } });
+
+      await expect(service.linkLogin("nonexistent-driver-id", login.email)).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    test("linkLogin with an email that resolves to no user throws NotFoundException naming the email", async () => {
+      const driver = await service.create(makeCreateInput(), adminId);
+
+      await expect(service.linkLogin(driver.id, "nobody@fleetco.test")).rejects.toMatchObject({
+        message: expect.stringContaining("nobody@fleetco.test"),
+      });
+      await expect(service.linkLogin(driver.id, "nobody@fleetco.test")).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    test("linkLogin targeting an OFFICE_STAFF (or ADMIN) login throws BadRequestException naming the role", async () => {
+      const driver = await service.create(makeCreateInput(), adminId);
+      const officeId = await makeUser(prisma, UserRole.OFFICE_STAFF);
+      const office = await prisma.user.findUniqueOrThrow({ where: { id: officeId } });
+
+      await expect(service.linkLogin(driver.id, office.email)).rejects.toThrow(BadRequestException);
+      await expect(service.linkLogin(driver.id, office.email)).rejects.toMatchObject({
+        message: expect.stringContaining("OFFICE_STAFF"),
+      });
+    });
+
+    test("linkLogin targeting a login already linked to a DIFFERENT driver throws ConflictException; the other link is untouched", async () => {
+      const driverA = await service.create(makeCreateInput({ licenseNumber: "LIC-A" }), adminId);
+      const driverB = await service.create(makeCreateInput({ licenseNumber: "LIC-B" }), adminId);
+      const loginId = await makeUser(prisma, UserRole.DRIVER);
+      const login = await prisma.user.findUniqueOrThrow({ where: { id: loginId } });
+      await service.linkLogin(driverA.id, login.email);
+
+      await expect(service.linkLogin(driverB.id, login.email)).rejects.toThrow(ConflictException);
+
+      const refetchedA = await prisma.driver.findUnique({ where: { id: driverA.id } });
+      expect(refetchedA?.userId).toBe(loginId);
+    });
+
+    test("linkLogin called twice with the SAME email on the SAME driver is an idempotent no-op", async () => {
+      const driver = await service.create(makeCreateInput(), adminId);
+      const loginId = await makeUser(prisma, UserRole.DRIVER);
+      const login = await prisma.user.findUniqueOrThrow({ where: { id: loginId } });
+
+      await service.linkLogin(driver.id, login.email);
+      const second = await service.linkLogin(driver.id, login.email);
+
+      expect(second.userId).toBe(loginId);
+    });
+
+    test("linkLogin on a driver already linked to a DIFFERENT login throws ConflictException; the original link is untouched", async () => {
+      const driver = await service.create(makeCreateInput(), adminId);
+      const firstLoginId = await makeUser(prisma, UserRole.DRIVER);
+      const firstLogin = await prisma.user.findUniqueOrThrow({ where: { id: firstLoginId } });
+      const secondLoginId = await makeUser(prisma, UserRole.DRIVER);
+      const secondLogin = await prisma.user.findUniqueOrThrow({ where: { id: secondLoginId } });
+      await service.linkLogin(driver.id, firstLogin.email);
+
+      await expect(service.linkLogin(driver.id, secondLogin.email)).rejects.toThrow(
+        ConflictException,
+      );
+
+      const refetched = await prisma.driver.findUnique({ where: { id: driver.id } });
+      expect(refetched?.userId).toBe(firstLoginId);
+    });
+
+    test("unlinkLogin on a linked driver sets userId to null", async () => {
+      const driver = await service.create(makeCreateInput(), adminId);
+      const loginId = await makeUser(prisma, UserRole.DRIVER);
+      const login = await prisma.user.findUniqueOrThrow({ where: { id: loginId } });
+      await service.linkLogin(driver.id, login.email);
+
+      const unlinked = await service.unlinkLogin(driver.id);
+
+      expect(unlinked.userId).toBeNull();
+    });
+
+    test("unlinkLogin on an already-unlinked driver is an idempotent no-op", async () => {
+      const driver = await service.create(makeCreateInput(), adminId);
+
+      const result = await service.unlinkLogin(driver.id);
+
+      expect(result.userId).toBeNull();
+    });
+
+    test("unlinkLogin on a nonexistent driver id throws NotFoundException", async () => {
+      await expect(service.unlinkLogin("nonexistent-driver-id")).rejects.toThrow(NotFoundException);
+    });
+
+    test("findLinkedLoginEmail returns the linked login's email, or null when unlinked", async () => {
+      const driver = await service.create(makeCreateInput(), adminId);
+      expect(await service.findLinkedLoginEmail(driver.id)).toBeNull(); // driver.id is not a userId; this asserts the "no user found" branch too
+
+      const loginId = await makeUser(prisma, UserRole.DRIVER);
+      const login = await prisma.user.findUniqueOrThrow({ where: { id: loginId } });
+      expect(await service.findLinkedLoginEmail(loginId)).toBe(login.email);
+    });
+
+    // The loop-closing test: proves the write path this suite covers above
+    // actually produces the effect the already-shipped, already-tested read
+    // path (DriverScopeService, ADR-0034 c4) depends on — closing ADR-0034's
+    // own stated invariant end-to-end for the first time.
+    test("linking makes DriverScopeService resolve the driver; unlinking makes it 403 again", async () => {
+      const driverScope = module.get(DriverScopeService);
+      const driver = await service.create(makeCreateInput(), adminId);
+      const loginId = await makeUser(prisma, UserRole.DRIVER);
+      const login = await prisma.user.findUniqueOrThrow({ where: { id: loginId } });
+      const actor = { userId: loginId, role: UserRole.DRIVER };
+
+      // Unlinked: fails closed, per DriverScopeService's own documented
+      // contract (a 403, never a silent unscoped result).
+      await expect(driverScope.resolveOwnDriverId(actor)).rejects.toThrow();
+
+      await service.linkLogin(driver.id, login.email);
+      expect(await driverScope.resolveOwnDriverId(actor)).toBe(driver.id);
+
+      await service.unlinkLogin(driver.id);
+      await expect(driverScope.resolveOwnDriverId(actor)).rejects.toThrow();
     });
   });
 });

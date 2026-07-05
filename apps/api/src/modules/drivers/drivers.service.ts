@@ -1,5 +1,10 @@
-import { ConflictException, Injectable } from "@nestjs/common";
-import { Prisma, type Driver, DriverStatus, type LicenseClass } from "@prisma/client";
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
+import { Prisma, type Driver, DriverStatus, type LicenseClass, UserRole } from "@prisma/client";
 
 import type {
   CreateDriverInput,
@@ -308,5 +313,98 @@ export class DriversService {
       }
       throw error;
     }
+  }
+
+  /**
+   * Link an existing Driver row to an existing DRIVER-role User login by
+   * email — the write path ADR-0034 c8 left open ("the exact UX of linking
+   * an existing Driver to a new login is the slice's to pin") and that
+   * `Driver.userId` (the FK `DriverScopeService.resolveOwnDriverId` reads)
+   * had no writer for until now. Looked up by email, not a raw userId:
+   * there is deliberately no users-list surface anywhere in this app
+   * (`create-user.ts`'s own comment — a `users:manage` API is a later
+   * slice), and the admin already knows the email they ran that script
+   * with. Idempotent when re-linking to the SAME login; a driver already
+   * linked to a DIFFERENT login, or a login already linked to a different
+   * driver, is a 409 requiring an explicit unlink first — relinking is a
+   * rare, high-stakes action (a lost-phone reprovision, a hiring
+   * correction) better made deliberate than silently overwritten.
+   */
+  async linkLogin(id: string, email: string): Promise<Driver> {
+    const driver = await this.prisma.driver.findUnique({ where: { id } });
+    if (!driver) {
+      throw new NotFoundException(`Driver ${id} not found`);
+    }
+
+    const user = await this.prisma.user.findUnique({ where: { email } });
+    if (!user) {
+      throw new NotFoundException(`No user account found for email "${email}".`);
+    }
+    if (user.role !== UserRole.DRIVER) {
+      throw new BadRequestException(
+        `The account for "${email}" has role ${user.role}, not DRIVER — only a DRIVER-role ` +
+          "login can be linked to a driver record.",
+      );
+    }
+
+    if (driver.userId === user.id) {
+      return driver; // Already linked to this exact login — idempotent no-op.
+    }
+    if (driver.userId !== null) {
+      throw new ConflictException(
+        "This driver is already linked to a different login. Unlink it first.",
+      );
+    }
+
+    const linkedElsewhere = await this.prisma.driver.findFirst({
+      where: { userId: user.id, NOT: { id } },
+    });
+    if (linkedElsewhere) {
+      throw new ConflictException(`The login "${email}" is already linked to a different driver.`);
+    }
+
+    try {
+      return await this.prisma.driver.update({ where: { id }, data: { userId: user.id } });
+    } catch (error) {
+      // The race backstop for the TOCTOU window between the check above and
+      // this write (two concurrent admin sessions linking the same email to
+      // two different drivers) — driver_userId_key is the unique constraint.
+      if (isPrismaUniqueViolation(error)) {
+        throw new ConflictException(
+          `The login "${email}" is already linked to a different driver.`,
+        );
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Unlink a Driver row from whatever login it is linked to, if any.
+   * Idempotent when already unlinked — mirrors the update() terminatedAt
+   * no-op convention rather than treating "nothing to unlink" as an error.
+   */
+  async unlinkLogin(id: string): Promise<Driver> {
+    const driver = await this.prisma.driver.findUnique({ where: { id } });
+    if (!driver) {
+      throw new NotFoundException(`Driver ${id} not found`);
+    }
+    if (driver.userId === null) {
+      return driver;
+    }
+    return this.prisma.driver.update({ where: { id }, data: { userId: null } });
+  }
+
+  /**
+   * The email of the User a Driver's login is linked to, or null when
+   * unlinked. A tiny read helper for the web's "Login linked" display — kept
+   * separate from findById/list so the agent's get_driver/update_driver
+   * tools (which call findById directly) are untouched by this addition.
+   */
+  async findLinkedLoginEmail(userId: string): Promise<string | null> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { email: true },
+    });
+    return user?.email ?? null;
   }
 }

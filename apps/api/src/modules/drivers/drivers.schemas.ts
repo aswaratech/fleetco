@@ -244,6 +244,28 @@ function intParam(min: number, max: number, fieldLabel: string) {
     });
 }
 
+// POST /api/v1/drivers/:id/login-link body. The email of the DRIVER-role
+// User login to link — required (unlike Customer's optional Email), since
+// naming the login is the entire point of this request. Mirrors the loose,
+// single-@ email validator in customers.schemas.ts (CLAUDE.md "no PII-heavy
+// regex"; a future ADR can tighten it, this is the only place that changes).
+const LinkEmail = z
+  .string()
+  .trim()
+  .min(1, "Email is required.")
+  .max(256, "Email is too long.")
+  .refine((value) => /^[^\s@]+@[^\s@]+$/.test(value), {
+    message: "Email must contain a single @ between two non-empty parts.",
+  });
+
+export const LinkDriverLoginSchema = z
+  .object({
+    email: LinkEmail,
+  })
+  .strict();
+
+export type LinkDriverLoginInput = z.infer<typeof LinkDriverLoginSchema>;
+
 export const ListDriversQuerySchema = z
   .object({
     status: csvEnum(DRIVER_STATUSES),

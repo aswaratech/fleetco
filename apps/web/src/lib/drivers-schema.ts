@@ -151,3 +151,19 @@ export const UpdateDriverFormSchema = DriverFormSchema.partial().extend({
 });
 
 export type UpdateDriverFormValues = z.infer<typeof UpdateDriverFormSchema>;
+
+// The driver-detail login-link panel's form (POST /api/v1/drivers/:id/login-link).
+// Same loose, single-@ email check as customers-schema.ts — required here
+// (unlike Customer's optional email) since naming the login is the point.
+export const LinkDriverLoginFormSchema = z.object({
+  email: z
+    .string()
+    .trim()
+    .min(1, "Email is required.")
+    .max(256, "Email is too long.")
+    .refine((value) => /^[^\s@]+@[^\s@]+$/.test(value), {
+      message: "Email must contain a single @ between two non-empty parts.",
+    }),
+});
+
+export type LinkDriverLoginFormValues = z.infer<typeof LinkDriverLoginFormSchema>;

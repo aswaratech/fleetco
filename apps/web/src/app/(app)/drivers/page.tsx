@@ -2,6 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { NepaliDate } from "@/components/nepali-date";
+import { Badge } from "@/components/ui/badge";
 import { Breadcrumb } from "@/components/ui/breadcrumb";
 import { Button } from "@/components/ui/button";
 import { Pagination } from "@/components/ui/pagination";
@@ -189,6 +190,7 @@ export default async function DriversPage({
                     <TableHead>License</TableHead>
                     <TableHead>Class</TableHead>
                     <TableHead>Status</TableHead>
+                    <TableHead>Login</TableHead>
                     <SortableHeader
                       basePath="/drivers"
                       column="hiredAt"
@@ -231,6 +233,13 @@ export default async function DriversPage({
                       </TableCell>
                       <TableCell className="text-text-secondary">
                         {DRIVER_STATUS_LABELS[d.status] ?? d.status}
+                      </TableCell>
+                      <TableCell>
+                        {d.userId !== null ? (
+                          <Badge variant="success">Login linked</Badge>
+                        ) : (
+                          <Badge variant="neutral">No login</Badge>
+                        )}
                       </TableCell>
                       <TableCell className="text-text-secondary text-right tabular-nums">
                         <NepaliDate iso={d.hiredAt} format="bs" />

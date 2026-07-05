@@ -20,6 +20,15 @@ import { formatHours } from "@/lib/units";
 import { TRIP_STATUS_LABELS, type TripListItem, type TripStatus } from "../../trips/types";
 import type { Driver } from "../types";
 import { DeleteDriverDialog } from "./delete-driver-dialog";
+import { LoginLinkPanel } from "./login-link-panel";
+
+// GET /api/v1/drivers/:id's wire shape adds `loginEmail` on top of the
+// shared Driver type — a detail-page-only enrichment (DriversController's
+// getById composes it from the userId FK), mirroring how DriverStatsResponse
+// below is also page-local rather than merged into the shared type.
+interface DriverDetail extends Driver {
+  loginEmail: string | null;
+}
 
 // Cross-slice read — iter 10. The "Recent trips" section below issues
 // a second authenticated fetch against the iter-8 `?driverId=` query
@@ -124,9 +133,9 @@ export default async function DriverDetailPage({
 }: DetailPageProps): Promise<React.ReactElement> {
   const { id } = await params;
 
-  let driver: Driver;
+  let driver: DriverDetail;
   try {
-    driver = await apiFetch<Driver>(`/api/v1/drivers/${id}`);
+    driver = await apiFetch<DriverDetail>(`/api/v1/drivers/${id}`);
   } catch (error) {
     if (error instanceof ApiError) {
       if (error.status === 401) {
@@ -212,6 +221,8 @@ export default async function DriverDetailPage({
             <DetailRow label="Updated at" value={formatTimestamp(driver.updatedAt)} />
           </dl>
         </section>
+
+        <LoginLinkPanel driverId={driver.id} loginEmail={driver.loginEmail} />
 
         {/* Iter 13: lifetime stats card. Three scalars from the new
             GET /api/v1/drivers/:id/stats endpoint — the symmetric

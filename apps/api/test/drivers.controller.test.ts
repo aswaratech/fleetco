@@ -14,6 +14,7 @@ import { DriversController } from "../src/modules/drivers/drivers.controller";
 import { DriversService, type CreateDriverInput } from "../src/modules/drivers/drivers.service";
 import {
   CreateDriverSchema,
+  LinkDriverLoginSchema,
   ListDriversQuerySchema,
   UpdateDriverSchema,
 } from "../src/modules/drivers/drivers.schemas";
@@ -625,6 +626,177 @@ describe("DriversController.create / update / remove (integration, real Prisma)"
       expect(error).toBeInstanceOf(NotFoundException);
       expect((error as NotFoundException).message).toContain("nonexistent-id");
     }
+  });
+
+  test("getById() returns loginEmail: null for an unlinked driver, and the linked email once linked", async () => {
+    const driver = await service.create(makeCreateInput(), adminId);
+    const unlinkedView = await controller.getById(driver.id);
+    expect(unlinkedView.loginEmail).toBeNull();
+
+    const loginId = `user_${randomUUID()}`;
+    const loginEmail = `driver-login-${loginId}@fleetco.test`;
+    await prisma.user.create({
+      data: { id: loginId, email: loginEmail, name: "Test Driver Login", role: "DRIVER" },
+    });
+    await service.linkLogin(driver.id, loginEmail);
+
+    const linkedView = await controller.getById(driver.id);
+    expect(linkedView.loginEmail).toBe(loginEmail);
+  });
+});
+
+describe("DriversController login-link schema (2026-07-05 write path)", () => {
+  // Pipe-level tests, same cheap no-Nest-boot pattern as the list-query
+  // schema block at the top of this file.
+  const pipe = new ZodValidationPipe(LinkDriverLoginSchema);
+
+  test("bogus body key → BadRequestException (.strict())", () => {
+    expect(() => pipe.transform({ email: "a@b.com", userId: "smuggled" })).toThrow(
+      BadRequestException,
+    );
+  });
+
+  test("missing email → BadRequestException", () => {
+    expect(() => pipe.transform({})).toThrow(BadRequestException);
+  });
+
+  test("empty email → BadRequestException", () => {
+    expect(() => pipe.transform({ email: "" })).toThrow(BadRequestException);
+  });
+
+  test("malformed email (no @) → BadRequestException", () => {
+    expect(() => pipe.transform({ email: "not-an-email" })).toThrow(BadRequestException);
+  });
+
+  test("a well-formed email passes", () => {
+    expect(pipe.transform({ email: "driver@fleetco.test" })).toEqual({
+      email: "driver@fleetco.test",
+    });
+  });
+});
+
+describe("DriversController.linkLogin / unlinkLogin (integration, real Prisma)", () => {
+  // Same TestingModule shape as the create/update/remove block above.
+  let module: TestingModule;
+  let app: INestApplication;
+  let prisma: PrismaService;
+  let controller: DriversController;
+  let service: DriversService;
+  let adminId: string;
+
+  beforeAll(async () => {
+    module = await Test.createTestingModule({
+      controllers: [DriversController],
+      providers: [
+        DriversService,
+        TripsService,
+        DriverScopeService,
+        VehiclesService,
+        PrismaService,
+        { provide: AUTH, useValue: { api: { getSession: () => null } } },
+      ],
+    })
+      .overrideGuard(RolesGuard)
+      .useValue({ canActivate: () => true })
+      .overrideGuard(AuthGuard)
+      .useValue({ canActivate: () => true })
+      .compile();
+
+    app = module.createNestApplication();
+    await app.init();
+
+    prisma = module.get(PrismaService);
+    service = module.get(DriversService);
+    controller = module.get(DriversController);
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  beforeEach(async () => {
+    await resetDb(prisma);
+    adminId = `user_${randomUUID()}`;
+    await prisma.user.create({
+      data: { id: adminId, email: `admin-${adminId}@fleetco.test`, name: "Test Admin" },
+    });
+  });
+
+  async function makeLogin(role: "DRIVER" | "OFFICE_STAFF" = "DRIVER"): Promise<{
+    id: string;
+    email: string;
+  }> {
+    const id = `user_${randomUUID()}`;
+    const email = `login-${id}@fleetco.test`;
+    await prisma.user.create({ data: { id, email, name: "Test Login", role } });
+    return { id, email };
+  }
+
+  test("linkLogin() links and returns the updated driver", async () => {
+    const driver = await service.create(makeCreateInput(), adminId);
+    const login = await makeLogin();
+
+    const linked = await controller.linkLogin(driver.id, { email: login.email });
+
+    expect(linked.userId).toBe(login.id);
+    const refetched = await prisma.driver.findUnique({ where: { id: driver.id } });
+    expect(refetched?.userId).toBe(login.id);
+  });
+
+  test("linkLogin() on an unknown driver id throws NotFoundException", async () => {
+    const login = await makeLogin();
+    await expect(controller.linkLogin("nonexistent-id", { email: login.email })).rejects.toThrow(
+      NotFoundException,
+    );
+  });
+
+  test("linkLogin() with an unknown email throws NotFoundException", async () => {
+    const driver = await service.create(makeCreateInput(), adminId);
+    await expect(controller.linkLogin(driver.id, { email: "nobody@fleetco.test" })).rejects.toThrow(
+      NotFoundException,
+    );
+  });
+
+  test("linkLogin() targeting a non-DRIVER login throws BadRequestException", async () => {
+    const driver = await service.create(makeCreateInput(), adminId);
+    const office = await makeLogin("OFFICE_STAFF");
+    await expect(controller.linkLogin(driver.id, { email: office.email })).rejects.toThrow(
+      BadRequestException,
+    );
+  });
+
+  test("linkLogin() targeting an already-linked-elsewhere login throws ConflictException (HTTP 409)", async () => {
+    const driverA = await service.create(makeCreateInput({ licenseNumber: "LIC-CTRL-A" }), adminId);
+    const driverB = await service.create(makeCreateInput({ licenseNumber: "LIC-CTRL-B" }), adminId);
+    const login = await makeLogin();
+    await controller.linkLogin(driverA.id, { email: login.email });
+
+    await expect(controller.linkLogin(driverB.id, { email: login.email })).rejects.toMatchObject({
+      status: 409,
+    });
+  });
+
+  test("unlinkLogin() unlinks; the driver's login itself is not deleted", async () => {
+    const driver = await service.create(makeCreateInput(), adminId);
+    const login = await makeLogin();
+    await controller.linkLogin(driver.id, { email: login.email });
+
+    const result = await controller.unlinkLogin(driver.id);
+    expect(result).toBeUndefined(); // 204, no body
+
+    const refetchedDriver = await prisma.driver.findUnique({ where: { id: driver.id } });
+    expect(refetchedDriver?.userId).toBeNull();
+    const refetchedLogin = await prisma.user.findUnique({ where: { id: login.id } });
+    expect(refetchedLogin).not.toBeNull();
+  });
+
+  test("unlinkLogin() on an already-unlinked driver is a no-op, not an error", async () => {
+    const driver = await service.create(makeCreateInput(), adminId);
+    await expect(controller.unlinkLogin(driver.id)).resolves.toBeUndefined();
+  });
+
+  test("unlinkLogin() on an unknown driver id throws NotFoundException", async () => {
+    await expect(controller.unlinkLogin("nonexistent-id")).rejects.toThrow(NotFoundException);
   });
 });
 
