@@ -64,7 +64,8 @@ import { VehiclesService } from "../../vehicles/vehicles.service";
 // Structurally absent (c3): everything on InvoicesService, raw GPS/telematics
 // traces, user/role management, and every delete. Stage one (A4) shipped the
 // reads + reports; stage two (A7) adds the 8 creates on the same builders
-// (A8 adds the 3 updates).
+// (A8 adds the 3 updates; ADR-0044 P2 completes the update tier — every
+// create-domain is editable, 39 tools).
 //
 // Boot-time guarantees (constructor): every wrapper schema converts through
 // z.toJSONSchema — a wrapper that drifts into .transform()/z.coerce (which

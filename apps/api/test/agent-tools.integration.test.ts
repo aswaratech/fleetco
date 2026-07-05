@@ -23,7 +23,7 @@ import { ServiceSchedulesService } from "../src/modules/maintenance/service-sche
 import { TripsService } from "../src/modules/trips/trips.service";
 import { VehiclesService } from "../src/modules/vehicles/vehicles.service";
 import { resetDb } from "./db";
-import { seedCustomer, seedFuelLog, seedServiceSchedule } from "./fixtures/agent";
+import { seedCustomer, seedFuelLog, seedJob, seedServiceSchedule } from "./fixtures/agent";
 import { seedDriver, seedTrip, seedUser, seedVehicle } from "./fixtures/trip";
 
 // End-to-end registry dispatch against real Postgres (ADR-0043 c1/c6, ticket
@@ -535,5 +535,139 @@ describe("agent tools end-to-end (real DB, ADR-0043 A4)", () => {
         admin,
       ),
     ).rejects.toBeInstanceOf(ConflictException);
+  });
+
+  // --- registry completion: the five P2 update tools (ADR-0044) -------------
+
+  test("update_customer: INACTIVE + null clears email; the pre-image keeps the prior row", async () => {
+    const customer = await seedCustomer(prisma, adminId, { email: "old@acme.example" });
+    const outcome = await registry.dispatch(
+      "update_customer",
+      { id: customer.id, status: "INACTIVE", email: null },
+      admin,
+    );
+    expect(outcome.entity).toEqual({ type: "Customer", id: customer.id });
+    const pre = outcome.preImage as { status: string; email: string | null };
+    expect(pre.status).toBe("ACTIVE");
+    expect(pre.email).toBe("old@acme.example");
+    const after = await prisma.customer.findUniqueOrThrow({ where: { id: customer.id } });
+    expect(after.status).toBe("INACTIVE");
+    expect(after.email).toBeNull();
+  });
+
+  test("update_customer: a duplicate panNumber → ConflictException (normalized uppercase, P2002 → 409)", async () => {
+    await seedCustomer(prisma, adminId, { panNumber: "PAN111111" });
+    const other = await seedCustomer(prisma, adminId, { panNumber: "PAN222222" });
+    // Lowercase on the wire — the service's trim+uppercase normalization runs
+    // before the uniqueness check, exactly as on the PATCH endpoint.
+    await expect(
+      registry.dispatch("update_customer", { id: other.id, panNumber: "pan111111" }, admin),
+    ).rejects.toBeInstanceOf(ConflictException);
+  });
+
+  test("update_job: the pre-image is the RAW row (no nested customer); the merged date rule fires", async () => {
+    const customer = await seedCustomer(prisma, adminId);
+    const job = await seedJob(prisma, {
+      customerId: customer.id,
+      createdById: adminId,
+      scheduledStartDate: new Date("2026-07-01T00:00:00Z"),
+      scheduledEndDate: new Date("2026-07-05T00:00:00Z"),
+    });
+
+    const outcome = await registry.dispatch(
+      "update_job",
+      { id: job.id, description: "Regraded haul road — extended scope" },
+      admin,
+    );
+    expect(outcome.entity).toEqual({ type: "Job", id: job.id });
+    const pre = outcome.preImage as Record<string, unknown>;
+    expect(pre.id).toBe(job.id);
+    expect("customer" in pre).toBe(false); // findByIdRaw — the faithful undo source
+
+    // Moving the start past the STORED end violates end-≥-start on the merged
+    // row (the service's defense-in-depth re-check for one-sided patches).
+    await expect(
+      registry.dispatch("update_job", { id: job.id, scheduledStartDate: "2026-07-10" }, admin),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  test("update_fuel_log: totalCostPaisa recomputes when litersMl changes; the pre-image keeps the old total", async () => {
+    const vehicle = await seedVehicle(prisma, adminId);
+    const log = await seedFuelLog(prisma, {
+      vehicleId: vehicle.id,
+      createdById: adminId,
+      litersMl: 45_000,
+      pricePerLiterPaisa: 16_500,
+      totalCostPaisa: 742_500,
+    });
+    const outcome = await registry.dispatch(
+      "update_fuel_log",
+      { id: log.id, litersMl: 50_000 },
+      admin,
+    );
+    expect((outcome.preImage as { totalCostPaisa: number }).totalCostPaisa).toBe(742_500);
+    const after = await prisma.fuelLog.findUniqueOrThrow({ where: { id: log.id } });
+    expect(after.litersMl).toBe(50_000);
+    expect(after.totalCostPaisa).toBe(825_000); // 50 000 mL × 16 500 paisa/L ÷ 1000
+  });
+
+  test("update_fuel_log: a DRIVER updating a foreign fill → NotFound (the own-record 404, ADR-0034 c4)", async () => {
+    const vehicle = await seedVehicle(prisma, adminId);
+    const log = await seedFuelLog(prisma, { vehicleId: vehicle.id, createdById: adminId });
+    const driverUserId = await seedUser(prisma, UserRole.DRIVER);
+    const driverActor: Actor = { userId: driverUserId, role: UserRole.DRIVER };
+    await expect(
+      registry.dispatch("update_fuel_log", { id: log.id, station: "Sajha Petrol" }, driverActor),
+    ).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  test("update_expense_log: the amount changes and the pre-image keeps the prior row", async () => {
+    const created = (await registry.execute(
+      "create_expense_log",
+      { date: "2026-07-01", category: "INSURANCE", amountPaisa: 1_500_000 },
+      admin,
+    )) as { id: string };
+    const outcome = await registry.dispatch(
+      "update_expense_log",
+      { id: created.id, amountPaisa: 1_750_000, vendor: "Shikhar Insurance" },
+      admin,
+    );
+    expect(outcome.entity).toEqual({ type: "ExpenseLog", id: created.id });
+    expect((outcome.preImage as { amountPaisa: number }).amountPaisa).toBe(1_500_000);
+    const after = await prisma.expenseLog.findUniqueOrThrow({ where: { id: created.id } });
+    expect(after.amountPaisa).toBe(1_750_000);
+    expect(after.vendor).toBe("Shikhar Insurance");
+  });
+
+  test("update_service_record: a PATCH does NOT advance the linked schedule's anchor", async () => {
+    const vehicle = await seedVehicle(prisma, adminId);
+    const schedule = await seedServiceSchedule(prisma, {
+      vehicleId: vehicle.id,
+      createdById: adminId,
+      lastServiceOdometerKm: 75_000,
+    });
+    const created = (await registry.execute(
+      "create_service_record",
+      {
+        vehicleId: vehicle.id,
+        serviceScheduleId: schedule.id,
+        performedAt: "2026-07-01",
+        odometerKm: 80_000,
+      },
+      admin,
+    )) as { id: string };
+
+    // create advanced the anchor to 80 000 (the A7 behavior, pinned above);
+    // the P2 PATCH corrects the record without moving the anchor again.
+    const outcome = await registry.dispatch(
+      "update_service_record",
+      { id: created.id, odometerKm: 81_000 },
+      admin,
+    );
+    expect((outcome.preImage as { odometerKm: number | null }).odometerKm).toBe(80_000);
+    const after = await prisma.serviceRecord.findUniqueOrThrow({ where: { id: created.id } });
+    expect(after.odometerKm).toBe(81_000);
+    const anchor = await prisma.serviceSchedule.findUniqueOrThrow({ where: { id: schedule.id } });
+    expect(anchor.lastServiceOdometerKm).toBe(80_000); // unchanged by the edit
   });
 });

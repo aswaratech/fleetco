@@ -5,15 +5,17 @@ import { type ExpenseLogsService } from "../../expense-logs/expense-logs.service
 import {
   CreateExpenseLogSchema,
   ListExpenseLogsQuerySchema,
+  UpdateExpenseLogSchema,
   type ExpenseLogSortColumn,
 } from "../../expense-logs/expense-logs.schemas";
 import { toQueryShape } from "./query-shape";
 import { GetByIdArgs, type ToolDefinition } from "./tool.types";
 
-// Expense-log tools (ADR-0043 c3: A4 reads, A7 create). `category` is a
-// SINGLE enum value (the module contract — not csv). A null vehicleId on a
-// row means a company-level, vehicle-agnostic expense (e.g. the quarterly
-// insurance premium) — and the create wrapper accepts the same shape.
+// Expense-log tools (ADR-0043 c3: A4 reads, A7 create; ADR-0044 P2 update).
+// `category` is a SINGLE enum value (the module contract — not csv). A null
+// vehicleId on a row means a company-level, vehicle-agnostic expense (e.g.
+// the quarterly insurance premium) — the create wrapper accepts that shape,
+// and update cannot re-home a row (vehicleId is immutable).
 
 const EXPENSE_LOG_SORT = [
   "date",
@@ -45,6 +47,23 @@ const CreateExpenseLogArgs = z
     date: z.iso.date(),
     category: z.enum(ExpenseCategory),
     amountPaisa: z.number().int().min(1).max(10_000_000_000),
+    vendor: z.string().trim().min(1).max(256).nullable().optional(),
+    receiptNumber: z.string().trim().min(1).max(64).nullable().optional(),
+    notes: z.string().max(4096).nullable().optional(),
+  })
+  .strict();
+
+// Mirrors UpdateExpenseLogSchema field-for-field plus the wrapper-only `id` —
+// vehicleId is structurally absent (immutable; the module schema's .strict()
+// rejects it too). Explicit null CLEARS tripId, vendor, receiptNumber, or
+// notes. The module schema's empty-patch refine re-validates at execute.
+const UpdateExpenseLogArgs = z
+  .object({
+    id: z.string().trim().min(1),
+    tripId: z.string().trim().min(1).nullable().optional(),
+    date: z.iso.date().optional(),
+    category: z.enum(ExpenseCategory).optional(),
+    amountPaisa: z.number().int().min(1).max(10_000_000_000).optional(),
     vendor: z.string().trim().min(1).max(256).nullable().optional(),
     receiptNumber: z.string().trim().min(1).max(64).nullable().optional(),
     notes: z.string().max(4096).nullable().optional(),
@@ -102,6 +121,30 @@ export function buildExpenseLogsTools(expenseLogs: ExpenseLogsService): ToolDefi
       async execute(args, actor) {
         const input = CreateExpenseLogSchema.parse(CreateExpenseLogArgs.parse(args));
         return expenseLogs.create(input, actor.userId);
+      },
+    },
+    {
+      name: "update_expense_log",
+      description:
+        "Update fields on an existing expense (partial update — send only what " +
+        "changes; the prior row is captured for undo). vehicleId cannot be " +
+        "changed. amountPaisa stays the authoritative integer-paisa amount. " +
+        "Explicit null CLEARS tripId, vendor, receiptNumber, or notes; a " +
+        "non-null tripId must belong to the expense's vehicle. The write " +
+        "happens immediately and exactly once.",
+      capabilities: ["expense-logs:*"],
+      riskTier: "reversible-write",
+      resultEntityType: "ExpenseLog",
+      argsSchema: UpdateExpenseLogArgs,
+      async capturePreImage(args) {
+        // The RAW row (no nested vehicle/trip) — the faithful undo source.
+        const { id } = UpdateExpenseLogArgs.parse(args);
+        return expenseLogs.findByIdRaw(id);
+      },
+      async execute(args) {
+        const { id, ...patch } = UpdateExpenseLogArgs.parse(args);
+        const input = UpdateExpenseLogSchema.parse(patch);
+        return expenseLogs.update(id, input);
       },
     },
   ];

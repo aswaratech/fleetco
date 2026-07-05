@@ -6,15 +6,17 @@ import { type CustomersService } from "../../customers/customers.service";
 import {
   CreateCustomerSchema,
   ListCustomersQuerySchema,
+  UpdateCustomerSchema,
   type CustomerSortColumn,
 } from "../../customers/customers.schemas";
 import { toQueryShape } from "./query-shape";
 import { GetByIdArgs, type ToolDefinition } from "./tool.types";
 
-// Customers tools (ADR-0043 c3: A4 reads, A7 create). Customer contactPerson
-// / phone / email pass the redaction layer as operational contact data (c6).
-// The create path leaves PAN normalization (trim + uppercase, the
-// case-insensitive uniqueness) to the service, where it has always lived.
+// Customers tools (ADR-0043 c3: A4 reads, A7 create; ADR-0044 P2 update).
+// Customer contactPerson / phone / email pass the redaction layer as
+// operational contact data (c6). The write paths leave PAN normalization
+// (trim + uppercase, the case-insensitive uniqueness) to the service, where
+// it has always lived.
 
 const CUSTOMER_SORT = ["name", "createdAt"] as const satisfies readonly CustomerSortColumn[];
 
@@ -26,6 +28,24 @@ const CreateCustomerArgs = z
     name: z.string().trim().min(1).max(256),
     contactPerson: z.string().trim().min(1).max(128).nullable().optional(),
     phone: z.string().trim().min(1),
+    email: z.string().trim().min(1).max(256).nullable().optional(),
+    panNumber: z.string().trim().min(1).max(32).nullable().optional(),
+    address: z.string().trim().min(1).max(512).nullable().optional(),
+    status: z.enum(CustomerStatus).optional(),
+  })
+  .strict();
+
+// Mirrors UpdateCustomerSchema (CreateCustomerSchema.partial()) field-for-field
+// plus the wrapper-only `id`. Explicit null CLEARS a clearable field
+// (contactPerson, email, panNumber, address); name / phone / status are
+// replaced, never cleared. The module schema's empty-patch refine re-validates
+// at execute.
+const UpdateCustomerArgs = z
+  .object({
+    id: z.string().trim().min(1),
+    name: z.string().trim().min(1).max(256).optional(),
+    contactPerson: z.string().trim().min(1).max(128).nullable().optional(),
+    phone: z.string().trim().min(1).optional(),
     email: z.string().trim().min(1).max(256).nullable().optional(),
     panNumber: z.string().trim().min(1).max(32).nullable().optional(),
     address: z.string().trim().min(1).max(512).nullable().optional(),
@@ -90,6 +110,33 @@ export function buildCustomersTools(customers: CustomersService): ToolDefinition
       async execute(args, actor) {
         const input = CreateCustomerSchema.parse(CreateCustomerArgs.parse(args));
         return customers.create(input, actor.userId);
+      },
+    },
+    {
+      name: "update_customer",
+      description:
+        "Update fields on an existing customer (partial update — send only what " +
+        "changes; the prior row is captured for undo). Explicit null CLEARS " +
+        "contactPerson, email, panNumber, or address. Setting status to INACTIVE " +
+        "deactivates the customer. panNumber stays unique (a duplicate fails with " +
+        "a conflict; normalized to uppercase server-side). The write happens " +
+        "immediately and exactly once.",
+      capabilities: ["customers:*"],
+      riskTier: "reversible-write",
+      resultEntityType: "Customer",
+      argsSchema: UpdateCustomerArgs,
+      async capturePreImage(args) {
+        const { id } = UpdateCustomerArgs.parse(args);
+        return customers.findById(id);
+      },
+      async execute(args) {
+        const { id, ...patch } = UpdateCustomerArgs.parse(args);
+        const input = UpdateCustomerSchema.parse(patch);
+        const updated = await customers.update(id, input);
+        if (updated === null) {
+          throw new NotFoundException(`Customer ${id} not found.`);
+        }
+        return updated;
       },
     },
   ];
