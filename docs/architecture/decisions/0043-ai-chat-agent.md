@@ -79,3 +79,7 @@ This is unambiguously new feature scope opened before the first deploy reaches d
 - **ADR-0028 (RBAC)** — consumed: the capability map is the agent's per-tool authorization basis; the new `agent:use` token joins it. The RBAC hardening PR (wiring `@RequirePermission` across all controllers, minting `invoices:*`/`maintenance:*`) is a hard prerequisite.
 - **ADR-0021 (auth integration shape)** — honored: `createdById` always comes from the authenticated session — the requesting human — never from a request body or a synthetic actor.
 - **ADR-0029 retention pattern** — reused for the 180-day transcript prune.
+
+---
+
+**Annotation (2026-07-05, append-only):** **ADR-0044** extends this program — the ask-when-missing prompt rule, five further update tools (registry 34 → 39, the `update_customer`/`update_job` items this ADR's §Revisit-when anticipated), and image-based data entry through a separate no-tools vision seam — reusing this module, audit spine, autonomy posture, and budgets, with the commitment-3 exclusions reaffirmed verbatim. Same-day context: the commitment-2/c6 client went live against the real provider for the first time (local validation, 2026-07-05; opt-out requested), and a feasibility probe established DeepSeek's API is text-only today — the vision seam's provider is ADR-0044's Decision box B.
