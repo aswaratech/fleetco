@@ -221,16 +221,15 @@ export class VehiclesController {
    * Hard delete. Returns HTTP 204 (no body) on success; 404 when the
    * vehicle does not exist (the service returns false for P2025).
    *
-   * Future slice (Trips) will likely change this to either a soft delete
-   * or a block-when-referenced check, because once Trips reference
-   * Vehicle by id, hard-deleting a Vehicle that has Trips would either
-   * orphan the Trips (data loss) or fail at the DB layer (foreign-key
-   * Restrict, surfacing as Prisma P2003 — which we would then map to
-   * HTTP 409 the same way P2002 is mapped today). The service-layer
-   * comment on `delete` records this same plan; this controller-side
-   * note exists so a future reader scanning the public surface for
-   * "what happens when I DELETE a vehicle that has trips" finds the
-   * answer here without needing to open the service.
+   * Deleting a vehicle that has Trips (or fuel/expense logs, GPS
+   * pings, a mounted tracker) is BLOCKED: the referencing FKs are
+   * Restrict, so the DB rejects the delete with Prisma P2003, which
+   * the service maps to HTTP 409 with a message naming what blocks it
+   * (iter 9, extended by later aggregates — the same shape as the
+   * P2002 mapping). This controller-side note exists so a future
+   * reader scanning the public surface for "what happens when I
+   * DELETE a vehicle that has trips" finds the answer here without
+   * needing to open the service.
    */
   @Delete(":id")
   @HttpCode(HttpStatus.NO_CONTENT)
