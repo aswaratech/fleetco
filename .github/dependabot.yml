@@ -113,3 +113,40 @@ updates:
         patterns:
           - eslint
           - "eslint-config-*"
+
+  # Component 1 (cont.): the orchestration loop (scripts/orchestration) is a
+  # standalone pnpm package OUTSIDE the workspace with its own lockfile, so
+  # the recursive npm scan at "/" does not reach it. Without this block it
+  # received only security PRs (with default `build(deps-dev)` prefixes —
+  # see PR #107), never version updates: the structural cause of its 2026-07
+  # 14-alert backlog. NOTE: no CI job runs this package's tests — verify its
+  # update PRs locally (`pnpm test` / `pnpm typecheck` in the directory)
+  # before merging, per docs/runbook/orchestration-loop-operator-guide.md.
+  - package-ecosystem: npm
+    directory: /scripts/orchestration
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+      timezone: Asia/Kathmandu
+    open-pull-requests-limit: 5
+    # Supply-chain cooldown (semgrep dependabot-missing-cooldown, ADR-0012
+    # baseline): wait 7 days before proposing newly published versions -
+    # brand-new releases are where compromised-package incidents live.
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: chore(deps)
+      include: scope
+    groups:
+      test-stack:
+        patterns:
+          - vitest
+          - "@vitest/*"
+          - vite
+      anthropic:
+        patterns:
+          - "@anthropic-ai/*"
+      slack:
+        patterns:
+          - "@slack/*"
