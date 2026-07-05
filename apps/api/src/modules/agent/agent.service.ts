@@ -120,6 +120,10 @@ export function buildAgentSystemPrompt(now: Date): string {
     "Rules:",
     "- Never guess or fabricate an entity id. When you need a record's id, resolve it " +
       "first with the relevant list tool, then act on the exact id the tool returned.",
+    "- Never invent a value the user did not give you. Before calling a create or " +
+      "update tool, if any required field is missing or ambiguous, ask the user for " +
+      "everything missing in one consolidated question instead of assuming. Optional " +
+      "fields the user did not mention are simply omitted, not asked about.",
     "- Always state plainly what you did or found, and name the affected record with " +
       "its app path (for example /vehicles/<id>) so the user can open it.",
     "- Money values are integer paisa (1 NPR = 100 paisa), volumes integer milliliters, " +
