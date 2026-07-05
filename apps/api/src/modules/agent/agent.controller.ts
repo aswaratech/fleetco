@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -8,9 +9,13 @@ import {
   Post,
   Query,
   Req,
+  StreamableFile,
+  UploadedFile,
   UseGuards,
+  UseInterceptors,
 } from "@nestjs/common";
-import { type AgentConversation } from "@prisma/client";
+import { FileInterceptor } from "@nestjs/platform-express";
+import { type AgentAttachment, type AgentConversation } from "@prisma/client";
 
 import { ZodValidationPipe } from "../../common/zod-validation.pipe";
 import { AuthGuard } from "../auth/auth.guard";
@@ -30,6 +35,12 @@ import {
   type AgentTranscript,
   type AgentTurnResult,
 } from "./agent.service";
+// eslint-disable-next-line @typescript-eslint/consistent-type-imports
+import {
+  AgentAttachmentsService,
+  MAX_ATTACHMENT_BYTES,
+  type UploadedImageFile,
+} from "./agent-attachments.service";
 import {
   ListAgentActionsQuerySchema,
   ListAgentConversationsQuerySchema,
@@ -84,7 +95,10 @@ export interface AgentActionsListResponse {
 @UseGuards(AuthGuard, RolesGuard)
 @RequirePermission("agent:use")
 export class AgentController {
-  constructor(private readonly agent: AgentService) {}
+  constructor(
+    private readonly agent: AgentService,
+    private readonly attachments: AgentAttachmentsService,
+  ) {}
 
   // Build the acting principal from the session, with the role coerced
   // through `toUserRole` (the single fail-closed coercion the guards and /me
@@ -181,5 +195,46 @@ export class AgentController {
     @Req() request: AuthenticatedRequest,
   ): Promise<AgentTurnResult> {
     return this.agent.runTurn(id, body.content, this.actorOf(request));
+  }
+
+  /**
+   * Upload one image against the acting user's own conversation (ADR-0044
+   * c3, ticket V4). Multipart with a single `file` part; multer keeps the
+   * bytes in memory (the default when no storage is configured) and rejects
+   * streams past 10 MB with 413 before they buffer — the service then sniffs
+   * magic bytes (never trusting the client's content type), stores through
+   * the ObjectStorage seam, and rows the attachment unclaimed (messageId
+   * null) until a turn claims it (V7). NOTE: `main.ts` disables Nest's
+   * default body parser and re-attaches json/urlencoded only — multipart
+   * passes through untouched for multer to consume (pinned by the V4
+   * endpoint test).
+   */
+  @Post("conversations/:id/attachments")
+  @HttpCode(HttpStatus.CREATED)
+  @UseInterceptors(FileInterceptor("file", { limits: { fileSize: MAX_ATTACHMENT_BYTES } }))
+  async uploadAttachment(
+    @Param("id") id: string,
+    @UploadedFile() file: UploadedImageFile | undefined,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<AgentAttachment> {
+    if (file === undefined) {
+      throw new BadRequestException('A multipart file part named "file" is required.');
+    }
+    return this.attachments.upload(id, file, this.actorOf(request));
+  }
+
+  /**
+   * Stream an attachment's bytes back to its OWNER, inline (the transcript
+   * thumbnail / full view; the web reaches this through its authed proxy
+   * route — attachment bytes are Tier-2-handled and never get a public URL).
+   * Two-segment route, so it never shadows the `conversations/:id` read.
+   */
+  @Get("attachments/:id")
+  async getAttachment(
+    @Param("id") id: string,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<StreamableFile> {
+    const { buffer, contentType } = await this.attachments.getBytes(id, this.actorOf(request));
+    return new StreamableFile(buffer, { type: contentType, disposition: "inline" });
   }
 }
