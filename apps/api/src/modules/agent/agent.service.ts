@@ -17,6 +17,12 @@ import {
 
 import { type Actor } from "../auth/driver-scope.service";
 import { LlmCallError, type LlmMessage, type LlmToolCall } from "./llm-client";
+import {
+  buildUngroundedClaimNotice,
+  checkUngroundedClaim,
+  UNGROUNDED_CLAIM_STATUS,
+  UNGROUNDED_CLAIM_TOOL_NAME,
+} from "./ungrounded-claim-guard";
 
 // PrismaService, LlmClient (the abstract class doubling as the DI token), and
 // AgentToolRegistry are injected by NestJS via emitDecoratorMetadata; the
@@ -133,6 +139,14 @@ export function buildAgentSystemPrompt(now: Date): string {
       "fields the user did not mention are simply omitted, not asked about.",
     "- Always state plainly what you did or found, and name the affected record with " +
       "its app path (for example /vehicles/<id>) so the user can open it.",
+    "- That statement must be true, not merely well-formed: never say or imply that a " +
+      "create or update happened — an id, an app path, a checkmark, a phrase like " +
+      "'Added'/'Registered'/'Updated' — unless you called the matching tool in THIS " +
+      "turn and are reporting exactly what it returned. This holds even when the user " +
+      "told you to invent demo or placeholder values (for example 'put in demo data " +
+      "yourself'): invent the field values, then actually call the tool with them and " +
+      "report its real result. Inventing values never means inventing whether the " +
+      "write happened.",
     "- Money values are integer paisa (1 NPR = 100 paisa), volumes integer milliliters, " +
       "engine hours integer tenths-of-an-hour, dates ISO YYYY-MM-DD. Present them in " +
       "human units (NPR, liters) and say so.",
@@ -543,6 +557,33 @@ export class AgentService {
 
         const toolCalls = assistant.tool_calls ?? [];
         if (toolCalls.length === 0) {
+          // The ungrounded-claim guard (2026-07-05 finding, ADR-0043 annotation):
+          // a final reply claiming a create/update happened is checked against
+          // THIS turn's own dispatched actions before it reaches the user. See
+          // ungrounded-claim-guard.ts for the two-signal detection and why a
+          // deterministic flag beats trusting the model a second time.
+          const claimCheck = checkUngroundedClaim(assistant.content ?? "", turnActions);
+          if (claimCheck.flagged) {
+            const flaggedAction = await this.recordAction({
+              conversationId: conversation.id,
+              messageId: assistantRow.id,
+              toolName: UNGROUNDED_CLAIM_TOOL_NAME,
+              args: { rule: claimCheck.rule, excerpt: claimCheck.excerpt },
+              entity: null,
+              status: UNGROUNDED_CLAIM_STATUS,
+              latencyMs: 0,
+              userId: actor.userId,
+            });
+            turnActions.push(flaggedAction);
+            const noticeRow = await this.prisma.agentMessage.create({
+              data: {
+                conversationId: conversation.id,
+                role: "system",
+                content: buildUngroundedClaimNotice(),
+              },
+            });
+            turnMessages.push(noticeRow);
+          }
           sawFinalReply = true;
           break;
         }
@@ -731,7 +772,10 @@ export class AgentService {
      * everywhere else. Tier 2 like transcript content: never logged (pino
      * redacts *.previousJson), never sent to the model. */
     preImage?: unknown;
-    status: "succeeded" | "failed" | "denied";
+    /** "flagged" is not a tool-dispatch outcome — it's the ungrounded-claim
+     * guard's sentinel status for a final reply that claimed a write this
+     * turn's actions don't back up (ungrounded-claim-guard.ts). */
+    status: "succeeded" | "failed" | "denied" | "flagged";
     latencyMs: number;
     userId: string;
   }): Promise<AgentAction> {

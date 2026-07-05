@@ -68,10 +68,12 @@ describe("linkifyAppPaths (allowlist-only — the prompt-injection posture)", ()
 });
 
 describe("actionBadgeVariant (fail-closed to neutral)", () => {
-  test("maps the three statuses per the spec", () => {
+  test("maps the four statuses per the spec", () => {
     expect(actionBadgeVariant("succeeded")).toBe("success");
     expect(actionBadgeVariant("failed")).toBe("error");
     expect(actionBadgeVariant("denied")).toBe("neutral");
+    // The ungrounded-claim guard's sentinel status (ungrounded-claim-guard.ts).
+    expect(actionBadgeVariant("flagged")).toBe("warning");
   });
 
   test("an unknown status must not render as success", () => {
