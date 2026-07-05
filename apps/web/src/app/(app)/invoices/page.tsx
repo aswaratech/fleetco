@@ -17,7 +17,6 @@ import {
 } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
 import { formatNpr } from "@/lib/money";
-import { getServerSession } from "@/lib/session";
 
 import { InvoicesFilters, type CustomerFilterOption } from "./invoices-filters";
 import {
@@ -76,11 +75,6 @@ interface CustomersListResponse {
 export default async function InvoicesPage({
   searchParams,
 }: InvoicesPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const params = await searchParams;
   const status = single(params.status);
   const documentType = single(params.documentType);

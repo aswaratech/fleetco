@@ -7,13 +7,12 @@ import { Button } from "@/components/ui/button";
 import { DetailRow } from "@/components/ui/detail-row";
 import { apiFetch, ApiError } from "@/lib/api";
 import { CUSTOMER_STATUS_LABELS } from "@/lib/customers-schema";
-import { getServerSession } from "@/lib/session";
 
 import { DeleteJobDialog } from "./delete-job-dialog";
 import { JOB_STATUS_LABELS, type JobDetail } from "../types";
 
 // Job detail — iter 17 of the Jobs slice (read path). Server-rendered
-// shell (auth gate via getServerSession; redirect to /login if absent);
+// shell (the (app) layout provides the auth gate);
 // fetches the job via apiFetch and surfaces 404 through Next.js's
 // notFound() route. Mirrors apps/web/src/app/customers/[id]/page.tsx
 // and the Trips detail page in shape.
@@ -40,11 +39,6 @@ function formatTimestamp(iso: string | null): string {
 export default async function JobDetailPage({
   params,
 }: DetailPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const { id } = await params;
 
   let job: JobDetail;

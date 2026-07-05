@@ -2,7 +2,6 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
 import { apiFetch, ApiError } from "@/lib/api";
-import { getServerSession } from "@/lib/session";
 
 import { EditServiceScheduleForm } from "./edit-service-schedule-form";
 import type { ServiceSchedule } from "../../types";
@@ -26,11 +25,6 @@ interface VehicleSummary {
 export default async function EditServiceSchedulePage({
   params,
 }: EditPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const { id } = await params;
 
   let schedule: ServiceSchedule;

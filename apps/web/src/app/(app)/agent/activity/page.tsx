@@ -16,7 +16,6 @@ import {
 } from "@/components/ui/table";
 import { actionBadgeVariant, entityPathFor, formatLatencyMs } from "@/lib/agent-chat";
 import { apiFetch, ApiError } from "@/lib/api";
-import { getServerSession } from "@/lib/session";
 
 import { ActivityFilters } from "./activity-filters";
 import type { AgentActionListItem, AgentActionsListResponse } from "./types";
@@ -52,11 +51,6 @@ function single(value: string | string[] | undefined): string | undefined {
 export default async function AgentActivityPage({
   searchParams,
 }: ActivityPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const params = await searchParams;
   const status = single(params.status);
   const toolName = single(params.toolName);

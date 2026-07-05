@@ -16,9 +16,11 @@ import { getServerSession } from "@/lib/session";
 // The role is the only RBAC input the shell needs; the client <AppShell> renders
 // navForRole(role) itself (the Lucide icon components in the nav model are not
 // serializable across the server→client boundary, so they cannot be passed as
-// props). The per-page getServerSession gates remain in place for now — this
-// layout gate is additive; consolidating the redundant per-page redirects is a
-// tracked follow-up (docs/tech-debt.md).
+// props). This layout is THE auth gate for the whole route group: the
+// once-redundant per-page getServerSession copies were removed when the
+// tech-debt entry's trigger fired (a page-level defense that remains is each
+// data-fetching page's ApiError-401 → /login catch, which guards mid-session
+// expiry during a fetch — a different concern from this gate).
 
 interface Me {
   id: string;

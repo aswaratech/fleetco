@@ -16,7 +16,6 @@ import {
 } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
 import { CUSTOMER_STATUS_LABELS } from "@/lib/customers-schema";
-import { getServerSession } from "@/lib/session";
 
 import { CustomersFilters } from "./customers-filters";
 import type { Customer } from "./types";
@@ -85,11 +84,6 @@ function single(value: string | string[] | undefined): string | undefined {
 export default async function CustomersPage({
   searchParams,
 }: CustomersPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const params = await searchParams;
   const status = single(params.status);
   const sortByParam = single(params.sortBy);

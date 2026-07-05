@@ -1,7 +1,4 @@
 import Link from "next/link";
-import { redirect } from "next/navigation";
-
-import { getServerSession } from "@/lib/session";
 
 import { CreateCustomerForm } from "./create-customer-form";
 
@@ -17,11 +14,6 @@ import { CreateCustomerForm } from "./create-customer-form";
 // the same "PAN numbers must be unique" sentence so the operator's
 // expectation is set before they hit a 409 on submit.
 export default async function NewCustomerPage(): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   return (
     <main className="bg-surface-canvas min-h-svh">
       <div className="mx-auto max-w-2xl space-y-6 px-8 py-8">

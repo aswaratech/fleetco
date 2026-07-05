@@ -1,7 +1,4 @@
 import Link from "next/link";
-import { redirect } from "next/navigation";
-
-import { getServerSession } from "@/lib/session";
 
 import { CreateVehicleForm } from "./create-vehicle-form";
 
@@ -14,11 +11,6 @@ import { CreateVehicleForm } from "./create-vehicle-form";
 // max-width centered, breadcrumb above title, vertical form with
 // labels above inputs, primary action right-aligned in a footer row.
 export default async function NewVehiclePage() {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   return (
     <main className="bg-surface-canvas min-h-svh">
       <div className="mx-auto max-w-2xl space-y-6 px-8 py-8">

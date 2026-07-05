@@ -6,13 +6,11 @@ import { Button } from "@/components/ui/button";
 import { DetailRow } from "@/components/ui/detail-row";
 import { apiFetch, ApiError } from "@/lib/api";
 import { GEOFENCE_TYPE_LABELS, wktToVertexInput } from "@/lib/geofences-schema";
-import { getServerSession } from "@/lib/session";
 
 import { DeleteGeofenceDialog } from "./delete-geofence-dialog";
 import type { Geofence } from "../types";
 
-// Geofence detail — ADR-0030 G3 (read path). Server-rendered shell (auth
-// gate via getServerSession; redirect to /login if absent); fetches the
+// Geofence detail — ADR-0030 G3 (read path). Server-rendered shell (the (app) layout provides the auth gate); fetches the
 // geofence via apiFetch and surfaces 404 through Next.js's notFound() route.
 // Mirrors apps/web/src/app/jobs/[id]/page.tsx and the customers detail page
 // in shape.
@@ -47,11 +45,6 @@ function formatTimestamp(iso: string | null): string {
 export default async function GeofenceDetailPage({
   params,
 }: DetailPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const { id } = await params;
 
   let geofence: Geofence;

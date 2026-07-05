@@ -2,15 +2,13 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { apiFetch, ApiError } from "@/lib/api";
-import { getServerSession } from "@/lib/session";
 
 import {
   CreateServiceScheduleForm,
   type ScheduleVehicleOption,
 } from "./create-service-schedule-form";
 
-// New service schedule — ADR-0037 B5 (write path). Server-rendered shell (auth
-// gate via getServerSession; redirect to /login if absent) wrapping the
+// New service schedule — ADR-0037 B5 (write path). Server-rendered shell (the (app) layout provides the auth gate) wrapping the
 // client-side form. The form calls createServiceScheduleAction at ../actions.ts
 // which POSTs to the API and redirects to /service-schedules/<id> on success.
 //
@@ -33,11 +31,6 @@ interface VehiclesListResponse {
 }
 
 export default async function NewServiceSchedulePage(): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   let vehicles: ScheduleVehicleOption[] = [];
   try {
     const response = await apiFetch<VehiclesListResponse>(

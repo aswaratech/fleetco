@@ -3,7 +3,6 @@ import { redirect } from "next/navigation";
 import { Breadcrumb } from "@/components/ui/breadcrumb";
 import { apiFetch, ApiError } from "@/lib/api";
 import { formatNepaliDate } from "@/lib/nepali-date";
-import { getServerSession } from "@/lib/session";
 
 import { ChatClient } from "./chat-client";
 import type { AgentConversationsListResponse, AgentTranscript, ConversationRailRow } from "./types";
@@ -29,11 +28,6 @@ interface ChatPageProps {
 export default async function ChatPage({
   searchParams,
 }: ChatPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const params = await searchParams;
   const selectedId = typeof params.c === "string" && params.c !== "" ? params.c : null;
 

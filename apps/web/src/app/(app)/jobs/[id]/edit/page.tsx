@@ -2,7 +2,6 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
 import { apiFetch, ApiError } from "@/lib/api";
-import { getServerSession } from "@/lib/session";
 
 import type { JobDetail } from "../../types";
 import { EditJobForm } from "./edit-job-form";
@@ -28,11 +27,6 @@ interface EditPageProps {
 }
 
 export default async function EditJobPage({ params }: EditPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const { id } = await params;
 
   let job: JobDetail;

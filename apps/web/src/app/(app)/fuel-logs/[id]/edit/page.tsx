@@ -2,7 +2,6 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
 import { apiFetch, ApiError } from "@/lib/api";
-import { getServerSession } from "@/lib/session";
 
 import type { FuelLogDetail } from "../../types";
 import { EditFuelLogForm } from "./edit-fuel-log-form";
@@ -50,11 +49,6 @@ interface EditPageProps {
 export default async function EditFuelLogPage({
   params,
 }: EditPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const { id } = await params;
 
   let fuelLog: FuelLogDetail;

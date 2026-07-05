@@ -2,13 +2,11 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { apiFetch, ApiError } from "@/lib/api";
-import { getServerSession } from "@/lib/session";
 
 import { CreateFuelLogForm } from "./create-fuel-log-form";
 
 // New fuel log — iter 20 of the Fuel-logs slice (write path). Server-
-// rendered shell (auth gate via getServerSession; redirect to /login
-// if absent) wrapping the client-side form. The form itself calls the
+// rendered shell (the (app) layout provides the auth gate) wrapping the client-side form. The form itself calls the
 // createFuelLogAction at ../actions.ts which POSTs to the API and
 // redirects to /fuel-logs/<id> on success.
 //
@@ -54,11 +52,6 @@ interface TripsListResponse {
 }
 
 export default async function NewFuelLogPage(): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   // Fetch active vehicles (for the required picker) and all trips
   // (for the optional trip picker). Sort vehicles by registration
   // ascending so the picker is alphabetical. Trips are sorted by

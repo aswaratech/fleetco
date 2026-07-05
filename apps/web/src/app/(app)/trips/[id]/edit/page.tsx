@@ -2,7 +2,6 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
 import { apiFetch, ApiError } from "@/lib/api";
-import { getServerSession } from "@/lib/session";
 
 import type { TripDetail, VehicleMeterType } from "../../types";
 import { EditTripForm } from "./edit-trip-form";
@@ -66,11 +65,6 @@ async function fetchActiveDrivers(): Promise<ActiveDriver[]> {
 }
 
 export default async function EditTripPage({ params }: EditPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const { id } = await params;
 
   let trip: TripDetail;

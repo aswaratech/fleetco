@@ -8,7 +8,6 @@ import { DetailRow } from "@/components/ui/detail-row";
 import { apiFetch, ApiError } from "@/lib/api";
 import { formatNepaliDate } from "@/lib/nepali-date";
 import { formatNpr } from "@/lib/money";
-import { getServerSession } from "@/lib/session";
 import { formatHours, formatKm } from "@/lib/units";
 
 import { DeleteServiceRecordDialog } from "./delete-service-record-dialog";
@@ -52,11 +51,6 @@ function formatTimestamp(iso: string | null): string {
 export default async function ServiceRecordDetailPage({
   params,
 }: DetailPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const { id } = await params;
 
   let record: ServiceRecord;

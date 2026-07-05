@@ -17,7 +17,6 @@ import {
 import { apiFetch, ApiError } from "@/lib/api";
 import { complianceBadgeState } from "@/lib/compliance";
 import { nextDueForSchedule, serviceScheduleState } from "@/lib/maintenance";
-import { getServerSession } from "@/lib/session";
 import { formatHours, formatKm } from "@/lib/units";
 import {
   INSURANCE_TYPE_LABELS,
@@ -182,7 +181,7 @@ function ServiceStatusCell({
 }
 
 // Vehicle detail — iter 3 of the Vehicles slice. Server-rendered shell
-// (auth gate via getServerSession; redirect to /login if absent); fetches
+// (the (app) layout provides the auth gate); fetches
 // the vehicle via apiFetch and surfaces 404 through Next.js's notFound()
 // route so /vehicles/<bogus-id> renders the framework's standard
 // not-found page. Edit and Delete CTAs sit in the page header; the
@@ -261,11 +260,6 @@ function ComplianceExpiry({ iso }: { iso: string | null }): React.ReactElement {
 export default async function VehicleDetailPage({
   params,
 }: DetailPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const { id } = await params;
 
   let vehicle: Vehicle;

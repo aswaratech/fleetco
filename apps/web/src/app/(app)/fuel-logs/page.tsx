@@ -16,7 +16,6 @@ import {
 } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
 import { formatNpr } from "@/lib/money";
-import { getServerSession } from "@/lib/session";
 import { formatLiters } from "@/lib/units";
 
 import { FuelLogsFilters } from "./fuel-logs-filters";
@@ -68,11 +67,6 @@ function single(value: string | string[] | undefined): string | undefined {
 export default async function FuelLogsPage({
   searchParams,
 }: FuelLogsPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const params = await searchParams;
   const startDate = single(params.startDate);
   const endDate = single(params.endDate);

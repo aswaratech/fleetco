@@ -15,7 +15,6 @@ import {
 } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
 import { DRIVER_STATUS_LABELS, LICENSE_CLASS_LABELS } from "@/lib/drivers-schema";
-import { getServerSession } from "@/lib/session";
 import { formatHours } from "@/lib/units";
 
 import { TRIP_STATUS_LABELS, type TripListItem, type TripStatus } from "../../trips/types";
@@ -65,7 +64,7 @@ interface DriverStatsResponse {
 const RECENT_TRIPS_LIMIT = 10;
 
 // Driver detail — iter 6 of the Drivers slice. Server-rendered shell
-// (auth gate via getServerSession; redirect to /login if absent);
+// (the (app) layout provides the auth gate);
 // fetches the driver via apiFetch and surfaces 404 through Next.js's
 // notFound() route so /drivers/<bogus-id> renders the framework's
 // standard not-found page.
@@ -123,11 +122,6 @@ function formatDateTime(iso: string | null): string {
 export default async function DriverDetailPage({
   params,
 }: DetailPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const { id } = await params;
 
   let driver: Driver;

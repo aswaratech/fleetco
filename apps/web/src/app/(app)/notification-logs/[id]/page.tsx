@@ -11,7 +11,6 @@ import {
   stateLabel,
   subjectTypeLabel,
 } from "@/lib/notification-logs";
-import { getServerSession } from "@/lib/session";
 
 import type { NotificationLog } from "../types";
 
@@ -42,11 +41,6 @@ function formatTimestamp(iso: string | null): string {
 export default async function NotificationLogDetailPage({
   params,
 }: DetailPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const { id } = await params;
 
   let log: NotificationLog;

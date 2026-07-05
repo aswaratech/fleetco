@@ -2,7 +2,6 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { apiFetch, ApiError } from "@/lib/api";
-import { getServerSession } from "@/lib/session";
 
 import type { VehicleMeterType } from "../types";
 import { CreateTripForm } from "./create-trip-form";
@@ -73,11 +72,6 @@ async function fetchActiveDrivers(): Promise<ActiveDriver[]> {
 }
 
 export default async function NewTripPage(): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   let vehicles: ActiveVehicle[];
   let drivers: ActiveDriver[];
   try {

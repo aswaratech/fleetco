@@ -3,7 +3,6 @@ import { notFound, redirect } from "next/navigation";
 
 import { apiFetch, ApiError } from "@/lib/api";
 import { formatNepaliDate } from "@/lib/nepali-date";
-import { getServerSession } from "@/lib/session";
 import type { ExpenseLogListItem } from "../../../expense-logs/types";
 
 import {
@@ -43,11 +42,6 @@ interface ExpensesListResponse {
 export default async function EditServiceRecordPage({
   params,
 }: EditPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const { id } = await params;
 
   let record: ServiceRecord;

@@ -20,7 +20,6 @@ import {
   type ScheduleWithReading,
   type ServiceScheduleState,
 } from "@/lib/maintenance";
-import { getServerSession } from "@/lib/session";
 import { formatIntervalLabel } from "@/lib/service-schedules-schema";
 import { formatHours, formatKm } from "@/lib/units";
 
@@ -71,11 +70,6 @@ function StatusBadge({ state }: { state: ServiceScheduleState }): React.ReactEle
 }
 
 export default async function ServiceDuePage(): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   let schedulesResponse: ServiceSchedulesListResponse;
   let vehicles: Vehicle[] = [];
   let vehiclesTotal = 0;

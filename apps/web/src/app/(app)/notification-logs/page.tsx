@@ -21,7 +21,6 @@ import {
   stateLabel,
   subjectTypeLabel,
 } from "@/lib/notification-logs";
-import { getServerSession } from "@/lib/session";
 
 import { NotificationLogsFilters } from "./notification-logs-filters";
 import type { NotificationLog } from "./types";
@@ -102,11 +101,6 @@ function single(value: string | string[] | undefined): string | undefined {
 export default async function NotificationLogsPage({
   searchParams,
 }: NotificationLogsPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const params = await searchParams;
   const subjectType = single(params.subjectType);
   const sortByParam = single(params.sortBy);

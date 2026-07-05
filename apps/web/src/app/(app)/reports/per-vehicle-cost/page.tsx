@@ -13,7 +13,6 @@ import {
 import { apiFetch, ApiError } from "@/lib/api";
 import { formatNpr } from "@/lib/money";
 import { formatNepaliDate } from "@/lib/nepali-date";
-import { getServerSession } from "@/lib/session";
 
 import { PerVehicleCostFilters } from "./per-vehicle-cost-filters";
 import type { PerVehicleCostReport, PerVehicleCostRow } from "./types";
@@ -106,11 +105,6 @@ interface PerVehicleCostPageProps {
 export default async function PerVehicleCostPage({
   searchParams,
 }: PerVehicleCostPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const params = await searchParams;
   const defaults = defaultDateRange();
   const from = single(params.from) ?? defaults.from;

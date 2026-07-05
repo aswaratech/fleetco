@@ -6,13 +6,12 @@ import { Breadcrumb } from "@/components/ui/breadcrumb";
 import { Button } from "@/components/ui/button";
 import { DetailRow } from "@/components/ui/detail-row";
 import { apiFetch, ApiError } from "@/lib/api";
-import { getServerSession } from "@/lib/session";
 
 import { TRIP_STATUS_LABELS, type TripDetail } from "../types";
 import { DeleteTripDialog } from "./delete-trip-dialog";
 
 // Trip detail — iter 8 of the Trips slice. Server-rendered shell
-// (auth gate via getServerSession; redirect to /login if absent);
+// (the (app) layout provides the auth gate);
 // fetches the trip via apiFetch and surfaces 404 through Next.js's
 // notFound() route so /trips/<bogus-id> renders the framework's
 // standard not-found page. Mirrors apps/web/src/app/drivers/[id]/page.tsx
@@ -74,11 +73,6 @@ function formatDistance(start: number | null, end: number | null): string {
 export default async function TripDetailPage({
   params,
 }: DetailPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const { id } = await params;
 
   let trip: TripDetail;

@@ -17,7 +17,6 @@ import {
 } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
 import { worstComplianceState } from "@/lib/compliance";
-import { getServerSession } from "@/lib/session";
 import { VEHICLE_KIND_LABELS, VEHICLE_STATUS_LABELS } from "@/lib/vehicles-schema";
 
 import type { Vehicle } from "./types";
@@ -123,11 +122,6 @@ function single(value: string | string[] | undefined): string | undefined {
 export default async function VehiclesPage({
   searchParams,
 }: VehiclesPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const params = await searchParams;
   const status = single(params.status);
   const kind = single(params.kind);

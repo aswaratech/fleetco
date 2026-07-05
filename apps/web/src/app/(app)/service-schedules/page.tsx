@@ -15,7 +15,6 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
-import { getServerSession } from "@/lib/session";
 import {
   formatIntervalLabel,
   SERVICE_SCHEDULE_STATUS_LABELS,
@@ -79,11 +78,6 @@ function single(value: string | string[] | undefined): string | undefined {
 export default async function ServiceSchedulesPage({
   searchParams,
 }: PageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const params = await searchParams;
   const vehicleId = single(params.vehicleId);
   const status = single(params.status);

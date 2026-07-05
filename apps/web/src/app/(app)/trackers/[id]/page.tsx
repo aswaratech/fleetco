@@ -8,12 +8,10 @@ import { Button } from "@/components/ui/button";
 import { DetailRow } from "@/components/ui/detail-row";
 import { apiFetch, ApiError } from "@/lib/api";
 import { TRACKER_STATUS_BADGE_VARIANTS, TRACKER_STATUS_LABELS } from "@/lib/trackers-schema";
-import { getServerSession } from "@/lib/session";
 
 import type { Tracker } from "../types";
 
-// Tracker detail — ADR-0042 M4 (read path). Server-rendered shell (auth
-// gate via getServerSession; redirect to /login if absent); fetches the
+// Tracker detail — ADR-0042 M4 (read path). Server-rendered shell (the (app) layout provides the auth gate); fetches the
 // tracker via apiFetch and surfaces 404 through Next.js's notFound() route.
 // Mirrors the geofences detail page in shape.
 //
@@ -36,11 +34,6 @@ function formatTimestamp(iso: string | null): string {
 export default async function TrackerDetailPage({
   params,
 }: DetailPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const { id } = await params;
 
   let tracker: Tracker;
