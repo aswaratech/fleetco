@@ -10,6 +10,9 @@ import { AgentToolsModule } from "./agent-tools.module";
 import { DeepSeekClient } from "./deepseek.client";
 import { LlmClient } from "./llm-client";
 import { MockLlmClient } from "./mock-llm.client";
+import { LocalOcrExtractor } from "./vision/local-ocr.extractor";
+import { MockVisionExtractor } from "./vision/mock.vision-extractor";
+import { VisionExtractor } from "./vision/vision-extractor";
 
 // AgentModule — the AI chat agent concern (ADR-0043). A3 gave it the
 // provider-agnostic LlmClient DI seam; A5 (this ticket) composes that seam
@@ -44,6 +47,24 @@ export function llmClientFactory(apiKey: string | undefined): LlmClient {
     : new MockLlmClient();
 }
 
+/**
+ * Choose the VisionExtractor implementation (ADR-0044 c5/Box B): the local
+ * two-stage OCR extractor when the operator has pointed AGENT_OCR_URL at the
+ * sidecar, the unconfigured mock everywhere else — so an attachment turn on
+ * an unconfigured deployment degrades to an honest notice, and UNSETTING the
+ * URL in production is the image feature's kill switch. Exported for the
+ * deterministic factory-selection test, like llmClientFactory above.
+ */
+export function visionExtractorFactory(
+  url: string | undefined,
+  model: string,
+  llm: LlmClient,
+): VisionExtractor {
+  return url !== undefined && url !== ""
+    ? new LocalOcrExtractor(llm, { url, model })
+    : new MockVisionExtractor();
+}
+
 @Module({
   // StorageModule (ADR-0044 V4): the attachment upload/download paths store
   // and fetch bytes through the shared ObjectStorage seam.
@@ -53,6 +74,12 @@ export function llmClientFactory(apiKey: string | undefined): LlmClient {
     {
       provide: LlmClient,
       useFactory: (): LlmClient => llmClientFactory(env.DEEPSEEK_API_KEY),
+    },
+    {
+      provide: VisionExtractor,
+      useFactory: (llm: LlmClient): VisionExtractor =>
+        visionExtractorFactory(env.AGENT_OCR_URL, env.AGENT_OCR_MODEL, llm),
+      inject: [LlmClient],
     },
     AgentService,
     AgentAttachmentsService,

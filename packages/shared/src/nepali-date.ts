@@ -219,3 +219,25 @@ export function bsFiscalYear(iso: string | null | undefined): BsFiscalYear | nul
   const label = `${startYear}-${String(endYear).slice(-2)}`;
   return { startYear, endYear, label };
 }
+
+/**
+ * Convert a printed Bikram Sambat calendar date (a receipt's "2083-03-21",
+ * however delimited: `-`, `/`, or spaces) to the Gregorian ISO "YYYY-MM-DD",
+ * or null when the string is not a convertible BS date (malformed, or outside
+ * the converter's calendar table). The inverse direction of formatNepaliDate,
+ * same nepali-date-converter@3.4.0, same verified-at-install caveats
+ * (ADR-0031/0032). First consumer: the agent's document-extraction mapping
+ * (ADR-0044 V6) — Nepali receipt dates arrive in either calendar and the
+ * structured record stores ISO/AD (CLAUDE.md date rule).
+ */
+export function bsToIsoDate(bs: string | null | undefined): string | null {
+  if (bs === null || bs === undefined) return null;
+  const match = /^(\d{4})[-/ ](\d{1,2})[-/ ](\d{1,2})$/.exec(bs.trim());
+  if (match === null) return null;
+  try {
+    const ad = new NepaliDate(`${match[1]}-${match[2]}-${match[3]}`).getAD();
+    return toGregorian({ y: ad.year, m: ad.month, d: ad.date });
+  } catch {
+    return null;
+  }
+}
