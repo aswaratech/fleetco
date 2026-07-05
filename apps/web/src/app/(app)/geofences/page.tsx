@@ -16,7 +16,6 @@ import {
 } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
 import { GEOFENCE_TYPE_LABELS } from "@/lib/geofences-schema";
-import { getServerSession } from "@/lib/session";
 
 import { GeofencesFilters } from "./geofences-filters";
 import type { Geofence } from "./types";
@@ -90,11 +89,6 @@ function single(value: string | string[] | undefined): string | undefined {
 export default async function GeofencesPage({
   searchParams,
 }: GeofencesPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const params = await searchParams;
   const type = single(params.type);
   const customerId = single(params.customerId);

@@ -6,14 +6,12 @@ import { Button } from "@/components/ui/button";
 import { DetailRow } from "@/components/ui/detail-row";
 import { apiFetch, ApiError } from "@/lib/api";
 import { CUSTOMER_STATUS_LABELS } from "@/lib/customers-schema";
-import { getServerSession } from "@/lib/session";
 
 import type { Customer } from "../types";
 import { DeleteCustomerDialog } from "./delete-customer-dialog";
 
 // Customer detail — iter 15 of the Customers slice. Server-rendered
-// shell (auth gate via getServerSession; redirect to /login if
-// absent); fetches the customer via apiFetch and surfaces 404 through
+// shell (the (app) layout provides the auth gate); fetches the customer via apiFetch and surfaces 404 through
 // Next.js's notFound() route so /customers/<bogus-id> renders the
 // framework's standard not-found page.
 //
@@ -50,11 +48,6 @@ function formatTimestamp(iso: string | null): string {
 export default async function CustomerDetailPage({
   params,
 }: DetailPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const { id } = await params;
 
   let customer: Customer;

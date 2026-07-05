@@ -15,7 +15,6 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
-import { getServerSession } from "@/lib/session";
 
 import { JobsFilters } from "./jobs-filters";
 import { JOB_STATUS_LABELS, type JobListItem, type JobStatus } from "./types";
@@ -68,11 +67,6 @@ function single(value: string | string[] | undefined): string | undefined {
 export default async function JobsPage({
   searchParams,
 }: JobsPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const params = await searchParams;
   const status = single(params.status);
   const customerId = single(params.customerId);

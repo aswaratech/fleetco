@@ -18,7 +18,6 @@ import { apiFetch, ApiError } from "@/lib/api";
 import { CUSTOMER_STATUS_LABELS } from "@/lib/customers-schema";
 import { computeInvoiceTaxPreview } from "@/lib/invoices-tax";
 import { formatNpr } from "@/lib/money";
-import { getServerSession } from "@/lib/session";
 
 import { CancelInvoiceDialog } from "./cancel-invoice-dialog";
 import { CreateCreditNoteButton } from "./create-credit-note-button";
@@ -58,11 +57,6 @@ function formatTimestamp(iso: string | null): string {
 export default async function InvoiceDetailPage({
   params,
 }: DetailPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const { id } = await params;
 
   let invoice: InvoiceDetail;

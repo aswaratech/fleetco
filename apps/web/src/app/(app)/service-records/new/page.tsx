@@ -2,7 +2,6 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { apiFetch, ApiError } from "@/lib/api";
-import { getServerSession } from "@/lib/session";
 import type { ExpenseLogListItem } from "../../expense-logs/types";
 
 import {
@@ -56,11 +55,6 @@ function single(value: string | string[] | undefined): string {
 export default async function NewServiceRecordPage({
   searchParams,
 }: NewPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const params = await searchParams;
   const defaultVehicleId = single(params.vehicleId);
   const defaultScheduleId = single(params.serviceScheduleId);

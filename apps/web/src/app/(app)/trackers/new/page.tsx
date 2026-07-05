@@ -2,12 +2,10 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { apiFetch, ApiError } from "@/lib/api";
-import { getServerSession } from "@/lib/session";
 
 import { CreateTrackerForm } from "./create-tracker-form";
 
-// New tracker — ADR-0042 M4 (write path). Server-rendered shell (auth gate
-// via getServerSession; redirect to /login if absent) wrapping the client-
+// New tracker — ADR-0042 M4 (write path). Server-rendered shell (the (app) layout provides the auth gate) wrapping the client-
 // side form. The form calls createTrackerAction at ../actions.ts which
 // posts to the API and redirects to /trackers/<id> on success.
 //
@@ -33,11 +31,6 @@ interface VehiclesListResponse {
 }
 
 export default async function NewTrackerPage(): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   // Fetch vehicles for the assignment picker, by registration. A 401
   // redirects; any other failure degrades to an empty list (spare
   // registration still works) rather than blocking the whole page.

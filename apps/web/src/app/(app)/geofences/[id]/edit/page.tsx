@@ -2,7 +2,6 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
 import { apiFetch, ApiError } from "@/lib/api";
-import { getServerSession } from "@/lib/session";
 
 import type { Geofence } from "../../types";
 import { EditGeofenceForm } from "./edit-geofence-form";
@@ -38,11 +37,6 @@ interface CustomersListResponse {
 export default async function EditGeofencePage({
   params,
 }: EditPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const { id } = await params;
 
   let geofence: Geofence;

@@ -14,7 +14,6 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
-import { getServerSession } from "@/lib/session";
 
 import { TripsFilters } from "./trips-filters";
 import { TRIP_STATUS_LABELS, type TripListItem, type TripStatus } from "./types";
@@ -101,11 +100,6 @@ function formatDateTime(iso: string | null): string {
 export default async function TripsPage({
   searchParams,
 }: TripsPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const params = await searchParams;
   const status = single(params.status);
   const vehicleId = single(params.vehicleId);

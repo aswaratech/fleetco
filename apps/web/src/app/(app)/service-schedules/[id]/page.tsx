@@ -16,7 +16,6 @@ import {
 } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
 import { nextDueForSchedule, serviceScheduleState } from "@/lib/maintenance";
-import { getServerSession } from "@/lib/session";
 import {
   formatIntervalLabel,
   SERVICE_INTERVAL_TYPE_LABELS,
@@ -83,11 +82,6 @@ function anchorReading(schedule: ServiceSchedule): string {
 export default async function ServiceScheduleDetailPage({
   params,
 }: DetailPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const { id } = await params;
 
   let schedule: ServiceSchedule;

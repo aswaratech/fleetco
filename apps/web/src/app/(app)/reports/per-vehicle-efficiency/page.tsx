@@ -14,7 +14,6 @@ import {
 import { apiFetch, ApiError } from "@/lib/api";
 import { formatNpr } from "@/lib/money";
 import { formatNepaliDate } from "@/lib/nepali-date";
-import { getServerSession } from "@/lib/session";
 import { formatKm, formatKmPerLitre, formatLiters } from "@/lib/units";
 
 import { PerVehicleEfficiencyFilters } from "./per-vehicle-efficiency-filters";
@@ -108,11 +107,6 @@ interface PerVehicleEfficiencyPageProps {
 export default async function PerVehicleEfficiencyPage({
   searchParams,
 }: PerVehicleEfficiencyPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const params = await searchParams;
   const defaults = defaultDateRange();
   const from = single(params.from) ?? defaults.from;

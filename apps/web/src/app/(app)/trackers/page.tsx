@@ -17,7 +17,6 @@ import {
 } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
 import { TRACKER_STATUS_BADGE_VARIANTS, TRACKER_STATUS_LABELS } from "@/lib/trackers-schema";
-import { getServerSession } from "@/lib/session";
 
 import { TrackersFilters } from "./trackers-filters";
 import type { Tracker } from "./types";
@@ -69,11 +68,6 @@ function single(value: string | string[] | undefined): string | undefined {
 export default async function TrackersPage({
   searchParams,
 }: TrackersPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const params = await searchParams;
   const status = single(params.status);
   const vehicleId = single(params.vehicleId);

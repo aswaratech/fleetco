@@ -2,12 +2,10 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { apiFetch, ApiError } from "@/lib/api";
-import { getServerSession } from "@/lib/session";
 
 import { CreateGeofenceForm } from "./create-geofence-form";
 
-// New geofence — ADR-0030 G3 (write path). Server-rendered shell (auth gate
-// via getServerSession; redirect to /login if absent) wrapping the client-
+// New geofence — ADR-0030 G3 (write path). Server-rendered shell (the (app) layout provides the auth gate) wrapping the client-
 // side form. The form calls the createGeofenceAction at ../actions.ts which
 // posts to the API and redirects to /geofences/<id> on success.
 //
@@ -39,11 +37,6 @@ interface CustomersListResponse {
 }
 
 export default async function NewGeofencePage(): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   // Fetch customers for the CUSTOMER_SITE picker, alphabetical. A 401
   // redirects; any other failure degrades to an empty list (DEPOT /
   // ROUTE_CORRIDOR creation still works; CUSTOMER_SITE shows the empty-state

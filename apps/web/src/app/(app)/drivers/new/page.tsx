@@ -1,7 +1,4 @@
 import Link from "next/link";
-import { redirect } from "next/navigation";
-
-import { getServerSession } from "@/lib/session";
 
 import { CreateDriverForm } from "./create-driver-form";
 
@@ -15,11 +12,6 @@ import { CreateDriverForm } from "./create-driver-form";
 // inputs, primary action right-aligned in a footer row (DESIGN.md
 // §"Page header" and §"Inputs and forms").
 export default async function NewDriverPage(): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   return (
     <main className="bg-surface-canvas min-h-svh">
       <div className="mx-auto max-w-2xl space-y-6 px-8 py-8">

@@ -2,7 +2,6 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
 import { apiFetch, ApiError } from "@/lib/api";
-import { getServerSession } from "@/lib/session";
 
 import type { Driver } from "../../types";
 import { EditDriverForm } from "./edit-driver-form";
@@ -23,11 +22,6 @@ interface EditPageProps {
 export default async function EditDriverPage({
   params,
 }: EditPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const { id } = await params;
 
   let driver: Driver;

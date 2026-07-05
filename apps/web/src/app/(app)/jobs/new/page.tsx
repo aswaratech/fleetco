@@ -2,12 +2,11 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { apiFetch, ApiError } from "@/lib/api";
-import { getServerSession } from "@/lib/session";
 
 import { CreateJobForm } from "./create-job-form";
 
 // New job — iter 18 of the Jobs slice (write path). Server-rendered
-// shell (auth gate via getServerSession; redirect to /login if absent)
+// shell (the (app) layout provides the auth gate)
 // wrapping the client-side form. The form itself calls the
 // createJobAction at ../actions.ts which posts to the API and redirects
 // to /jobs/<id> on success.
@@ -43,11 +42,6 @@ interface CustomersListResponse {
 }
 
 export default async function NewJobPage(): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   // Fetch active customers for the picker. Sort by name asc so the
   // dropdown is alphabetical (the API's default sort is createdAt desc
   // which is wrong for a picker). If the customers fetch itself 401s

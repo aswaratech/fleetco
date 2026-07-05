@@ -8,15 +8,13 @@ import { DetailRow } from "@/components/ui/detail-row";
 import { apiFetch, ApiError } from "@/lib/api";
 import { formatNpr } from "@/lib/money";
 import { formatNepaliDate } from "@/lib/nepali-date";
-import { getServerSession } from "@/lib/session";
 import { formatKm, formatLiters } from "@/lib/units";
 
 import type { FuelLogDetail } from "../types";
 import { DeleteFuelLogDialog } from "./delete-fuel-log-dialog";
 
 // Fuel log detail — iter 19 of the Fuel-logs slice (read path). Server-
-// rendered shell (auth gate via getServerSession; redirect to /login
-// if absent); fetches the fuel log via apiFetch and surfaces 404
+// rendered shell (the (app) layout provides the auth gate); fetches the fuel log via apiFetch and surfaces 404
 // through Next.js's notFound() route. Mirrors apps/web/src/app/jobs/
 // [id]/page.tsx and the Trips detail page in shape.
 //
@@ -43,11 +41,6 @@ function formatTimestamp(iso: string | null): string {
 export default async function FuelLogDetailPage({
   params,
 }: DetailPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const { id } = await params;
 
   let fuelLog: FuelLogDetail;

@@ -8,14 +8,12 @@ import { DetailRow } from "@/components/ui/detail-row";
 import { apiFetch, ApiError } from "@/lib/api";
 import { formatNpr } from "@/lib/money";
 import { formatNepaliDate } from "@/lib/nepali-date";
-import { getServerSession } from "@/lib/session";
 
 import { EXPENSE_CATEGORY_LABELS, type ExpenseCategory, type ExpenseLogDetail } from "../types";
 import { DeleteExpenseLogDialog } from "./delete-expense-log-dialog";
 
 // Expense log detail — iter 21 of the Expense-logs slice (read path).
-// Server-rendered shell (auth gate via getServerSession; redirect to
-// /login if absent); fetches the expense log via apiFetch and surfaces
+// Server-rendered shell (the (app) layout provides the auth gate); fetches the expense log via apiFetch and surfaces
 // 404 through Next.js's notFound() route. Mirrors apps/web/src/app/
 // fuel-logs/[id]/page.tsx in shape.
 //
@@ -46,11 +44,6 @@ function formatTimestamp(iso: string | null): string {
 export default async function ExpenseLogDetailPage({
   params,
 }: DetailPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const { id } = await params;
 
   let expense: ExpenseLogDetail;

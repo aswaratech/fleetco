@@ -16,7 +16,6 @@ import {
 } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
 import { formatNpr } from "@/lib/money";
-import { getServerSession } from "@/lib/session";
 
 import { ExpenseLogsFilters } from "./expense-logs-filters";
 import { EXPENSE_CATEGORY_LABELS, type ExpenseCategory, type ExpenseLogListItem } from "./types";
@@ -77,11 +76,6 @@ function single(value: string | string[] | undefined): string | undefined {
 export default async function ExpenseLogsPage({
   searchParams,
 }: ExpenseLogsPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const params = await searchParams;
   const category = single(params.category);
   const startDate = single(params.startDate);

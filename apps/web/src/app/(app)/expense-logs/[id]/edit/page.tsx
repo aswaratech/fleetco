@@ -2,7 +2,6 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
 import { apiFetch, ApiError } from "@/lib/api";
-import { getServerSession } from "@/lib/session";
 
 import type { ExpenseLogDetail } from "../../types";
 import { EditExpenseLogForm } from "./edit-expense-log-form";
@@ -53,11 +52,6 @@ interface EditPageProps {
 export default async function EditExpenseLogPage({
   params,
 }: EditPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const { id } = await params;
 
   let expense: ExpenseLogDetail;

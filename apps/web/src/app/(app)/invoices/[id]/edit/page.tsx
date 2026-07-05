@@ -5,7 +5,6 @@ import { Button } from "@/components/ui/button";
 import { apiFetch, ApiError } from "@/lib/api";
 import { computeInvoiceTaxPreview } from "@/lib/invoices-tax";
 import { paisaToRupeesInput } from "@/lib/money";
-import { getServerSession } from "@/lib/session";
 
 import { BuildFromJobForm, type TripOption } from "./build-from-job-form";
 import { EditInvoiceHeaderForm } from "./edit-invoice-header-form";
@@ -43,11 +42,6 @@ function isoToDay(iso: string | null): string {
 export default async function EditInvoicePage({
   params,
 }: EditPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const { id } = await params;
 
   let invoice: InvoiceDetail;

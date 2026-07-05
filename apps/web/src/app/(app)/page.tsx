@@ -3,7 +3,6 @@ import { redirect } from "next/navigation";
 import { NepaliDate } from "@/components/nepali-date";
 import { ApiError } from "@/lib/api";
 import { loadDashboard, type DashboardData } from "@/lib/dashboard";
-import { getServerSession } from "@/lib/session";
 
 import { ActiveTripsCard } from "./_dashboard/active-trips-card";
 import { ComplianceCard } from "./_dashboard/compliance-card";
@@ -20,14 +19,12 @@ import { ThisMonthCostCard } from "./_dashboard/this-month-cost-card";
 // is the operator's instrument panel: what to see and act on first, composed
 // entirely from existing operational data (no dashboard-specific backend).
 //
-// Server component behind the auth gate. The shape mirrors every Phase-1 list
-// page (apps/web/src/app/vehicles/page.tsx):
-//
-//   1. getServerSession() → redirect("/login") for the unauthenticated path.
-//   2. loadDashboard() (D1's data layer) inside a try/catch that maps an
-//      ApiError 401 → redirect("/login") and rethrows anything else. The
-//      redirect()'s internal throw must NOT be swallowed, so it is called
-//      from the catch body, never wrapped in a second try.
+// Server component; the (app) layout provides the auth gate (session check +
+// /me role fetch), so the page's own defense is the data-fetch 401 mapping:
+// loadDashboard() (D1's data layer) runs inside a try/catch that maps an
+// ApiError 401 → redirect("/login") and rethrows anything else. The
+// redirect()'s internal throw must NOT be swallowed, so it is called from the
+// catch body, never wrapped in a second try.
 //
 // Zone A is the six overview cards (the compliance headline spans full width);
 // Zone B is the quick-links strip, now sourced from the shared nav model
@@ -38,11 +35,6 @@ import { ThisMonthCostCard } from "./_dashboard/this-month-cost-card";
 // error boundary (error.tsx) round out the surface's states.
 
 export default async function HomePage(): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   let data: DashboardData;
   try {
     data = await loadDashboard();

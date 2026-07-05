@@ -104,14 +104,6 @@ This section lists active debt entries.
 - **Estimate to discharge:** ~1–2 hours — one consolidated `chore(deps)` bump PR for the orchestration cluster + root dev alerts (behind CI), plus a mobile-side bump PR (its own lockfile, Node 22). Re-run the alerts query after each to confirm the count drops.
 - **Revisit when:** any of: (a) an alert escalates to a runtime-facing package in `apps/api` or `apps/web` (treat as deploy-blocking, as multer was); (b) the count grows materially; (c) the operator wants a clean Dependabot dashboard before the first deploy.
 
-### 52 pages under `(app)` still carry redundant per-page session gates the shell layout already provides
-
-- **What is owed:** Remove the per-page `getServerSession` + redirect blocks from the pages under `apps/web/src/app/(app)/` (52 files as of 2026-07-02). Since UX-uplift T4, `apps/web/src/app/(app)/layout.tsx` runs the single server-side auth gate (session check + `/me` role fetch) for every route in the group, so the per-page copies are dead weight: duplicated logic that must be kept consistent for no behavioral gain.
-- **Where surfaced:** The T4 shell ticket left them in place for a null-diff migration and its layout comment claimed "consolidating the redundant per-page redirects is a tracked follow-up (docs/tech-debt.md)" — but no entry was ever written. The 2026-07-02 audit found the stale pointer (a comment citing a tech-debt entry that did not exist — the exact stale-memory failure CLAUDE.md Part 1 names); this entry makes the comment true.
-- **Why accepted now:** Pure cleanup with zero behavior change; 52 files of mechanical edits are better batched than dribbled, and the double gate is harmless (belt-and-suspenders, slightly slower per render).
-- **Estimate to discharge:** ~1–2 hours — mechanical removal across the 52 files, verify the layout gate covers every route (it does by construction: the group layout wraps all of them), web gates green.
-- **Revisit when:** any of: (a) UX-uplift Phase 2 (surface consistency) starts and touches these pages anyway; (b) a new page copies the dead pattern forward (discharge then, before the count grows); (c) someone measures the double session fetch as a real per-render cost.
-
 ### Driver-app D3→D4 build-path decision (EAS vs local prebuild) + the promised expo-doctor cadence — owed when D4–D6 resume
 
 - **What is owed:** Two ADR-0033 commitments that came due at the D3→D4 boundary and were recorded nowhere actionable: (1) the **EAS-vs-local-prebuild device-build decision** — ADR-0033 c7 defers the choice and its operator/cost commitment "to the D3→D4 boundary (tech-debt)", and D3 shipped 2026-06-16, so the boundary is reached; D4 (foreground GPS) and especially D5 (background location + SQLCipher, neither bundled in Expo Go) are hard-blocked on a real device-build path; (2) the **expo-doctor / expo prebuild vetting cadence** ADR-0033 c4 says "run nightly/manually" — no such procedure exists anywhere, so a New-Architecture-incompatible dependency would first surface at the (unbuilt) prebuild step.
@@ -147,6 +139,10 @@ This section lists active debt entries.
 ## Paid-off debt
 
 This section is an archive of debts that have been discharged. When an active entry is resolved, it moves here with a note about the PR that resolved it and the date. The archive exists so that future readers can see what kinds of debt the project tends to accumulate and what kinds of fixes tend to discharge them, which is itself a piece of organizational learning.
+
+### Redundant per-page session gates under `(app)` removed — paid off 2026-07-05
+
+- **Discharged in:** `chore/session-gate-cleanup`. The entry's Revisit-when (b) had fired: the count drifted from 52 (2026-07-02) to **58** because the ADR-0042 `/map` page and the ADR-0043 `/chat` + `/agent/activity` pages copied the dead pattern forward — exactly the discharge-before-the-count-grows scenario the entry named. All 58 per-page `const session = await getServerSession(); if (!session) redirect("/login")` blocks (each verified gate-only — no page consumed the session object) and their `@/lib/session` imports were removed; four pages that used `redirect` only in the gate (`customers/new`, `drivers/new`, `vehicles/new`, `reports`) also dropped the orphaned `next/navigation` import. `apps/web/src/app/(app)/layout.tsx` remains the single auth gate (session check + `/me` role fetch); each data-fetching page's ApiError-401 → `/login` catch was deliberately left in place — it guards mid-session expiry during a fetch, a different concern the layout gate does not cover. The layout's "tracked follow-up" comment and the stale per-page "auth gate via getServerSession" comments were updated in the same change.
 
 ### Secret scanning + push protection unavailable at plan tier — paid off 2026-07-02 (enabled when the repo went public)
 

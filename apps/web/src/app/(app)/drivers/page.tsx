@@ -16,7 +16,6 @@ import {
 } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
 import { DRIVER_STATUS_LABELS, LICENSE_CLASS_LABELS } from "@/lib/drivers-schema";
-import { getServerSession } from "@/lib/session";
 
 import { DriversFilters } from "./drivers-filters";
 import type { Driver } from "./types";
@@ -81,11 +80,6 @@ function single(value: string | string[] | undefined): string | undefined {
 export default async function DriversPage({
   searchParams,
 }: DriversPageProps): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   const params = await searchParams;
   const status = single(params.status);
   const licenseClass = single(params.licenseClass);

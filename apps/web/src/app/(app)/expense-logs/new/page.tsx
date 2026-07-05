@@ -2,13 +2,11 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { apiFetch, ApiError } from "@/lib/api";
-import { getServerSession } from "@/lib/session";
 
 import { CreateExpenseLogForm } from "./create-expense-log-form";
 
 // New expense log — iter 22 of the Expense-logs slice (write path).
-// Server-rendered shell (auth gate via getServerSession; redirect to
-// /login if absent) wrapping the client-side form. The form itself
+// Server-rendered shell (the (app) layout provides the auth gate) wrapping the client-side form. The form itself
 // calls the createExpenseLogAction at ../actions.ts which POSTs to
 // the API and redirects to /expense-logs/<id> on success.
 //
@@ -58,11 +56,6 @@ interface TripsListResponse {
 }
 
 export default async function NewExpenseLogPage(): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   // Fetch active vehicles (for the optional picker) and all trips
   // (for the optional trip picker). Sort vehicles by registration
   // ascending so the picker is alphabetical. Trips are sorted by

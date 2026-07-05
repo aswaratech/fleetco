@@ -2,7 +2,6 @@ import { redirect } from "next/navigation";
 
 import { Breadcrumb } from "@/components/ui/breadcrumb";
 import { apiFetch, ApiError } from "@/lib/api";
-import { getServerSession } from "@/lib/session";
 
 import { LiveMapLoader } from "./live-map-loader";
 import type { DepotFence, LatestPosition, LatestPositionsResponse } from "./types";
@@ -47,11 +46,6 @@ interface TrackersListResponse {
 }
 
 export default async function MapPage(): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   let positions: LatestPosition[];
   let depots: DepotFence[];
   let trackedVehicleIds: string[];

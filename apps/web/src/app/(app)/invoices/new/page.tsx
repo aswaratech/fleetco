@@ -2,7 +2,6 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { apiFetch, ApiError } from "@/lib/api";
-import { getServerSession } from "@/lib/session";
 
 import { CreateInvoiceForm, type CustomerOption, type JobOption } from "./create-invoice-form";
 
@@ -24,11 +23,6 @@ interface JobsListResponse {
 }
 
 export default async function NewInvoicePage(): Promise<React.ReactElement> {
-  const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
   let customers: CustomerOption[] = [];
   let jobs: JobOption[] = [];
   try {
