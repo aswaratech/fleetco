@@ -2,7 +2,9 @@ import { Module } from "@nestjs/common";
 
 import { env } from "../../config/env";
 import { AuthModule } from "../auth/auth.module";
+import { StorageModule } from "../storage/storage.module";
 import { AgentController } from "./agent.controller";
+import { AgentAttachmentsService } from "./agent-attachments.service";
 import { AgentService } from "./agent.service";
 import { AgentToolsModule } from "./agent-tools.module";
 import { DeepSeekClient } from "./deepseek.client";
@@ -43,7 +45,9 @@ export function llmClientFactory(apiKey: string | undefined): LlmClient {
 }
 
 @Module({
-  imports: [AuthModule, AgentToolsModule],
+  // StorageModule (ADR-0044 V4): the attachment upload/download paths store
+  // and fetch bytes through the shared ObjectStorage seam.
+  imports: [AuthModule, AgentToolsModule, StorageModule],
   controllers: [AgentController],
   providers: [
     {
@@ -51,6 +55,7 @@ export function llmClientFactory(apiKey: string | undefined): LlmClient {
       useFactory: (): LlmClient => llmClientFactory(env.DEEPSEEK_API_KEY),
     },
     AgentService,
+    AgentAttachmentsService,
   ],
   exports: [LlmClient],
 })
