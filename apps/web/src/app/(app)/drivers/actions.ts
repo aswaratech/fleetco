@@ -6,8 +6,10 @@ import { revalidatePath } from "next/cache";
 import { apiFetch, ApiError } from "@/lib/api";
 import {
   CreateDriverFormSchema,
+  LinkDriverLoginFormSchema,
   UpdateDriverFormSchema,
   type CreateDriverFormValues,
+  type LinkDriverLoginFormValues,
   type UpdateDriverFormValues,
 } from "@/lib/drivers-schema";
 
@@ -193,4 +195,66 @@ export async function deleteDriverAction(id: string): Promise<ActionError | neve
 
   revalidatePath("/drivers");
   redirect("/drivers");
+}
+
+export interface ActionSuccess {
+  ok: true;
+  loginEmail: string | null;
+}
+
+// linkDriverLoginAction — POSTs /api/v1/drivers/:id/login-link (ADR-0034
+// c8's write path: linking a Driver roster row to its mobile-app login).
+// Unlike create/update/delete above, success does NOT redirect — the admin
+// stays on the driver detail page and sees an inline "Linked to x@y.com"
+// confirmation, since linking is an independent action alongside the read-
+// only fields, not a form the operator navigates away from.
+export async function linkDriverLoginAction(
+  driverId: string,
+  values: LinkDriverLoginFormValues,
+): Promise<ActionSuccess | ActionError> {
+  const parsed = LinkDriverLoginFormSchema.safeParse(values);
+  if (!parsed.success) {
+    const issues = parsed.error.issues
+      .map((issue) => `${issue.path.join(".") || "form"}: ${issue.message}`)
+      .join("; ");
+    return { ok: false, message: issues, status: 400, field: "email" };
+  }
+
+  try {
+    await apiFetch<unknown>(`/api/v1/drivers/${driverId}/login-link`, {
+      method: "POST",
+      json: { email: parsed.data.email },
+    });
+  } catch (error) {
+    if (error instanceof ApiError) {
+      // This endpoint only ever validates `email` — no message-pattern-
+      // matching ambiguity like the two-FK fuel-logs case, so every error
+      // (404 unknown email, 400 wrong role, 409 already linked) maps here.
+      return { ok: false, message: error.message, status: error.status, field: "email" };
+    }
+    return { ok: false, message: "Could not reach the FleetCo API. Try again.", status: 0 };
+  }
+
+  revalidatePath("/drivers");
+  revalidatePath(`/drivers/${driverId}`);
+  return { ok: true, loginEmail: parsed.data.email };
+}
+
+// unlinkDriverLoginAction — DELETEs /api/v1/drivers/:id/login-link.
+// Idempotent on the API side; stays on the page like linking above.
+export async function unlinkDriverLoginAction(
+  driverId: string,
+): Promise<ActionSuccess | ActionError> {
+  try {
+    await apiFetch<void>(`/api/v1/drivers/${driverId}/login-link`, { method: "DELETE" });
+  } catch (error) {
+    if (error instanceof ApiError) {
+      return { ok: false, message: error.message, status: error.status };
+    }
+    return { ok: false, message: "Could not reach the FleetCo API. Try again.", status: 0 };
+  }
+
+  revalidatePath("/drivers");
+  revalidatePath(`/drivers/${driverId}`);
+  return { ok: true, loginEmail: null };
 }

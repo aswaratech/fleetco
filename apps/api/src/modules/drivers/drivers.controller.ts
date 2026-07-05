@@ -31,11 +31,13 @@ import { DriversService, LIST_TAKE_DEFAULT } from "./drivers.service";
 import { TripsService } from "../trips/trips.service";
 import {
   CreateDriverSchema,
+  LinkDriverLoginSchema,
   ListDriversQuerySchema,
   UpdateDriverSchema,
   type CreateDriverInput,
   type DriverSortColumn,
   type DriverSortDir,
+  type LinkDriverLoginInput,
   type ListDriversQuery,
   type UpdateDriverInput,
 } from "./drivers.schemas";
@@ -77,6 +79,16 @@ export interface DriverStatsResponse {
     tripId: string;
     startedAt: string;
   } | null;
+}
+
+// GET /api/v1/drivers/:id wire shape. `loginEmail` is composed here (not on
+// DriversService.findById, which the agent's get_driver/update_driver tools
+// also call) so this addition is invisible to the agent tool surface — see
+// the login-link routes below for why: identity-linking is deliberately
+// excluded from the conversational agent (ADR-0043 c3, "user/role
+// management"). Null when the driver has no linked login.
+export interface DriverResponse extends Driver {
+  loginEmail: string | null;
 }
 
 // Route prefix: `api/v1/drivers`. Same versioning convention as
@@ -143,12 +155,14 @@ export class DriversController {
   }
 
   @Get(":id")
-  async getById(@Param("id") id: string): Promise<Driver> {
+  async getById(@Param("id") id: string): Promise<DriverResponse> {
     const driver = await this.drivers.findById(id);
     if (!driver) {
       throw new NotFoundException(`Driver ${id} not found`);
     }
-    return driver;
+    const loginEmail =
+      driver.userId !== null ? await this.drivers.findLinkedLoginEmail(driver.userId) : null;
+    return { ...driver, loginEmail };
   }
 
   /**
@@ -255,5 +269,40 @@ export class DriversController {
     if (!deleted) {
       throw new NotFoundException(`Driver ${id} not found`);
     }
+  }
+
+  /**
+   * Link this Driver to an existing DRIVER-role User login by email — the
+   * write path ADR-0034 c8 left open, closing the gap where
+   * `Driver.userId` (what `DriverScopeService.resolveOwnDriverId` reads for
+   * own-record trip/fuel-log scoping) had no writer anywhere in the app.
+   *
+   * Gated by `users:manage` (method-level, overriding this controller's
+   * class-level `drivers:*`) rather than the shared operational floor:
+   * deciding which login sees which driver's data is identity/account
+   * administration (ADR-0028's capability table reserves `users:manage` for
+   * exactly this class of action), not ordinary Driver field editing.
+   * OFFICE_STAFF holds `drivers:*` but not `users:manage`, so this route is
+   * ADMIN-only — mirrors GeofencesController's read/write capability split.
+   */
+  @Post(":id/login-link")
+  @RequirePermission("users:manage")
+  async linkLogin(
+    @Param("id") id: string,
+    @Body(new ZodValidationPipe(LinkDriverLoginSchema)) body: LinkDriverLoginInput,
+  ): Promise<Driver> {
+    return this.drivers.linkLogin(id, body.email);
+  }
+
+  /**
+   * Unlink this Driver from whatever login it is linked to, if any —
+   * idempotent, same `users:manage` gate as linking above. 204 (no body),
+   * the aggregate-DELETE convention every prior slice uses.
+   */
+  @Delete(":id/login-link")
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @RequirePermission("users:manage")
+  async unlinkLogin(@Param("id") id: string): Promise<void> {
+    await this.drivers.unlinkLogin(id);
   }
 }

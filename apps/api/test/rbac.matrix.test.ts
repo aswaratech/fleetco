@@ -41,6 +41,7 @@ import { AgentController } from "../src/modules/agent/agent.controller";
 import { AuthController } from "../src/modules/auth/auth.controller";
 import { CustomersController } from "../src/modules/customers/customers.controller";
 import { DriversController } from "../src/modules/drivers/drivers.controller";
+import { DriversService } from "../src/modules/drivers/drivers.service";
 import { ExpenseLogsController } from "../src/modules/expense-logs/expense-logs.controller";
 import { FuelLogsController } from "../src/modules/fuel-logs/fuel-logs.controller";
 import { InvoicesController } from "../src/modules/invoices/invoices.controller";
@@ -181,6 +182,19 @@ const TRACKERS_HANDLER_TABLE: readonly [string, Capability][] = [
   ["update", "trackers:write"],
 ];
 
+// DriversController's two login-link routes (2026-07-05, ADR-0034 c8)
+// override the class-level `drivers:*` with `users:manage`: deciding which
+// login sees which driver's own-record-scoped data is identity/account
+// administration, not ordinary Driver field editing — OFFICE_STAFF holds
+// `drivers:*` but not `users:manage`, so these two routes are ADMIN-only
+// even though the rest of DriversController is on the shared operational
+// floor. Every other DriversController route stays under the class-level
+// token (CLASS_TOKEN_TABLE above) — only these two are listed here.
+const DRIVERS_LOGIN_LINK_HANDLER_TABLE: readonly [string, Capability][] = [
+  ["linkLogin", "users:manage"],
+  ["unlinkLogin", "users:manage"],
+];
+
 describe("controller wiring (reflection over guard + permission metadata)", () => {
   test.each(CLASS_TOKEN_TABLE)(
     "%s requires its capability at class level",
@@ -229,6 +243,15 @@ describe("controller wiring (reflection over guard + permission metadata)", () =
     expect(proto.delete).toBeUndefined();
   });
 
+  test.each(DRIVERS_LOGIN_LINK_HANDLER_TABLE)(
+    "DriversController.%s requires %s (method-level override of the class token)",
+    (method, token) => {
+      const handler: unknown = DriversController.prototype[method as keyof DriversController];
+      expect(typeof handler).toBe("function");
+      expect(Reflect.getMetadata(REQUIRE_PERMISSION_KEY, handler as object)).toBe(token);
+    },
+  );
+
   test("GET /me stays capability-free — any authenticated role reads its own role", () => {
     expect(Reflect.getMetadata(REQUIRE_PERMISSION_KEY, AuthController)).toBeUndefined();
     expect(
@@ -268,13 +291,16 @@ describe("RBAC HTTP matrix (real AuthGuard + RolesGuard over gated controllers)"
   let app: INestApplication;
   let baseUrl: string;
   let linkedDriverUserId: string;
+  let loginLinkDriverId: string;
+  let unlinkedDriverLoginEmail: string;
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
-      controllers: [VehiclesController, TripsController],
+      controllers: [VehiclesController, TripsController, DriversController],
       providers: [
         VehiclesService,
         TripsService,
+        DriversService,
         DriverScopeService,
         PrismaService,
         AuthGuard,
@@ -302,6 +328,17 @@ describe("RBAC HTTP matrix (real AuthGuard + RolesGuard over gated controllers)"
     const adminId = await seedUser(prisma);
     linkedDriverUserId = await seedUser(prisma, UserRole.DRIVER);
     await seedDriver(prisma, adminId, { userId: linkedDriverUserId });
+
+    // A second, UNLINKED driver + an unlinked DRIVER-role login, for the
+    // login-link route's allow/deny pair below (a real target so the
+    // ADMIN-succeeds case actually reaches 201, not a 404 for lack of one).
+    const loginLinkDriver = await seedDriver(prisma, adminId, { licenseNumber: "LIC-RBAC-LINK" });
+    loginLinkDriverId = loginLinkDriver.id;
+    const unlinkedLoginUserId = await seedUser(prisma, UserRole.DRIVER);
+    const unlinkedLogin = await prisma.user.findUniqueOrThrow({
+      where: { id: unlinkedLoginUserId },
+    });
+    unlinkedDriverLoginEmail = unlinkedLogin.email;
   });
 
   afterAll(async () => {
@@ -313,6 +350,23 @@ describe("RBAC HTTP matrix (real AuthGuard + RolesGuard over gated controllers)"
     if (role !== undefined) headers["x-test-role"] = role;
     if (userId !== undefined) headers["x-test-user"] = userId;
     const res = await fetch(`${baseUrl}${path}`, { headers });
+    return res.status;
+  }
+
+  async function post(
+    path: string,
+    body: unknown,
+    role?: string,
+    userId?: string,
+  ): Promise<number> {
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (role !== undefined) headers["x-test-role"] = role;
+    if (userId !== undefined) headers["x-test-user"] = userId;
+    const res = await fetch(`${baseUrl}${path}`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
     return res.status;
   }
 
@@ -341,5 +395,28 @@ describe("RBAC HTTP matrix (real AuthGuard + RolesGuard over gated controllers)"
     // service-layer own-record predicate — proving both layers are live and
     // ordered as designed (gate = operation class, scope = records).
     expect(await get("/api/v1/trips", UserRole.DRIVER, "user_rbac_unlinked")).toBe(403);
+  });
+
+  test("OFFICE_STAFF on POST /drivers/:id/login-link → 403 — users:manage, not drivers:*, gates this route", async () => {
+    // OFFICE_STAFF holds drivers:* (the rest of DriversController) but not
+    // users:manage — the route gate must reject before the body/service
+    // layer ever runs, which is why an arbitrary body is fine here.
+    expect(
+      await post(
+        `/api/v1/drivers/${loginLinkDriverId}/login-link`,
+        { email: unlinkedDriverLoginEmail },
+        UserRole.OFFICE_STAFF,
+      ),
+    ).toBe(403);
+  });
+
+  test("ADMIN on POST /drivers/:id/login-link → 201 — the users:manage grant holds", async () => {
+    expect(
+      await post(
+        `/api/v1/drivers/${loginLinkDriverId}/login-link`,
+        { email: unlinkedDriverLoginEmail },
+        UserRole.ADMIN,
+      ),
+    ).toBe(201);
   });
 });
