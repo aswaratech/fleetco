@@ -96,3 +96,13 @@ Per ADR-0043 c6: DeepSeek processes and stores data in the PRC and may use input
 - **An undo PATCH returns 409** → a uniqueness collision with a row created since (see caveats).
 - **An action row with no conversation link** → its transcript aged past the 180-day prune (`conversationId` is null by design); the row's denormalized fields (tool, args, entity, user, time) are still the complete audit record.
 - **A `status: "flagged"` row on `/agent/activity`** → the ungrounded-claim guard caught the model claiming a write its own tool calls this turn don't support (see the Operational watch paragraph above); the message it flagged is preserved verbatim in the transcript with a system notice appended underneath it. No data was written — that is exactly what the guard verified before flagging.
+
+## The OCR sidecar — image extraction (ADR-0044)
+
+Photo attachments in `/chat` are processed in two local-first stages (ADR-0044 Box B): the image transcribes on a **self-hosted OCR sidecar** (`AGENT_OCR_URL`, an OpenAI-compatible llama.cpp endpoint serving the pinned GGUF — Docker Model Runner in local dev, a compose sidecar in production), and the transcription structures into typed fields via the existing DeepSeek text client. **Pixels never leave FleetCo infrastructure**; extracted text enters the turn as Tier-2 conversation, like dictation.
+
+- **Kill switch:** unset `AGENT_OCR_URL` (empty value) and recreate the api container — the DI factory binds the unconfigured mock, `/chat` keeps working, and an attachment turn degrades to the honest notice "Image extraction is not configured." Text chat and all tools are unaffected.
+- **Local dev:** `AGENT_OCR_URL=http://localhost:12434/engines/llama.cpp/v1` with Docker Model Runner serving `huggingface.co/sahilchachra/unlimited-ocr-gguf:Q4_K_M` (the V0-pinned quant; verify with `docker model status` / `docker model ls`).
+- **Sizing note (production):** the model needs ~5 GB resident for vision inference (the V0 measurement recorded in ADR-0044 Box B) — the sidecar decision interacts with the VPS size; read the ADR before enabling on the box.
+- **Health:** a failing sidecar surfaces per-turn as "Document extraction failed (ocr_…)" system notices — check the sidecar container/model, not the api. Extraction failures never block text chat.
+- **Verification (after enabling or changing the sidecar):** attach a real receipt photo in `/chat` with no caption → expect the extraction system line, a field-by-field proposal that ASKS before writing, and — after your confirming reply — the created record's action card. The V0 eval checklist (Devanagari quality, per-class verdicts) lives with ADR-0044's Box B annotation.

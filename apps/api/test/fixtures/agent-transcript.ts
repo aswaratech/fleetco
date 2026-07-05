@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   type AgentAction,
+  type AgentAttachment,
   type AgentConversation,
   type AgentMessage,
   type PrismaClient,
@@ -73,6 +74,26 @@ export async function seedAgentAction(
       // on both sides of a cutoff deterministically (Prisma honors an
       // explicit @default value on create, like the conversation helper).
       ...(overrides.createdAt ? { createdAt: overrides.createdAt } : {}),
+    },
+  });
+}
+
+export async function seedAgentAttachment(
+  prisma: PrismaClient,
+  params: { conversationId: string; userId: string } & Partial<
+    Omit<AgentAttachment, "id" | "conversationId" | "userId" | "createdAt" | "updatedAt">
+  >,
+): Promise<AgentAttachment> {
+  return prisma.agentAttachment.create({
+    data: {
+      conversationId: params.conversationId,
+      userId: params.userId,
+      messageId: params.messageId ?? null,
+      r2Key: params.r2Key ?? `agent-attachments/${params.conversationId}/${randomUUID()}.jpg`,
+      contentType: params.contentType ?? "image/jpeg",
+      sizeBytes: params.sizeBytes ?? 123_456,
+      // SHA-256 of the empty string — a stable, obviously-synthetic default.
+      sha256: params.sha256 ?? "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     },
   });
 }

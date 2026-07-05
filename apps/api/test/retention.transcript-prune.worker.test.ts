@@ -5,6 +5,8 @@ import { type Queue } from "bullmq";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "vitest";
 
 import { PrismaService } from "../src/modules/prisma/prisma.service";
+import { MockObjectStorage } from "../src/modules/storage/mock.object-storage";
+import { ObjectStorage } from "../src/modules/storage/object-storage";
 import { QueueModule } from "../src/modules/queue/queue.module";
 import {
   TRANSCRIPT_PRUNE_CRON,
@@ -52,7 +54,12 @@ describe("transcript-prune worker + scheduler (live Redis, ADR-0043 A2)", () => 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
       imports: [QueueModule, BullModule.registerQueue({ name: TRANSCRIPT_PRUNE_QUEUE })],
-      providers: [TranscriptRetentionService, TranscriptPruneProcessor, PrismaService],
+      providers: [
+        TranscriptRetentionService,
+        TranscriptPruneProcessor,
+        PrismaService,
+        { provide: ObjectStorage, useValue: new MockObjectStorage() },
+      ],
     }).compile();
 
     app = moduleRef.createNestApplication({ logger: false });

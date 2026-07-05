@@ -1,6 +1,7 @@
 import { BullModule } from "@nestjs/bullmq";
 import { Module } from "@nestjs/common";
 
+import { StorageModule } from "../storage/storage.module";
 import { RetentionService, TRACES_PRUNE_QUEUE } from "./retention.service";
 import { TracesPruneProcessor } from "./traces-prune.processor";
 import { TRANSCRIPT_PRUNE_QUEUE, TranscriptRetentionService } from "./transcript-retention.service";
@@ -50,6 +51,9 @@ import { TranscriptPruneProcessor } from "./transcript-prune.processor";
   imports: [
     BullModule.registerQueue({ name: TRACES_PRUNE_QUEUE }),
     BullModule.registerQueue({ name: TRANSCRIPT_PRUNE_QUEUE }),
+    // ADR-0044 V3: the transcript prune deletes attachment OBJECTS (via the
+    // shared ObjectStorage seam) before the agent_attachment row cascade.
+    StorageModule,
   ],
   providers: [
     RetentionService,

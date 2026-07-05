@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
+import { Paperclip, X } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -15,8 +16,14 @@ import {
   linkifyAppPaths,
 } from "@/lib/agent-chat";
 
-import { createConversationAction, postTurnAction } from "./actions";
-import type { AgentAction, AgentMessage, AgentTranscript, ConversationRailRow } from "./types";
+import { createConversationAction, postTurnAction, uploadAttachmentAction } from "./actions";
+import type {
+  AgentAction,
+  AgentAttachment,
+  AgentMessage,
+  AgentTranscript,
+  ConversationRailRow,
+} from "./types";
 
 // The chat island (ADR-0043 A6, DESIGN.md §"Agent chat"): the conversation
 // rail, the transcript, and the composer. State model: the server page hands
@@ -34,16 +41,75 @@ interface ChatClientProps {
   transcript: AgentTranscript | null;
 }
 
+/** The pending-chip state: one uploaded-but-unsent photo (ADR-0044 c7). The
+ * chip previews the SERVER's stored copy through the authed proxy route —
+ * exactly the bytes the extraction will read (and no client object-URL
+ * plumbing). */
+interface PendingAttachment {
+  attachment: AgentAttachment;
+}
+
+/** Downscale a picked photo client-side (DESIGN.md §"Agent chat" Attachments):
+ * canvas re-encode to JPEG, longest edge ~2048 px — turns multi-MB phone
+ * photos into upload-friendly bytes. Degrades to the ORIGINAL file when the
+ * browser cannot decode it (the API's 10 MB limit + sniff still govern). */
+async function downscaleImage(file: File): Promise<Blob> {
+  try {
+    const bitmap = await createImageBitmap(file);
+    const longest = Math.max(bitmap.width, bitmap.height);
+    const scale = longest > 2048 ? 2048 / longest : 1;
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(bitmap.width * scale);
+    canvas.height = Math.round(bitmap.height * scale);
+    const context = canvas.getContext("2d");
+    if (context === null) return file;
+    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    bitmap.close();
+    const blob = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob(resolve, "image/jpeg", 0.85),
+    );
+    return blob ?? file;
+  } catch {
+    return file;
+  }
+}
+
+function formatSize(bytes: number): string {
+  return bytes >= 1024 * 1024
+    ? `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+    : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
 export function ChatClient({ rail, transcript }: ChatClientProps): React.ReactElement {
   const router = useRouter();
 
   const [messages, setMessages] = useState<AgentMessage[]>(transcript?.messages ?? []);
+  const [attachments, setAttachments] = useState<AgentAttachment[]>(transcript?.attachments ?? []);
   const [actions, setActions] = useState<AgentAction[]>(transcript?.actions ?? []);
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [pendingAttachment, setPendingAttachment] = useState<PendingAttachment | null>(null);
   const [errorLine, setErrorLine] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  // A conversation created for an upload before the first send: held locally
+  // (no navigation yet — navigating would remount the island and drop the
+  // pending chip); send() completes the ?c= handoff.
+  const [createdConversationId, setCreatedConversationId] = useState<string | null>(null);
 
   const selectedId = transcript?.conversation.id ?? null;
+
+  // Transcript thumbnails: the server's message→attachment join, by id.
+  const attachmentsByMessage = useMemo(() => {
+    const byMessage = new Map<string, AgentAttachment[]>();
+    for (const attachment of attachments) {
+      if (attachment.messageId === null) continue;
+      const list = byMessage.get(attachment.messageId) ?? [];
+      list.push(attachment);
+      byMessage.set(attachment.messageId, list);
+    }
+    return byMessage;
+  }, [attachments]);
 
   // Action cards render under the assistant message whose tool_calls
   // produced them (messageId links the two — the server's join, not a
@@ -59,9 +125,54 @@ export function ChatClient({ rail, transcript }: ChatClientProps): React.ReactEl
     return byMessage;
   }, [actions]);
 
+  /** The conversation to act against, creating one lazily (held locally
+   * until send() completes the ?c= handoff — see createdConversationId). */
+  async function ensureConversationId(): Promise<string | null> {
+    if (selectedId !== null) return selectedId;
+    if (createdConversationId !== null) return createdConversationId;
+    const created = await createConversationAction();
+    if (!created.ok) {
+      setErrorLine(created.message);
+      return null;
+    }
+    setCreatedConversationId(created.conversation.id);
+    return created.conversation.id;
+  }
+
+  async function pickPhoto(file: File): Promise<void> {
+    if (uploading || pending) return;
+    setUploading(true);
+    setErrorLine(null);
+    try {
+      const conversationId = await ensureConversationId();
+      if (conversationId === null) return;
+
+      const blob = await downscaleImage(file);
+      const form = new FormData();
+      form.append("file", blob, "photo.jpg");
+      const result = await uploadAttachmentAction(conversationId, form);
+      if (!result.ok) {
+        setErrorLine(result.message);
+        return;
+      }
+      // Replace any earlier pending photo (one attachment per turn, v1).
+      setPendingAttachment({ attachment: result.attachment });
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current !== null) fileInputRef.current.value = "";
+    }
+  }
+
+  function discardPendingPhoto(): void {
+    setPendingAttachment(null);
+    // The uploaded row stays unclaimed server-side; the 180-day transcript
+    // prune reaps it with its conversation — no delete round-trip needed.
+  }
+
   async function send(): Promise<void> {
     const content = draft.trim();
-    if (content.length === 0 || pending) return;
+    // A photo may travel captionless (ADR-0044 c7).
+    if ((content.length === 0 && pendingAttachment === null) || pending || uploading) return;
     setPending(true);
     setErrorLine(null);
     try {
@@ -69,17 +180,14 @@ export function ChatClient({ rail, transcript }: ChatClientProps): React.ReactEl
       // post into it — the composer works from a blank /chat (the rail's
       // "New conversation" button remains for starting a fresh thread while
       // one is selected).
-      let conversationId = selectedId;
-      if (conversationId === null) {
-        const created = await createConversationAction();
-        if (!created.ok) {
-          setErrorLine(created.message);
-          return;
-        }
-        conversationId = created.conversation.id;
-      }
+      const conversationId = await ensureConversationId();
+      if (conversationId === null) return;
 
-      const result = await postTurnAction(conversationId, content);
+      const result = await postTurnAction(
+        conversationId,
+        content,
+        pendingAttachment?.attachment.id,
+      );
       if (!result.ok) {
         setErrorLine(
           result.status === 409
@@ -90,8 +198,10 @@ export function ChatClient({ rail, transcript }: ChatClientProps): React.ReactEl
       }
 
       setMessages((prior) => [...prior, ...result.turn.messages]);
+      setAttachments((prior) => [...prior, ...result.turn.attachments]);
       setActions((prior) => [...prior, ...result.turn.actions]);
       setDraft("");
+      discardPendingPhoto();
 
       if (selectedId === null) {
         // Land on the new conversation's URL; the server re-render brings
@@ -168,6 +278,7 @@ export function ChatClient({ rail, transcript }: ChatClientProps): React.ReactEl
                 key={message.id}
                 message={message}
                 actions={actionsByMessage.get(message.id) ?? []}
+                attachments={attachmentsByMessage.get(message.id) ?? []}
               />
             ))
           )}
@@ -184,6 +295,32 @@ export function ChatClient({ rail, transcript }: ChatClientProps): React.ReactEl
               {errorLine}
             </p>
           ) : null}
+          {uploading ? <p className="text-text-muted mb-2 text-xs">Uploading photo…</p> : null}
+          {pendingAttachment !== null ? (
+            <div className="border-border-subtle bg-surface-raised mb-2 flex items-center gap-2 rounded border p-2">
+              {/* The chip previews the server's stored copy through the authed
+                  proxy — the exact bytes the extraction will read. The id is
+                  server-generated (never derived from the picked file). */}
+              <img
+                src={`/api/agent-attachments/${pendingAttachment.attachment.id}`}
+                alt="Attached photo (pending)"
+                className="h-10 w-10 rounded object-cover"
+              />
+              <span className="text-text-muted text-xs">
+                Photo · {formatSize(pendingAttachment.attachment.sizeBytes)}
+              </span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                aria-label="Remove the attached photo"
+                onClick={discardPendingPhoto}
+                disabled={pending}
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+          ) : null}
           <Textarea
             value={draft}
             maxLength={AGENT_MESSAGE_MAX_LENGTH}
@@ -198,13 +335,35 @@ export function ChatClient({ rail, transcript }: ChatClientProps): React.ReactEl
             }}
           />
           <div className="mt-2 flex items-center justify-between">
-            <span className="text-text-muted text-xs">
-              Enter to send · Shift+Enter for a new line
-            </span>
+            <div className="flex items-center gap-2">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                className="hidden"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file !== undefined) void pickPhoto(file);
+                }}
+              />
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                aria-label="Attach a photo (fuel or expense receipt, vendor bill, or a vehicle/driver document)"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={pending || uploading}
+              >
+                <Paperclip className="h-4 w-4" />
+              </Button>
+              <span className="text-text-muted text-xs">
+                Enter to send · Shift+Enter for a new line
+              </span>
+            </div>
             <Button
               type="button"
               onClick={() => void send()}
-              disabled={pending || draft.trim() === ""}
+              disabled={pending || uploading || (draft.trim() === "" && pendingAttachment === null)}
             >
               Send
             </Button>
@@ -218,15 +377,35 @@ export function ChatClient({ rail, transcript }: ChatClientProps): React.ReactEl
 function MessageBlock({
   message,
   actions,
+  attachments,
 }: {
   message: AgentMessage;
   actions: AgentAction[];
+  attachments: AgentAttachment[];
 }): React.ReactElement | null {
   if (message.role === "user") {
     return (
       <div className="flex justify-end">
         <div className="border-border-subtle bg-surface-raised max-w-[85%] rounded border p-3 text-sm whitespace-pre-wrap">
-          {message.content}
+          {attachments.map((attachment) => (
+            /* Bounded thumbnail streaming through the authed proxy; opening
+               it is the full view (same route — Tier-2 bytes, no public
+               URL). A captionless photo message renders thumbnail-only. */
+            <a
+              key={attachment.id}
+              href={`/api/agent-attachments/${attachment.id}`}
+              target="_blank"
+              rel="noreferrer"
+              className="mb-2 block"
+            >
+              <img
+                src={`/api/agent-attachments/${attachment.id}`}
+                alt="Attached photo"
+                className="border-border-subtle max-h-48 rounded border object-contain"
+              />
+            </a>
+          ))}
+          {message.content !== "" ? message.content : null}
         </div>
       </div>
     );
