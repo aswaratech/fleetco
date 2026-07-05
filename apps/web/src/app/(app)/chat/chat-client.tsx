@@ -41,11 +41,12 @@ interface ChatClientProps {
   transcript: AgentTranscript | null;
 }
 
-/** The pending-chip state: one uploaded-but-unsent photo (ADR-0044 c7). */
+/** The pending-chip state: one uploaded-but-unsent photo (ADR-0044 c7). The
+ * chip previews the SERVER's stored copy through the authed proxy route —
+ * exactly the bytes the extraction will read (and no client object-URL
+ * plumbing). */
 interface PendingAttachment {
   attachment: AgentAttachment;
-  /** A local object URL for the chip thumbnail — revoked on send/discard. */
-  previewUrl: string;
 }
 
 /** Downscale a picked photo client-side (DESIGN.md §"Agent chat" Attachments):
@@ -155,10 +156,7 @@ export function ChatClient({ rail, transcript }: ChatClientProps): React.ReactEl
         return;
       }
       // Replace any earlier pending photo (one attachment per turn, v1).
-      setPendingAttachment((prior) => {
-        if (prior !== null) URL.revokeObjectURL(prior.previewUrl);
-        return { attachment: result.attachment, previewUrl: URL.createObjectURL(blob) };
-      });
+      setPendingAttachment({ attachment: result.attachment });
     } finally {
       setUploading(false);
       if (fileInputRef.current !== null) fileInputRef.current.value = "";
@@ -166,10 +164,7 @@ export function ChatClient({ rail, transcript }: ChatClientProps): React.ReactEl
   }
 
   function discardPendingPhoto(): void {
-    setPendingAttachment((prior) => {
-      if (prior !== null) URL.revokeObjectURL(prior.previewUrl);
-      return null;
-    });
+    setPendingAttachment(null);
     // The uploaded row stays unclaimed server-side; the 180-day transcript
     // prune reaps it with its conversation — no delete round-trip needed.
   }
@@ -303,10 +298,11 @@ export function ChatClient({ rail, transcript }: ChatClientProps): React.ReactEl
           {uploading ? <p className="text-text-muted mb-2 text-xs">Uploading photo…</p> : null}
           {pendingAttachment !== null ? (
             <div className="border-border-subtle bg-surface-raised mb-2 flex items-center gap-2 rounded border p-2">
-              {/* The chip preview is the local object URL — the server copy
-                  streams through the authed proxy only after it is sent. */}
+              {/* The chip previews the server's stored copy through the authed
+                  proxy — the exact bytes the extraction will read. The id is
+                  server-generated (never derived from the picked file). */}
               <img
-                src={pendingAttachment.previewUrl}
+                src={`/api/agent-attachments/${pendingAttachment.attachment.id}`}
                 alt="Attached photo (pending)"
                 className="h-10 w-10 rounded object-cover"
               />
