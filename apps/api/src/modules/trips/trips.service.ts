@@ -256,12 +256,13 @@ export class TripsService {
   }
 
   /**
-   * Plain Trip lookup without the eager relations — exposed for the
-   * future iter-9 write path's PATCH route (which needs the existing
-   * row but does not need to render the nested objects) and for tests
-   * that want to assert the raw row shape. The Phase-1 service
-   * surface is small enough that exposing both shapes is cheaper than
-   * an internal-only flag on findById.
+   * Plain Trip lookup without the eager relations. Consumers: the
+   * PATCH write path (which needs the existing row but not the nested
+   * objects), the agent's update_trip pre-image capture (ADR-0043
+   * c4b — the raw row is the faithful undo source), and tests that
+   * assert the raw row shape. The service surface is small enough
+   * that exposing both shapes is cheaper than an internal-only flag
+   * on findById.
    */
   async findByIdRaw(id: string): Promise<Trip | null> {
     return this.prisma.trip.findUnique({ where: { id } });
