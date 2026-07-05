@@ -48,6 +48,8 @@ Honest limit: the kill switch stops NEW turns from reaching the provider. It can
 3. **Kill switch**: the reply is the fixed MockLlmClient text naming the missing key — that exact reply in production means the key is unset or typo'd in `/opt/fleetco/.env`.
 4. Open `/agent/activity` and confirm the turn's dispatches (if any) are listed.
 
+> **Run once against a LOCAL stack (2026-07-05):** with a real key in the dev `apps/api/.env`, the real client bound and a two-call turn succeeded end-to-end — `fleet_snapshot` dispatched (34 ms, `succeeded`), a substantive and accurate answer, non-zero token usage on both `AgentMessage` rows, and the dispatch listed on `/agent/activity`. The PRODUCTION run of this procedure — and this file's DRAFT→ACTIVE promotion — still awaits the M1 deploy.
+
 ## Undoing an agent update (the pre-image procedure)
 
 Every agent UPDATE captures the prior row into `AgentAction.previousJson` before executing (ADR-0043 c4b). Undo is **manual in v1 — there is no undo button**; the pre-image is the source, a normal edit is the mechanism.
@@ -83,7 +85,7 @@ Per ADR-0043 c6: DeepSeek processes and stores data in the PRC and may use input
 2. Record the request date and any response below in this section (append, do not overwrite).
 3. This request precedes first production use: the key stays unset until it has been sent (the sequencing ADR-0043's phase-mismatch section commits to).
 
-- Requested: _not yet_ · Response: _—_
+- Requested: **2026-07-05** (submitted by the account owner via DeepSeek's console privacy settings / privacy contact, before the first real prompt egress). · Response: _none yet — best-effort per ADR-0043 c6; append any reply here._
 
 ## What can go wrong
 
