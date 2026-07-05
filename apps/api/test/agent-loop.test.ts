@@ -1,4 +1,4 @@
-import { ConflictException, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ConflictException, NotFoundException } from "@nestjs/common";
 import { Test } from "@nestjs/testing";
 import { UserRole } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
@@ -17,7 +17,14 @@ import {
   type LlmMessage,
 } from "../src/modules/agent/llm-client";
 import { MockLlmClient } from "../src/modules/agent/mock-llm.client";
+import { AgentAttachmentsService } from "../src/modules/agent/agent-attachments.service";
 import { AgentToolRegistry } from "../src/modules/agent/tools/tool-registry";
+import { MockVisionExtractor } from "../src/modules/agent/vision/mock.vision-extractor";
+import {
+  DocumentExtractionSchema,
+  type VisionExtractor,
+} from "../src/modules/agent/vision/vision-extractor";
+import { MockObjectStorage } from "../src/modules/storage/mock.object-storage";
 import { type Actor, DriverScopeService } from "../src/modules/auth/driver-scope.service";
 import { CustomersService } from "../src/modules/customers/customers.service";
 import { DriversService } from "../src/modules/drivers/drivers.service";
@@ -32,6 +39,7 @@ import { ServiceSchedulesService } from "../src/modules/maintenance/service-sche
 import { TripsService } from "../src/modules/trips/trips.service";
 import { VehiclesService } from "../src/modules/vehicles/vehicles.service";
 import { resetDb } from "./db";
+import { seedAgentAttachment } from "./fixtures/agent-transcript";
 import { seedDriver, seedTrip, seedUser, seedVehicle } from "./fixtures/trip";
 
 // The agent turn loop end-to-end (ADR-0043 c4/c5, ticket A5): a REAL
@@ -147,14 +155,24 @@ describe("agent turn loop (real registry + Postgres, MockLlmClient queue)", () =
   let adminId: string;
   let admin: Actor;
 
+  // Attachment plumbing for the V7 flows: a shared recording storage double
+  // behind a REAL AgentAttachmentsService (claims + byte reads are the real
+  // code), plus an injectable vision mock per test.
+  const storage = new MockObjectStorage();
+
   function serviceWith(
     llm: LlmClient,
     budgets: Partial<typeof DEFAULT_AGENT_TURN_BUDGETS> = {},
+    vision: VisionExtractor = new MockVisionExtractor(),
   ): AgentService {
-    return new AgentService(prisma, llm, registry, {
-      ...DEFAULT_AGENT_TURN_BUDGETS,
-      ...budgets,
-    });
+    return new AgentService(
+      prisma,
+      llm,
+      registry,
+      { ...DEFAULT_AGENT_TURN_BUDGETS, ...budgets },
+      new AgentAttachmentsService(prisma, storage),
+      vision,
+    );
   }
 
   beforeAll(async () => {
@@ -708,5 +726,194 @@ describe("agent turn loop (real registry + Postgres, MockLlmClient queue)", () =
     expect(turn.actions[0]?.status).toBe("failed");
     expect(turn.actions[0]?.previousJson).toBeNull();
     expect(turn.actions[0]?.resultEntityType).toBeNull();
+  });
+
+  // --- attachment turns: extract → propose → confirm (ADR-0044 c7, V7) ------
+
+  async function seedStoredAttachment(conversationId: string, userId: string) {
+    const attachment = await seedAgentAttachment(prisma, {
+      conversationId,
+      userId,
+      r2Key: `agent-attachments/${conversationId}/photo.png`,
+      contentType: "image/png",
+    });
+    await storage.put({
+      key: attachment.r2Key,
+      body: Buffer.from("png-bytes"),
+      contentType: "image/png",
+    });
+    return attachment;
+  }
+
+  function receiptExtraction() {
+    return DocumentExtractionSchema.parse({
+      documentType: "fuel_receipt",
+      date: "2080-01-01",
+      dateCalendar: "BS",
+      vendor: "Sajha Petrol Pump",
+      litersMl: 40_000,
+      pricePerLiterPaisa: 16_500,
+      amountPaisa: 660_000,
+      category: null,
+      receiptNumber: "A-1",
+      personName: null,
+      licenseNumber: null,
+      dateOfBirth: null,
+      registrationNumber: null,
+      rawText: "sajha receipt",
+    });
+  }
+
+  test("attachment turn: claim + extraction system message + proposal that ends the turn", async () => {
+    const vision = new MockVisionExtractor({ configured: true, results: [receiptExtraction()] });
+    const mock = new MockLlmClient({
+      results: [
+        textResult(
+          "Fuel receipt: 40 L at Rs 165/L (Rs 6,600) on 2023-04-14 at Sajha Petrol Pump. " +
+            "Which vehicle was this for? Confirm and I will record it with create_fuel_log.",
+        ),
+      ],
+    });
+    const service = serviceWith(mock, {}, vision);
+    const conversation = await service.createConversation(admin);
+    const attachment = await seedStoredAttachment(conversation.id, adminId);
+
+    // A caption-less photo: content "" (the schema's content-or-attachment).
+    const turn = await service.runTurn(conversation.id, "", admin, attachment.id);
+
+    expect(turn.messages.map((m) => m.role)).toEqual(["user", "system", "assistant"]);
+    expect(turn.messages[1]?.content).toContain("Extracted from the attached image");
+    // The mapping rode along: the BS receipt date arrived converted.
+    expect(turn.messages[1]?.content).toContain("2023-04-14");
+    // Claimed onto THIS turn's user message; returned for the thumbnail.
+    expect(turn.attachments).toHaveLength(1);
+    expect(turn.attachments[0]?.messageId).toBe(turn.messages[0]?.id);
+    // No tool ran: the proposal asks, per the extraction prompt rule.
+    expect(turn.actions).toEqual([]);
+    expect(vision.requests).toEqual([{ bytesLength: 9, contentType: "image/png" }]);
+    // The extraction block joined THIS turn's model context as a system entry.
+    const sentRoles = mock.requests[0]?.messages.map((m) => m.role) ?? [];
+    expect(sentRoles.filter((r) => r === "system")).toHaveLength(2); // prompt + extraction
+    // A caption-less first message titles the conversation with the fixed label.
+    expect(turn.conversation.title).toBe("Photo attachment");
+  });
+
+  test("the confirming NEXT turn dispatches the create — the full photo → record arc", async () => {
+    const vehicle = await seedVehicle(prisma, adminId, { registrationNumber: "BA 2 KHA 4455" });
+    const vision = new MockVisionExtractor({ configured: true, results: [receiptExtraction()] });
+    const mock = new MockLlmClient({
+      results: [
+        textResult("Fuel receipt for Rs 6,600 on 2023-04-14. Which vehicle? Confirm to record."),
+        toolCallsResult([
+          {
+            id: "call_fuel",
+            name: "create_fuel_log",
+            args: {
+              vehicleId: vehicle.id,
+              date: "2023-04-14",
+              litersMl: 40_000,
+              pricePerLiterPaisa: 16_500,
+              station: "Sajha Petrol Pump",
+              receiptNumber: "A-1",
+            },
+          },
+        ]),
+        textResult("Recorded. See /fuel-logs for the new entry."),
+      ],
+    });
+    const service = serviceWith(mock, {}, vision);
+    const conversation = await service.createConversation(admin);
+    const attachment = await seedStoredAttachment(conversation.id, adminId);
+
+    await service.runTurn(conversation.id, "", admin, attachment.id);
+    const confirm = await service.runTurn(
+      conversation.id,
+      "Yes — that was BA 2 KHA 4455. Record it.",
+      admin,
+    );
+
+    expect(confirm.actions).toHaveLength(1);
+    expect(confirm.actions[0]?.toolName).toBe("create_fuel_log");
+    expect(confirm.actions[0]?.status).toBe("succeeded");
+    const fuelLog = await prisma.fuelLog.findFirstOrThrow();
+    expect(fuelLog.vehicleId).toBe(vehicle.id);
+    expect(fuelLog.litersMl).toBe(40_000);
+    expect(fuelLog.totalCostPaisa).toBe(660_000); // derived server-side
+  });
+
+  test("an unconfigured extractor degrades to the honest notice; the claim still happens", async () => {
+    const mock = new MockLlmClient({ results: [textResult("Noted — type the details.")] });
+    const service = serviceWith(mock); // default vision: configured=false
+    const conversation = await service.createConversation(admin);
+    const attachment = await seedStoredAttachment(conversation.id, adminId);
+
+    const turn = await service.runTurn(conversation.id, "read this photo", admin, attachment.id);
+
+    expect(turn.messages.map((m) => m.role)).toEqual(["user", "system", "assistant"]);
+    expect(turn.messages[1]?.content).toContain("Image extraction is not configured");
+    expect(turn.attachments[0]?.messageId).toBe(turn.messages[0]?.id);
+  });
+
+  test("an extraction failure degrades to a category notice and the turn continues", async () => {
+    // configured:true with an EMPTY queue → the mock rejects with a
+    // VisionExtractionError("mock_unconfigured") — the failure path's shape.
+    const vision = new MockVisionExtractor({ configured: true, results: [] });
+    const mock = new MockLlmClient({ results: [textResult("Could not read it — type it in?")] });
+    const service = serviceWith(mock, {}, vision);
+    const conversation = await service.createConversation(admin);
+    const attachment = await seedStoredAttachment(conversation.id, adminId);
+
+    const turn = await service.runTurn(conversation.id, "receipt attached", admin, attachment.id);
+
+    expect(turn.messages[1]?.role).toBe("system");
+    expect(turn.messages[1]?.content).toContain("Document extraction failed (mock_unconfigured)");
+    expect(turn.messages.at(-1)?.role).toBe("assistant");
+  });
+
+  test("claim guards: foreign 404; wrong conversation and already-sent 400 — nothing persists", async () => {
+    const service = serviceWith(new MockLlmClient({ results: [] }));
+    const conversation = await service.createConversation(admin);
+
+    // Foreign (another user's attachment) → existence-hiding 404.
+    const strangerId = await seedUser(prisma, UserRole.ADMIN);
+    const strangerConversation = await prisma.agentConversation.create({
+      data: { userId: strangerId },
+    });
+    const foreign = await seedAgentAttachment(prisma, {
+      conversationId: strangerConversation.id,
+      userId: strangerId,
+    });
+    await expect(
+      service.runTurn(conversation.id, "use theirs", admin, foreign.id),
+    ).rejects.toBeInstanceOf(NotFoundException);
+
+    // The acting user's OWN attachment, but on a different conversation → 400.
+    const otherOwn = await service.createConversation(admin);
+    const elsewhere = await seedAgentAttachment(prisma, {
+      conversationId: otherOwn.id,
+      userId: adminId,
+    });
+    const wrongConversation = await service
+      .runTurn(conversation.id, "wrong thread", admin, elsewhere.id)
+      .catch((thrown: unknown) => thrown);
+    expect(wrongConversation).toBeInstanceOf(BadRequestException);
+
+    // Already claimed → 400.
+    const message = await prisma.agentMessage.create({
+      data: { conversationId: conversation.id, role: "user", content: "earlier" },
+    });
+    const claimed = await seedAgentAttachment(prisma, {
+      conversationId: conversation.id,
+      userId: adminId,
+      messageId: message.id,
+    });
+    const alreadySent = await service
+      .runTurn(conversation.id, "resend", admin, claimed.id)
+      .catch((thrown: unknown) => thrown);
+    expect(alreadySent).toBeInstanceOf(BadRequestException);
+
+    // The guard ran before anything persisted for the failing turns: the only
+    // user message is the manually seeded "earlier" row.
+    expect(await prisma.agentMessage.count({ where: { role: "user" } })).toBe(1);
   });
 });

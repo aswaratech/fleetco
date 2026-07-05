@@ -29,6 +29,8 @@ import { PrismaService } from "../src/modules/prisma/prisma.service";
 import { ReportsService } from "../src/modules/reports/reports.service";
 import { ServiceRecordsService } from "../src/modules/maintenance/service-records.service";
 import { ServiceSchedulesService } from "../src/modules/maintenance/service-schedules.service";
+import { MockVisionExtractor } from "../src/modules/agent/vision/mock.vision-extractor";
+import { VisionExtractor } from "../src/modules/agent/vision/vision-extractor";
 import { MockObjectStorage } from "../src/modules/storage/mock.object-storage";
 import { ObjectStorage } from "../src/modules/storage/object-storage";
 import { TripsService } from "../src/modules/trips/trips.service";
@@ -106,6 +108,7 @@ describe("agent attachment endpoints (real guards + Postgres + mock storage, ADR
         { provide: AUTH, useValue: AUTH_STUB },
         { provide: LlmClient, useValue: new MockLlmClient() },
         { provide: ObjectStorage, useValue: storage },
+        { provide: VisionExtractor, useValue: new MockVisionExtractor() },
       ],
     }).compile();
 
