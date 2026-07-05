@@ -2,12 +2,14 @@ import { InjectQueue } from "@nestjs/bullmq";
 import { Injectable, type OnApplicationBootstrap } from "@nestjs/common";
 import { type Queue } from "bullmq";
 
-// PrismaService is injected by NestJS via emitDecoratorMetadata (see
-// apps/api/tsconfig.json); the class reference must remain a value import at
-// runtime so the DI container can resolve it. Same eslint override as every
-// other vertical-slice service.
+// PrismaService and ObjectStorage are injected by NestJS via
+// emitDecoratorMetadata (see apps/api/tsconfig.json); the class references
+// must remain value imports at runtime so the DI container can resolve them.
+// Same eslint override as every other vertical-slice service.
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports
 import { PrismaService } from "../prisma/prisma.service";
+// eslint-disable-next-line @typescript-eslint/consistent-type-imports
+import { ObjectStorage } from "../storage/object-storage";
 
 // The named queue for the AI-agent transcript prune (ADR-0043 commitment 5,
 // ticket A2), on the ADR-0029 per-feature-queue pattern the sibling
@@ -58,6 +60,7 @@ export class TranscriptRetentionService implements OnApplicationBootstrap {
   constructor(
     private readonly prisma: PrismaService,
     @InjectQueue(TRANSCRIPT_PRUNE_QUEUE) private readonly queue: Queue,
+    private readonly storage: ObjectStorage,
   ) {}
 
   /**
@@ -108,11 +111,38 @@ export class TranscriptRetentionService implements OnApplicationBootstrap {
    * counted). No transcript content is ever read here: the prune filters on
    * `updatedAt` only.
    */
-  async prune(now: Date = new Date()): Promise<{ deleted: number; cutoff: Date }> {
+  async prune(
+    now: Date = new Date(),
+  ): Promise<{ deleted: number; cutoff: Date; objectsDeleted: number }> {
     const cutoff = this.computeCutoff(now);
+
+    // Delete stored attachment OBJECTS before the row cascade (ADR-0044 c3:
+    // an attachment is transcript content — its bytes die with the
+    // transcript). Object-first ordering is idempotent under partial failure:
+    // if the row delete below never runs, the next prune re-collects the same
+    // keys, and ObjectStorage.delete on an absent key is a no-op by contract.
+    // Best-effort per the ADR — a failed object delete never blocks the
+    // Tier-2 row prune (the operator belt-and-braces is an R2 lifecycle rule
+    // on the agent-attachments/ prefix). Only the opaque r2Key is read here;
+    // no transcript content.
+    const staleAttachments = await this.prisma.agentAttachment.findMany({
+      where: { conversation: { updatedAt: { lt: cutoff } } },
+      select: { r2Key: true },
+    });
+    let objectsDeleted = 0;
+    for (const { r2Key } of staleAttachments) {
+      try {
+        await this.storage.delete(r2Key);
+        objectsDeleted += 1;
+      } catch {
+        // Best-effort: the failure is visible as objectsDeleted <
+        // collected-count on the worker span; the row prune proceeds.
+      }
+    }
+
     const { count } = await this.prisma.agentConversation.deleteMany({
       where: { updatedAt: { lt: cutoff } },
     });
-    return { deleted: count, cutoff };
+    return { deleted: count, cutoff, objectsDeleted };
   }
 }

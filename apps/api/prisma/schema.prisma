@@ -64,6 +64,7 @@ model User {
   trackerDevicesCreated   TrackerDevice[]     @relation("TrackerDeviceCreatedBy")
   agentConversations      AgentConversation[] @relation("AgentConversationUser")
   agentActions            AgentAction[]       @relation("AgentActionUser")
+  agentAttachments        AgentAttachment[]   @relation("AgentAttachmentUser")
   /// The Driver this login identity is linked to, if any (ADR-0034 c4). A User
   /// with role DRIVER is linked 1:1 to a Driver row via Driver.userId.
   driver                  Driver?             @relation("DriverUser")
@@ -1915,8 +1916,9 @@ model AgentConversation {
   /// alive. See RetentionService.computeTranscriptCutoff.
   updatedAt DateTime @updatedAt
 
-  messages AgentMessage[]
-  actions  AgentAction[]
+  messages    AgentMessage[]
+  actions     AgentAction[]
+  attachments AgentAttachment[]
 
   @@index([userId])
   // The transcript prune's `updatedAt < cutoff` scan.
@@ -1951,7 +1953,8 @@ model AgentMessage {
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
 
-  actions AgentAction[]
+  actions     AgentAction[]
+  attachments AgentAttachment[]
 
   @@index([conversationId])
   @@map("agent_message")
@@ -2023,4 +2026,50 @@ model AgentAction {
   @@index([conversationId])
   @@index([messageId])
   @@map("agent_action")
+}
+
+model AgentAttachment {
+  id             String            @id @default(cuid())
+  /// FK to the owning AgentConversation. onDelete: Cascade — an attachment IS
+  /// transcript content (ADR-0044 c3): it lives and dies with the 180-day
+  /// transcript prune exactly like agent_message rows. The prune deletes the
+  /// stored object FIRST (best-effort, ObjectStorage.delete) and lets this
+  /// cascade remove the row.
+  conversationId String
+  conversation   AgentConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  /// Nullable FK to the user AgentMessage that carried this attachment. Null =
+  /// uploaded but not yet sent (pending in the composer); the turn CLAIMS the
+  /// attachment by setting this when the message persists (ADR-0044 c7).
+  /// onDelete: SetNull — a vanished message detaches, never blocks.
+  messageId      String?
+  message        AgentMessage?     @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  /// References the uploading User (the conversation owner — owner-checked at
+  /// upload, claim, and download). onDelete: Restrict — the universal
+  /// audit-actor posture.
+  userId         String
+  user           User              @relation("AgentAttachmentUser", fields: [userId], references: [id], onDelete: Restrict)
+  /// Tier 4 per ADR-0013 — the opaque object key
+  /// (agent-attachments/<conversationId>/<id>.<ext>). The BYTES it points at
+  /// are handled Tier 2 (ADR-0044 c8: a document photo can carry any PII) and
+  /// are served only through the owner-scoped download route.
+  r2Key          String            @unique
+  /// Tier 4 per ADR-0013 — the SNIFFED content type (image/jpeg | image/png |
+  /// image/webp; magic-byte-verified at upload, never trusted from the
+  /// client).
+  contentType    String
+  /// Tier 4 per ADR-0013 — stored object size in bytes (≤ 10 MB enforced at
+  /// upload).
+  sizeBytes      Int
+  /// Tier 4 per ADR-0013 — SHA-256 hex of the stored bytes: the audit answer
+  /// to "exactly which bytes did the extraction read" (ADR-0044 c3).
+  sha256         String
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  // The transcript prune's key-collection scan and the per-conversation
+  // pending-attachment lookup.
+  @@index([conversationId])
+  // The transcript render's message → attachment join.
+  @@index([messageId])
+  @@map("agent_attachment")
 }
