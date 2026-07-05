@@ -11,9 +11,12 @@ import {
   TRANSCRIPT_PRUNE_SCHEDULER_ID,
   TranscriptRetentionService,
 } from "../src/modules/retention/transcript-retention.service";
+import { MockObjectStorage } from "../src/modules/storage/mock.object-storage";
+import { ObjectStorage } from "../src/modules/storage/object-storage";
 import { resetDb } from "./db";
 import {
   seedAgentAction,
+  seedAgentAttachment,
   seedAgentConversation,
   seedAgentMessage,
 } from "./fixtures/agent-transcript";
@@ -43,6 +46,9 @@ describe("TranscriptRetentionService (transcript-prune boundary, ADR-0043 A2)", 
   // is otherwise unused (prune() does not enqueue). No Redis required.
   const upsertJobScheduler = vi.fn().mockResolvedValue(undefined);
   const fakeQueue = { upsertJobScheduler };
+  // Recording storage double (ADR-0044 V3): the prune deletes attachment
+  // objects through the ObjectStorage seam; assert against `deletes`.
+  const storage = new MockObjectStorage();
 
   let userId: string;
 
@@ -52,6 +58,7 @@ describe("TranscriptRetentionService (transcript-prune boundary, ADR-0043 A2)", 
         TranscriptRetentionService,
         PrismaService,
         { provide: getQueueToken(TRANSCRIPT_PRUNE_QUEUE), useValue: fakeQueue },
+        { provide: ObjectStorage, useValue: storage },
       ],
     }).compile();
     // No createNestApplication()/init() — so onApplicationBootstrap does NOT
@@ -66,6 +73,7 @@ describe("TranscriptRetentionService (transcript-prune boundary, ADR-0043 A2)", 
 
   beforeEach(async () => {
     upsertJobScheduler.mockClear();
+    storage.deletes.length = 0;
     await resetDb(prisma);
     userId = await seedUser(prisma);
   });
@@ -178,8 +186,52 @@ describe("TranscriptRetentionService (transcript-prune boundary, ADR-0043 A2)", 
   });
 
   test("an empty table prunes nothing without error", async () => {
-    const { deleted } = await service.prune(NOW);
+    const { deleted, objectsDeleted } = await service.prune(NOW);
     expect(deleted).toBe(0);
+    expect(objectsDeleted).toBe(0);
+  });
+
+  test("attachment OBJECTS are deleted before the row cascade (ADR-0044 V3)", async () => {
+    const stale = await seedAgentConversation(prisma, userId, { updatedAt: daysBeforeNow(200) });
+    const recent = await seedAgentConversation(prisma, userId, { updatedAt: daysBeforeNow(1) });
+    const staleAttachment = await seedAgentAttachment(prisma, {
+      conversationId: stale.id,
+      userId,
+      r2Key: "agent-attachments/stale/a.jpg",
+    });
+    await seedAgentAttachment(prisma, {
+      conversationId: recent.id,
+      userId,
+      r2Key: "agent-attachments/recent/b.jpg",
+    });
+
+    const { deleted, objectsDeleted } = await service.prune(NOW);
+
+    expect(deleted).toBe(1);
+    expect(objectsDeleted).toBe(1);
+    // Only the stale conversation's object was deleted, through the seam.
+    expect(storage.deletes).toEqual(["agent-attachments/stale/a.jpg"]);
+    // The stale attachment ROW cascaded with its conversation; the recent
+    // one (and its object) survive untouched.
+    expect(await prisma.agentAttachment.count({ where: { id: staleAttachment.id } })).toBe(0);
+    expect(await prisma.agentAttachment.count()).toBe(1);
+  });
+
+  test("a failing object delete never blocks the row prune (best-effort, ADR-0044 c3)", async () => {
+    const stale = await seedAgentConversation(prisma, userId, { updatedAt: daysBeforeNow(200) });
+    await seedAgentAttachment(prisma, {
+      conversationId: stale.id,
+      userId,
+      r2Key: "agent-attachments/stale/fails.jpg",
+    });
+    const failingDelete = vi.spyOn(storage, "delete").mockRejectedValueOnce(new Error("r2 down"));
+
+    const { deleted, objectsDeleted } = await service.prune(NOW);
+
+    expect(deleted).toBe(1);
+    expect(objectsDeleted).toBe(0);
+    expect(await prisma.agentConversation.count()).toBe(0);
+    failingDelete.mockRestore();
   });
 
   test("onApplicationBootstrap upserts a single keyed scheduler idempotently", async () => {
