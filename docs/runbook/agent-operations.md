@@ -99,6 +99,8 @@ Per ADR-0043 c6: DeepSeek processes and stores data in the PRC and may use input
 
 ## The OCR sidecar — image extraction (ADR-0044)
 
+> **STATUS (2026-07-06): PAUSED by PO decision — `AGENT_OCR_URL` stays unset everywhere.** The V0 eval found every locally-runnable vision model corrupts Devanagari through this runtime's vision path (English is flawless; the full evidence and revisit triggers are in ADR-0044's 2026-07-06 annotation). With the URL unset the kill switch below is the standing state: attachment turns degrade to the honest notice, text chat and all tools are unaffected. Everything below describes how the feature operates WHEN the pause lifts.
+
 Photo attachments in `/chat` are processed in two local-first stages (ADR-0044 Box B): the image transcribes on a **self-hosted OCR sidecar** (`AGENT_OCR_URL`, an OpenAI-compatible llama.cpp endpoint serving the pinned GGUF — Docker Model Runner in local dev, a compose sidecar in production), and the transcription structures into typed fields via the existing DeepSeek text client. **Pixels never leave FleetCo infrastructure**; extracted text enters the turn as Tier-2 conversation, like dictation.
 
 - **Kill switch:** unset `AGENT_OCR_URL` (empty value) and recreate the api container — the DI factory binds the unconfigured mock, `/chat` keeps working, and an attachment turn degrades to the honest notice "Image extraction is not configured." Text chat and all tools are unaffected.
