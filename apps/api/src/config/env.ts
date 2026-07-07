@@ -184,6 +184,47 @@ const envSchema = z.object({
   // ADR-0044 Box B; self-quantizing from the official weights is the recorded
   // production preference — swapping is an env edit, not a deploy).
   AGENT_OCR_MODEL: z.string().default("huggingface.co/sahilchachra/unlimited-ocr-gguf:Q4_K_M"),
+
+  // Twilio WhatsApp channel credentials (ADR-0046 — the WhatsApp agent channel
+  // over the ADR-0043 chat agent). All OPTIONAL and unset by default: when the
+  // TWILIO_* group is absent the DI factory binds MockWhatsAppSender and the
+  // TwilioSignatureGuard FAILS CLOSED (503), so the channel is OFF — the
+  // RESEND_API_KEY / DEEPSEEK_API_KEY kill-switch idiom. Read through the typed
+  // env exactly as those are; consumed only by the whatsapp module (W3/W4).
+  // Production values are operator-supplied and live only on the box (ADR-0014),
+  // never committed.
+  //
+  // TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN are Tier-1 secrets per ADR-0013 (the
+  // auth token both verifies the inbound X-Twilio-Signature AND Basic-auths the
+  // outbound send). Never logged — loaded via this config, never string-
+  // concatenated into a log line (`*.token` / `*.secret` pino redact paths
+  // backstop; the guard/sender never log them). Empty-string -> undefined.
+  TWILIO_ACCOUNT_SID: z.preprocess(emptyStringAsUndefined, z.string().optional()),
+  TWILIO_AUTH_TOKEN: z.preprocess(emptyStringAsUndefined, z.string().optional()),
+
+  // The WhatsApp-enabled Twilio sender the outbound reply is sent From, in
+  // Twilio's `whatsapp:+<E164>` form (the sandbox default is
+  // whatsapp:+14155238886). Tier-4 config (a public number, no secret
+  // material). Empty-string -> undefined.
+  TWILIO_WHATSAPP_FROM: z.preprocess(emptyStringAsUndefined, z.string().optional()),
+
+  // The canonical PUBLIC URL Twilio calls for the inbound webhook, e.g.
+  // https://<deploy-host>/api/v1/whatsapp/inbound. TwilioSignatureGuard verifies
+  // the signature against THIS constant, never a URL reconstructed from request
+  // headers (behind Caddy the app sees http://api:3001, which would never match;
+  // request-controlled headers must not enter a security decision — ADR-0046 c2).
+  // The guard fails closed (503) when this OR TWILIO_AUTH_TOKEN is unset. Tier-4
+  // config (a public URL). Empty-string -> undefined.
+  TWILIO_WEBHOOK_URL: z.preprocess(emptyStringAsUndefined, z.string().url().optional()),
+
+  // The admin web app's public base URL, used to build ABSOLUTE deep-links in
+  // agent replies (ADR-0046 c6 — a WhatsApp reply's action cards link to the
+  // affected record, and a relative link is useless in a text message).
+  // BETTER_AUTH_URL is the API host (the wrong target), so this is distinct.
+  // Tier-4 config. OPTIONAL: when unset the renderer omits the deep-link. In
+  // production the operator sets the deploy host; in local dev set
+  // http://localhost:3000. Empty-string -> undefined.
+  WEB_PUBLIC_URL: z.preprocess(emptyStringAsUndefined, z.string().url().optional()),
 });
 
 export type Env = z.infer<typeof envSchema>;
