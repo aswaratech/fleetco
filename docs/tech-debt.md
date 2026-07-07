@@ -8,6 +8,13 @@ Each entry has a short title, a brief description of what is owed, the slice or 
 
 This section lists active debt entries.
 
+### Devanagari vision OCR blocked upstream — the image-intake pause (ADR-0044 V0 verdict) and the owed GPU oracle test
+
+- **What is owed:** The ADR-0044 image-intake pipeline (V3–V7, shipped and tested on `main`) is **paused** because every locally-runnable vision model corrupts vision-read Devanagari through the llama.cpp runtime while handling English flawlessly and Devanagari-as-text perfectly (five model/quant combinations tested; full evidence in ADR-0044's 2026-07-06 annotation). Owed: a **GPU-runtime oracle test** of official model weights (DeepSeek-OCR / Qwen2.5-VL via transformers or vLLM, ~an hour of rented GPU) to prove whether the models or the runtime are at fault — the answer decides between waiting for an upstream llama.cpp fix, a different self-hosted serving shape, or the hosted-API annotation.
+- **Where surfaced:** the 2026-07-05/06 V0 eval against the PO's real fuel receipt; the PO's pause decision is recorded in the ADR annotation.
+- **Estimate to discharge:** the oracle test is ~half a day including GPU rental; re-running the recorded probe matrix against any new runtime is ~30 minutes (the probes and recipe are documented with the annotation).
+- **Revisit when:** a llama.cpp release notes Indic/vision detokenization fixes; the oracle test runs; or the PO elects the hosted-vision annotation (which reopens the Box-A identity-document decision).
+
 ### Orchestration loop's destructive-Bash blocklist will need tuning as the stack evolves
 
 - **What is owed:** Periodically review `scripts/orchestration/src/destructive-bash.ts` against the project's current stack and operational practices. The blocklist as built is conservative (over-blocks rather than under-blocks) and tuned for FleetCo's TypeScript / NestJS / Next.js / PostgreSQL / Prisma / Docker Compose / pnpm / Slack stack at Phase 0. As the project picks up new tools (a deploy CLI, a database migration tool different from Prisma, a different package manager, a new CI helper), the blocklist will need entries added; as the project finds false positives that cause repeated operator interrupts, entries may need narrowing.
