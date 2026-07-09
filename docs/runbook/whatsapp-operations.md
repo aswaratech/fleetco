@@ -30,9 +30,14 @@ The moving parts, all in the new `whatsapp` API module once built: the inbound w
 
 ## Provisioning a phone link
 
-A phone link maps a verified E.164 number to an ADMIN user. It is created only by the privileged script (W2) — there is no public endpoint — and the script **refuses to link a non-ADMIN user** (an unmapped or non-ADMIN number reaches nothing). `[W2: exact script name + invocation to be filled in when the script lands.]`
+A phone link maps a verified E.164 number to an ADMIN user. It is created only by the privileged script (`apps/api/scripts/link-whatsapp-number.ts`) — there is no public endpoint — and the script **refuses to link a non-ADMIN user** (only ADMIN holds `agent:use` in v1). Run it from the repo root (or on the box, against `/opt/fleetco/.env`):
 
-- The number is stored canonical E.164 (`@unique`); the same normalization runs at link-write and inbound-resolve.
+`pnpm --filter @fleetco/api exec tsx scripts/link-whatsapp-number.ts <email> <phone>`
+
+- `<email>` is an existing ADMIN user's login email; `<phone>` is the number in E.164 (e.g. `+9779812345678`). A `whatsapp:` prefix and surrounding whitespace are tolerated; internal separators (spaces, dashes) are **rejected** — type the canonical form.
+- The number is stored canonical E.164 (`@unique`); the **same** normalization runs at link-write and inbound-resolve, so a stored key and an inbound number are byte-identical (the lookup cannot miss on formatting).
+- Idempotent on the number: a re-run for the same number → the same user is a no-op; the same number → a **different** user is refused (deactivate/remove the existing link first — a phone identity is not silently reassigned).
+- Authorization is re-checked at **turn time** (ADR-0046 c9B): the link is an identity pointer, not a stored grant, so demoting the user later closes the channel for them automatically (the resolver fails closed on a non-`agent:use` role exactly as on an unmapped number).
 - Day-1 this is a single row: the PO's number → the PO's ADMIN user.
 
 ## Disabling the channel (kill switch)
