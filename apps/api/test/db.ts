@@ -32,6 +32,12 @@ const TABLES = [
   // it precedes all three; agent_message FKs into agent_conversation
   // (Cascade); agent_conversation FKs into user. CASCADE makes order cosmetic.
   "agent_action",
+  // ADR-0046 W2: the WhatsApp channel tables. agent_phone_link FKs into user
+  // (Restrict) + agent_conversation (SetNull); whatsapp_message_log FKs into
+  // agent_conversation + agent_message (SetNull). CASCADE makes order cosmetic;
+  // listed with the agent group they extend so a per-test reset clears them.
+  "agent_phone_link",
+  "whatsapp_message_log",
   "agent_message",
   "agent_conversation",
   // No FK into any other table (a scan is a background job, not a user action),
