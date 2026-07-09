@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { ForbiddenException } from "@nestjs/common";
 import { Test, type TestingModule } from "@nestjs/testing";
 import { UserRole } from "@prisma/client";
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { PrismaService } from "../src/modules/prisma/prisma.service";
 import { WhatsAppIdentityService } from "../src/modules/whatsapp/whatsapp-identity.service";
@@ -37,6 +37,10 @@ describe("WhatsAppIdentityService.resolveSenderToActor (integration, real Postgr
 
   beforeEach(async () => {
     await resetDb(prisma);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   async function seedUser(role: UserRole): Promise<string> {
@@ -81,6 +85,37 @@ describe("WhatsAppIdentityService.resolveSenderToActor (integration, real Postgr
     });
   });
 
+  test("resolves each number to ITS OWN linked user (c9C exact-match / correct-row selection)", async () => {
+    // The chokepoint's defining property: THIS number resolves to the user linked
+    // to THIS number — never to some other link's owner. Two links prove the
+    // resolver keys on the sender's number, not "any active link" (an open-relay
+    // mutant that dropped the phoneE164 filter would return the wrong owner here).
+    const OTHER = "+9779800000000";
+    const userA = await seedUser(UserRole.ADMIN);
+    const userB = await seedUser(UserRole.ADMIN);
+    await linkPhone(userA, PHONE);
+    await linkPhone(userB, OTHER);
+
+    await expect(service.resolveSenderToActor(`whatsapp:${PHONE}`)).resolves.toEqual({
+      userId: userA,
+      role: UserRole.ADMIN,
+    });
+    await expect(service.resolveSenderToActor(`whatsapp:${OTHER}`)).resolves.toEqual({
+      userId: userB,
+      role: UserRole.ADMIN,
+    });
+  });
+
+  test("fails closed (403) for a valid but unlinked number while ANOTHER number IS linked (open-relay guard, c9C)", async () => {
+    // The worst channel failure: a stranger's un-linked number must NOT resolve to
+    // the owner's Actor just because some link exists.
+    const owner = await seedUser(UserRole.ADMIN);
+    await linkPhone(owner, PHONE);
+    await expect(service.resolveSenderToActor("whatsapp:+9779800000000")).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+  });
+
   test("fails closed (403) when the number is unmapped", async () => {
     await seedUser(UserRole.ADMIN); // a user exists, but no link for PHONE
     await expect(service.resolveSenderToActor(`whatsapp:${PHONE}`)).rejects.toBeInstanceOf(
@@ -116,8 +151,12 @@ describe("WhatsAppIdentityService.resolveSenderToActor (integration, real Postgr
   });
 
   test("fails closed (403) on an unparseable From, without a DB lookup", async () => {
+    // The "without a DB lookup" half is a real property: garbage short-circuits in
+    // normalizeE164 before any query — fail-closed AND no DB load from junk input.
+    const lookup = vi.spyOn(prisma.agentPhoneLink, "findUnique");
     await expect(service.resolveSenderToActor("whatsapp:not-a-number")).rejects.toBeInstanceOf(
       ForbiddenException,
     );
+    expect(lookup).not.toHaveBeenCalled();
   });
 });

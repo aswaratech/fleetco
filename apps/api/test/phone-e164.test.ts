@@ -34,6 +34,18 @@ describe("normalizeE164 (pure)", () => {
   });
 
   test.each([
+    // The just-INSIDE length boundaries, asserted as ACCEPTED — symmetric with
+    // the "too short (7)" / "too long (16)" reject cases below, so an off-by-one
+    // in the /^\+[1-9]\d{7,14}$/ length bound (which would wrongly reject a valid
+    // boundary number) cannot slip through.
+    ["minimum length (8 digits total)", "+12345678"],
+    ["maximum length (15 digits total)", "+123456789012345"],
+    ["a typical Nepal mobile (13 digits)", "+9779812345678"],
+  ])("accepts %s unchanged", (_label, input) => {
+    expect(normalizeE164(input)).toBe(input);
+  });
+
+  test.each([
     ["missing +", "9779812345678"],
     ["internal spaces", "+977 981 234 5678"],
     ["internal dashes", "+977-981-234-5678"],
