@@ -403,6 +403,13 @@ Page-level compositions that arrange the Components above into a specific screen
 - **No new tokens or components.** An arrangement of `Table`/`SortableHeader`/`Pagination`/`Badge`/`Select`/`Input`/`NepaliDate`/`NepaliDatePicker` + the section idiom, with the pure helpers reused from `apps/web/src/lib/agent-chat.ts` (`actionBadgeVariant`, `formatLatencyMs`, `entityPathFor`). `globals.css`'s `@theme` is untouched.
 - **Anti-patterns referenced:** #2 (badge hue is recognition; the status word is the meaning), #3 (one contextual link per row), #7 (no row washes), #15 (no content or PII in URLs).
 
+### WhatsApp channel (ADR-0046)
+
+The agent is reachable over WhatsApp (ADR-0046). There is **no new visual surface** — Twilio/WhatsApp renders the thread — so this section governs the **reply register**, not a page.
+
+- **Text action cards.** A WhatsApp reply is a plain-text rendering of the same server-derived data the `/chat` transcript shows: the agent's final message, any server-authored system notice (including the ungrounded-claim flag), and one line per executed `AgentAction` — tool, changed-field summary, and a deep-link to the affected record. The account of what ran comes from the server's `AgentAction` record, never the model's prose (the [Voice](#voice-and-tone) honesty discipline the on-screen **Action card** already carries; ADR-0043 c4c). On WhatsApp these text cards are the operator's only in-thread way to catch a bad autonomous write.
+- **Register & edges.** Same voice as the app: state the fact, no exclamation, no apology. An unrecognized sender is answered with nothing (ADR-0046 c9 — no courtesy reply, to avoid confirming a live line); a photo attachment while image intake is paused degrades to the honest notice the `/chat` composer already uses ("Image extraction is not configured…"). Deep-links are **absolute** (they resolve against the web app's public URL, not a relative path a text message can't follow), and a long reply is chunked to WhatsApp's length limits.
+
 ## Voice and tone
 
 The voice is **quiet, professional, technical**. The user is the operator; the UI is the instrument. No marketing affectations. Eight principles govern every label, button, error, and empty state:
