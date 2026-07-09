@@ -65,6 +65,11 @@ model User {
   agentConversations      AgentConversation[] @relation("AgentConversationUser")
   agentActions            AgentAction[]       @relation("AgentActionUser")
   agentAttachments        AgentAttachment[]   @relation("AgentAttachmentUser")
+  /// WhatsApp phone links (ADR-0046 c4) — the E.164 numbers that resolve to this
+  /// user when they message the agent over WhatsApp. agent:use (ADMIN-only,
+  /// ADR-0043 c1) is re-checked against the live role at turn time, so a link is
+  /// an identity pointer, never a stored grant.
+  agentPhoneLinks         AgentPhoneLink[]    @relation("AgentPhoneLinkUser")
   /// The Driver this login identity is linked to, if any (ADR-0034 c4). A User
   /// with role DRIVER is linked 1:1 to a Driver row via Driver.userId.
   driver                  Driver?             @relation("DriverUser")
@@ -1916,9 +1921,13 @@ model AgentConversation {
   /// alive. See RetentionService.computeTranscriptCutoff.
   updatedAt DateTime @updatedAt
 
-  messages    AgentMessage[]
-  actions     AgentAction[]
-  attachments AgentAttachment[]
+  messages            AgentMessage[]
+  actions             AgentAction[]
+  attachments         AgentAttachment[]
+  // ADR-0046 — the WhatsApp channel's per-user link anchors its stable
+  // conversation here (c4), and its wire-facts ledger references it (c7).
+  phoneLinks          AgentPhoneLink[]
+  whatsAppMessageLogs WhatsAppMessageLog[]
 
   @@index([userId])
   // The transcript prune's `updatedAt < cutoff` scan.
@@ -1953,8 +1962,11 @@ model AgentMessage {
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
 
-  actions     AgentAction[]
-  attachments AgentAttachment[]
+  actions             AgentAction[]
+  attachments         AgentAttachment[]
+  // ADR-0046 c7 — the WhatsApp ledger joins here for outbound reply content
+  // (no transcript duplication).
+  whatsAppMessageLogs WhatsAppMessageLog[]
 
   @@index([conversationId])
   @@map("agent_message")
@@ -2072,4 +2084,103 @@ model AgentAttachment {
   // The transcript render's message → attachment join.
   @@index([messageId])
   @@map("agent_attachment")
+}
+
+// WhatsApp channel (ADR-0046). Owned by apps/api/src/modules/whatsapp/. Two
+// tables land in W2: AgentPhoneLink (the per-user phone→user identity map, c4)
+// and WhatsAppMessageLog (the inbound/outbound delivery + idempotency ledger,
+// c7). The W2 normalize/resolve service and provisioning script read/write
+// AgentPhoneLink; the W4 inbound webhook + worker + outbound sender read and
+// write both. Both new tables carry only reused shapes — no new dependency.
+
+model AgentPhoneLink {
+  id             String             @id @default(cuid())
+  /// Tier 2 PII per ADR-0013 — the sender's canonical E.164 phone number and the
+  /// channel's identity key. @unique because the inbound resolver matches an
+  /// incoming number against it EXACTLY (ADR-0046 c4): a loose match is a
+  /// security hazard (a stranger's number resolving to a linked user, or the
+  /// owner's own number failing to resolve). The SAME normalizeE164 runs at
+  /// link-write and inbound-resolve, so a stored key and an inbound number are
+  /// byte-identical (the coherence guarantee). Contrast Driver.phone /
+  /// Customer.phone, which stay loose by recorded decision — those are display
+  /// fields; this is an auth key. NEVER logged (add a pino redact path only if
+  /// code logs it — the NotificationLog.recipient posture; W2 logs no phone).
+  phoneE164      String             @unique
+  /// References the User this number resolves to — the human the agent executes
+  /// AS over WhatsApp (ADR-0021 / ADR-0043 c1). onDelete: Restrict — the linked
+  /// user cannot be deleted out from under the mapping. Authorization is NOT
+  /// stored here: agent:use (ADMIN-only, ADR-0043 c1) is re-checked against the
+  /// LIVE user role at turn time (ADR-0046 c9B), so a role change after linking
+  /// is honored and a link never becomes a latent grant.
+  userId         String
+  user           User               @relation("AgentPhoneLinkUser", fields: [userId], references: [id], onDelete: Restrict)
+  /// Nullable pointer to this user's WhatsApp AgentConversation, set on the first
+  /// turn (ADR-0046 c4). AgentConversation has no channel discriminator, so this
+  /// pointer is what makes "get-or-create this user's WhatsApp conversation"
+  /// deterministic (one stable thread per link — the web's ensureConversationId
+  /// analogue). onDelete: SetNull — the 180-day transcript prune detaches the
+  /// pointer (a fresh conversation is created on the next turn) rather than
+  /// blocking or deleting the link.
+  conversationId String?
+  conversation   AgentConversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  /// Tier 4 per ADR-0013 — when this link was provisioned/verified. In v1 the
+  /// operator running the privileged provisioning script IS the verification
+  /// (they assert ownership of the number); a self-service verify handshake is
+  /// future scope.
+  verifiedAt     DateTime?
+  /// Tier 4 per ADR-0013 — active flag for opt-out / deactivation (ADR-0046 c4).
+  /// The resolver fails closed on a deactivated link exactly as on an unmapped
+  /// number (a STOP opt-out or an operator deprovision flips this to false); the
+  /// row is kept (not deleted) so the number's history survives.
+  active         Boolean            @default(true)
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  @@index([userId])
+  // FK index so the transcript prune's SET NULL fan-out never seq-scans.
+  @@index([conversationId])
+  @@map("agent_phone_link")
+}
+
+model WhatsAppMessageLog {
+  id             String             @id @default(cuid())
+  /// Tier 4 per ADR-0013 — "inbound" | "outbound". An open string (the
+  /// NotificationLog / AgentMessage.role discriminator precedent), not an enum,
+  /// so a shape addition needs no migration.
+  direction      String
+  /// Tier 2 PII per ADR-0013 — the counterparty E.164 phone (the inbound sender
+  /// or the outbound recipient). NEVER logged (the NotificationLog.recipient
+  /// posture — a redact path is added only if code logs it).
+  phone          String
+  /// Tier 4 per ADR-0013 — the Twilio message SID. @unique is the load-bearing
+  /// idempotency + REPLAY defense (ADR-0046 c7): a Twilio signature carries no
+  /// nonce, so a captured inbound POST replays forever; the processor's
+  /// check-existing-by-SID before runTurn is the ONLY thing that makes retries
+  /// and replays not double-fire the no-confirmation-gate writes (ADR-0043 c3).
+  /// Nullable-until-sent for the outbound direction (the send returns the SID);
+  /// Postgres treats NULLs as distinct, so multiple pending outbound rows
+  /// coexist — the NotificationLog.providerMessageId precedent exactly.
+  providerSid    String?            @unique
+  /// Tier 4 per ADR-0013 — wire status ("received" | "queued" | "sent" |
+  /// "failed" | ...). An open string; an outbound Twilio StatusCallback that
+  /// would let this progress past sync-accepted is deferred (ADR-0046 c7).
+  status         String
+  /// Nullable FK to the conversation this message belongs to. onDelete: SetNull —
+  /// the ledger is a wire-facts audit record that survives the 180-day
+  /// transcript prune (the AgentAction posture), so a pruned conversation
+  /// detaches this row rather than deleting it.
+  conversationId String?
+  conversation   AgentConversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  /// Nullable FK to the AgentMessage whose content this row reflects (ADR-0046 c7
+  /// — the ledger joins to the transcript for content rather than duplicating
+  /// it). onDelete: SetNull — same survives-the-prune rationale.
+  messageId      String?
+  message        AgentMessage?      @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  // FK indexes so the prune's SET NULL fan-out never seq-scans this ledger.
+  @@index([conversationId])
+  @@index([messageId])
+  @@map("whatsapp_message_log")
 }
