@@ -5,11 +5,18 @@ import { Test, type TestingModule } from "@nestjs/testing";
 import { UserRole } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 
+import { AgentAttachmentsService } from "../src/modules/agent/agent-attachments.service";
 import { AgentService, type AgentTurnResult } from "../src/modules/agent/agent.service";
 import type { Actor } from "../src/modules/auth/driver-scope.service";
 import { PrismaService } from "../src/modules/prisma/prisma.service";
+import { MockObjectStorage } from "../src/modules/storage/mock.object-storage";
+import { ObjectStorage } from "../src/modules/storage/object-storage";
+import { TwilioMediaClient } from "../src/modules/whatsapp/twilio-media.client";
 import { WhatsAppIdentityService } from "../src/modules/whatsapp/whatsapp-identity.service";
-import { WhatsAppInboundProcessor } from "../src/modules/whatsapp/whatsapp-inbound.processor";
+import {
+  MEDIA_FAILED_NOTICE,
+  WhatsAppInboundProcessor,
+} from "../src/modules/whatsapp/whatsapp-inbound.processor";
 import { WhatsAppSender } from "../src/modules/whatsapp/whatsapp-sender";
 import { WHATSAPP_DAILY_INBOUND_CAP } from "../src/modules/whatsapp/whatsapp.constants";
 import { resetDb } from "./db";
@@ -33,6 +40,7 @@ describe("WhatsAppInboundProcessor.handleInbound (integration, real Postgres)", 
 
   const agentStub = { createConversation: vi.fn(), runTurn: vi.fn() };
   const senderStub = { send: vi.fn() };
+  const mediaStub = { download: vi.fn() };
   let sidCounter = 0;
 
   beforeAll(async () => {
@@ -41,8 +49,14 @@ describe("WhatsAppInboundProcessor.handleInbound (integration, real Postgres)", 
         PrismaService,
         WhatsAppIdentityService,
         WhatsAppInboundProcessor,
+        // The attachments service runs REAL (sniff + cap + storage row) over
+        // the in-memory storage mock — the W5 media path's validation is the
+        // point, so it is not stubbed.
+        AgentAttachmentsService,
+        { provide: ObjectStorage, useValue: new MockObjectStorage() },
         { provide: AgentService, useValue: agentStub },
         { provide: WhatsAppSender, useValue: senderStub },
+        { provide: TwilioMediaClient, useValue: mediaStub },
       ],
     }).compile();
     await module.init();
@@ -66,6 +80,8 @@ describe("WhatsAppInboundProcessor.handleInbound (integration, real Postgres)", 
       sidCounter += 1;
       return Promise.resolve({ sid: `SM_OUT_${String(sidCounter)}` });
     });
+    // Text-only tests must never reach the media client.
+    mediaStub.download.mockRejectedValue(new Error("no media stubbed for this test"));
   });
 
   async function seedUserWithLink(
@@ -107,11 +123,15 @@ describe("WhatsAppInboundProcessor.handleInbound (integration, real Postgres)", 
     );
   }
 
-  function inbound(messageSid: string, overrides?: { from?: string; body?: string }) {
+  function inbound(
+    messageSid: string,
+    overrides?: { from?: string; body?: string; mediaUrl?: string },
+  ) {
     return {
       messageSid,
       from: overrides?.from ?? `whatsapp:${PHONE}`,
       body: overrides?.body ?? "how many vehicles are active",
+      ...(overrides?.mediaUrl !== undefined ? { mediaUrl: overrides.mediaUrl } : {}),
     };
   }
 
@@ -426,5 +446,112 @@ describe("WhatsAppInboundProcessor.handleInbound (integration, real Postgres)", 
     });
     expect(outRows).toHaveLength(sentBodies.length);
     expect(new Set(outRows.map((r) => r.providerSid)).size).toBe(outRows.length);
+  });
+
+  // ——— W5: the photo path (inert behind the image pause — the attachment
+  // stores and the turn runs; extraction degrades honestly when
+  // AGENT_OCR_URL is unset, which is the agent's own tested behavior). ———
+
+  /** Real JPEG magic bytes — the attachments service sniffs CONTENT. */
+  const JPEG_BYTES = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(64, 0x11)]);
+  const MEDIA_URL = "https://api.twilio.com/2010-04-01/Accounts/AC1/Messages/SM_IN_1/Media/ME1";
+
+  test("a photo with a caption stores a sniffed attachment and rides the turn (W5)", async () => {
+    const { userId } = await seedUserWithLink();
+    await stubTurn("Got the receipt.");
+    mediaStub.download.mockResolvedValue({
+      bytes: JPEG_BYTES,
+      // Deliberately wrong declared type: the REAL sniff must win.
+      declaredContentType: "application/octet-stream",
+    });
+
+    await processor.handleInbound(
+      inbound("SM_IN_1", { body: "diesel receipt from today", mediaUrl: MEDIA_URL }),
+      0,
+    );
+
+    const attachment = await prisma.agentAttachment.findFirstOrThrow();
+    expect(attachment.contentType).toBe("image/jpeg"); // sniffed, not declared
+    expect(attachment.sizeBytes).toBe(JPEG_BYTES.length);
+    expect(attachment.userId).toBe(userId);
+
+    expect(agentStub.runTurn).toHaveBeenCalledTimes(1);
+    const call = agentStub.runTurn.mock.calls[0] as [string, string, Actor, string | undefined];
+    expect(call[1]).toBe("diesel receipt from today"); // the caption is the content
+    expect(call[3]).toBe(attachment.id); // the attachment rides the turn
+    expect(attachment.conversationId).toBe(call[0]);
+
+    const inRow = await prisma.whatsAppMessageLog.findUniqueOrThrow({
+      where: { providerSid: "SM_IN_1" },
+    });
+    expect(inRow.status).toBe("processed");
+  });
+
+  test("a captionless photo is NOT ignored-empty — the attachment alone carries the turn", async () => {
+    await seedUserWithLink();
+    await stubTurn("What should I do with this photo?");
+    mediaStub.download.mockResolvedValue({ bytes: JPEG_BYTES, declaredContentType: "image/jpeg" });
+
+    await processor.handleInbound(inbound("SM_IN_1", { body: "", mediaUrl: MEDIA_URL }), 0);
+
+    expect(agentStub.runTurn).toHaveBeenCalledTimes(1);
+    const call = agentStub.runTurn.mock.calls[0] as [string, string, Actor, string | undefined];
+    expect(call[1]).toBe("");
+    expect(typeof call[3]).toBe("string");
+    expect(senderStub.send).toHaveBeenCalledTimes(1);
+  });
+
+  test("a failed media download drops the WHOLE message with the server-authored notice (no turn)", async () => {
+    await seedUserWithLink();
+    mediaStub.download.mockRejectedValue(new Error("twilio media 404"));
+
+    await processor.handleInbound(
+      inbound("SM_IN_1", { body: "receipt attached", mediaUrl: MEDIA_URL }),
+      0,
+    );
+
+    expect(agentStub.runTurn).not.toHaveBeenCalled();
+    expect(senderStub.send).toHaveBeenCalledTimes(1);
+    expect(senderStub.send.mock.calls[0]?.[0]).toEqual({ to: PHONE, body: MEDIA_FAILED_NOTICE });
+
+    const inRow = await prisma.whatsAppMessageLog.findUniqueOrThrow({
+      where: { providerSid: "SM_IN_1" },
+    });
+    expect(inRow.status).toBe("media_failed");
+    expect(inRow.conversationId).not.toBeNull();
+    const outRows = await prisma.whatsAppMessageLog.findMany({ where: { direction: "outbound" } });
+    expect(outRows).toHaveLength(1);
+    expect(outRows[0]?.status).toBe("sent");
+  });
+
+  test("non-image bytes fail the REAL magic-byte sniff and take the same media_failed path", async () => {
+    await seedUserWithLink();
+    mediaStub.download.mockResolvedValue({
+      bytes: Buffer.from("%PDF-1.7 not an image"),
+      declaredContentType: "image/jpeg", // a lying declared type must not help
+    });
+
+    await processor.handleInbound(inbound("SM_IN_1", { mediaUrl: MEDIA_URL }), 0);
+
+    expect(agentStub.runTurn).not.toHaveBeenCalled();
+    expect(await prisma.agentAttachment.count()).toBe(0);
+    expect(
+      (await prisma.whatsAppMessageLog.findUniqueOrThrow({ where: { providerSid: "SM_IN_1" } }))
+        .status,
+    ).toBe("media_failed");
+    expect(senderStub.send.mock.calls[0]?.[0]).toEqual({ to: PHONE, body: MEDIA_FAILED_NOTICE });
+  });
+
+  test("no text and no media is ignored before any conversation exists (no turn, no reply)", async () => {
+    await seedUserWithLink();
+    await processor.handleInbound(inbound("SM_IN_1", { body: "   " }), 0);
+
+    expect(agentStub.createConversation).not.toHaveBeenCalled();
+    expect(agentStub.runTurn).not.toHaveBeenCalled();
+    expect(senderStub.send).not.toHaveBeenCalled();
+    expect(
+      (await prisma.whatsAppMessageLog.findUniqueOrThrow({ where: { providerSid: "SM_IN_1" } }))
+        .status,
+    ).toBe("ignored_empty");
   });
 });

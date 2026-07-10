@@ -2,6 +2,7 @@ import { BullModule } from "@nestjs/bullmq";
 import { Module } from "@nestjs/common";
 
 import { AgentModule } from "../agent/agent.module";
+import { TwilioMediaClient } from "./twilio-media.client";
 import { twilioSignatureConfigProvider, TwilioSignatureGuard } from "./twilio-signature.guard";
 import { WhatsAppIdentityService } from "./whatsapp-identity.service";
 import { WhatsAppInboundController } from "./whatsapp-inbound.controller";
@@ -31,6 +32,11 @@ import { WHATSAPP_INBOUND_QUEUE } from "./whatsapp.constants";
     TwilioSignatureGuard,
     WhatsAppIdentityService,
     WhatsAppInboundProcessor,
+    // W5: downloads a webhook's media item (Basic-auth to api.twilio.com
+    // only, host-allowlisted). Env-defaulted like the sender; while TWILIO_*
+    // is unset it throws not_configured — unreachable in practice, since the
+    // unconfigured guard 503s every webhook before a media job can exist.
+    TwilioMediaClient,
     {
       provide: WhatsAppSender,
       useFactory: (): WhatsAppSender => createWhatsAppSender(),

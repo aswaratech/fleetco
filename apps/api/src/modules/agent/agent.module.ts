@@ -91,6 +91,12 @@ export function visionExtractorFactory(
   // enforced agent:use, so every non-HTTP caller MUST bring its own turn-time
   // authorization wall (the WhatsApp resolver's fail-closed agent:use
   // re-check, ADR-0046 c9B). Do not export this to a caller that does not.
-  exports: [LlmClient, AgentService],
+  //
+  // AgentAttachmentsService joined with W5 (the photo path): the WhatsApp
+  // worker stores a downloaded media item through upload(), which re-runs the
+  // magic-byte sniff + size cap and is owner-scoped end-to-end (a foreign
+  // conversation 404s), so this widening stays bounded by the same actor the
+  // W4 wall resolved.
+  exports: [LlmClient, AgentService, AgentAttachmentsService],
 })
 export class AgentModule {}

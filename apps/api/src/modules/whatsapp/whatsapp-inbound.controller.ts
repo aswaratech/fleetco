@@ -46,9 +46,19 @@ export class WhatsAppInboundController {
   async inbound(
     @Body(new ZodValidationPipe(TwilioInboundWebhookSchema)) body: TwilioInboundWebhook,
   ): Promise<void> {
+    // WhatsApp delivers at most one media item per message; forward index 0
+    // when present (ADR-0046 W5 — the photo path). Defensive: NumMedia > 0
+    // with no MediaUrl0 degrades to a text-only job rather than a crash.
+    const hasMedia =
+      body.NumMedia !== undefined && Number(body.NumMedia) > 0 && body.MediaUrl0 !== undefined;
     await this.queue.add(
       WHATSAPP_INBOUND_JOB_NAME,
-      { messageSid: body.MessageSid, from: body.From, body: body.Body },
+      {
+        messageSid: body.MessageSid,
+        from: body.From,
+        body: body.Body,
+        ...(hasMedia ? { mediaUrl: body.MediaUrl0, mediaContentType: body.MediaContentType0 } : {}),
+      },
       {
         attempts: WHATSAPP_INBOUND_ATTEMPTS,
         backoff: { type: "exponential", delay: WHATSAPP_INBOUND_BACKOFF_DELAY_MS },
