@@ -65,10 +65,14 @@ services:
   web:
     image: "ghcr.io/aswaratech/fleetco-web:${IMAGE_TAG:?set IMAGE_TAG to the GHCR image tag (the commit SHA), e.g. export IMAGE_TAG=<sha>}"
     restart: unless-stopped
-    # The web standalone server reads NEXT_PUBLIC_API_URL at runtime for its
-    # server-side fetches (apps/web/src/lib/api.ts, session.ts, auth-client.ts);
-    # the browser bundle's copy is inlined at image BUILD time (T3 build-arg).
-    # Both must equal the public origin (ADR-0014 §2 same-origin).
+    # NEXT_PUBLIC_API_URL is baked into the web image at BUILD time — Next.js
+    # inlines NEXT_PUBLIC_* into the SERVER bundle as well as the browser
+    # bundle (verified from the built image, 2026-07-10 dry-run), so the
+    # env_file value below is runtime-inert for this container and stands only
+    # as the on-box record of the baked origin (ci.yml's T3 build-arg,
+    # deploy.md step 0). Server-side fetches therefore traverse the public
+    # origin — the box must reach its own <domain> (deploy.md "What can go
+    # wrong").
     env_file:
       - .env
     depends_on:
