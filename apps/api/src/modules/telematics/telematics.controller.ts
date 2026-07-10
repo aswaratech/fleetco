@@ -13,11 +13,20 @@ import {
 } from "@nestjs/common";
 import { type GeofenceType } from "@prisma/client";
 
+import { buildPingFreshnessSignal } from "../../common/sli";
 import { ZodValidationPipe } from "../../common/zod-validation.pipe";
 import { AuthGuard } from "../auth/auth.guard";
 import { RequirePermission } from "../auth/decorators";
 import { RolesGuard } from "../auth/roles.guard";
+import { toUserRole } from "../auth/permissions";
 import type { AuthenticatedRequest } from "../auth/auth.types";
+import type { Actor } from "../auth/driver-scope.service";
+
+// Logger (nestjs-pino) is injected for the per-accepted-batch ping-freshness
+// SLI line (ADR-0035 c8 / ADR-0026 c6) — a value import for DI, the same
+// eslint override the trips controller carries for its SLI emission.
+// eslint-disable-next-line @typescript-eslint/consistent-type-imports
+import { Logger } from "nestjs-pino";
 
 import {
   GeofenceStatusQuerySchema,
@@ -164,7 +173,21 @@ function describeGeofence(
 @Controller("api/v1/telematics")
 @UseGuards(AuthGuard, RolesGuard)
 export class TelematicsController {
-  constructor(private readonly telematics: TelematicsService) {}
+  constructor(
+    private readonly telematics: TelematicsService,
+    private readonly logger: Logger,
+  ) {}
+
+  // The acting principal, coerced through the one fail-closed role coercion
+  // the whole auth surface shares (toUserRole) — the same per-controller
+  // helper trips/fuel-logs carry. Threading an Actor is NOT a guard change
+  // (ADR-0034 c4/c7); it feeds the service-layer own-record predicate.
+  private actorOf(request: AuthenticatedRequest): Actor {
+    return {
+      userId: request.session.user.id,
+      role: toUserRole(request.session.user.role),
+    };
+  }
 
   /**
    * Authenticated batch ingestion (ADR-0029 commitment 10). Accepts
@@ -174,12 +197,21 @@ export class TelematicsController {
    * `gps-ingest`, and RETURNS FAST with 202 — it does NOT block on the
    * database write (the worker bulk-inserts asynchronously).
    *
-   * Gated by `@RequirePermission("gps:ingest")` (ADMIN-held today, ADR-0029
-   * commitment 11) on top of the composed AuthGuard + RolesGuard chain.
+   * Gated by `@RequirePermission("gps:ingest")` on the composed AuthGuard +
+   * RolesGuard chain. Held by ADMIN (the ADR-0029 c11 synthetic path,
+   * unchanged) and — as of D4 (ADR-0035) — by DRIVER, whose batches are
+   * additionally scoped by the service-layer own-record predicate
+   * (`assertDriverCanIngest`: own IN_PROGRESS trip only, fail-closed 403 for
+   * the whole batch) BEFORE anything is enqueued, per ADR-0034 c5's
+   * grant-with-scope rule.
    *
    * `createdById` is taken from `request.session.user.id` (ADR-0021) and
    * travels in the job payload — it is NEVER read from the body, which the
    * schema's `.strict()` rejects.
+   *
+   * Each ACCEPTED batch logs one ping-freshness SLI line (ADR-0026 c6's
+   * provisional 95.0% target, ADR-0035 c8's window) — timestamps only, never
+   * coordinates (ADR-0027 c5/c9).
    */
   @Post("pings")
   @HttpCode(HttpStatus.ACCEPTED)
@@ -188,10 +220,12 @@ export class TelematicsController {
     @Body(new ZodValidationPipe(IngestBatchSchema)) body: IngestBatchInput,
     @Req() request: AuthenticatedRequest,
   ): Promise<IngestAck> {
+    await this.telematics.assertDriverCanIngest(this.actorOf(request), body.pings);
     const { jobId, accepted } = await this.telematics.enqueueBatch(
       body.pings,
       request.session.user.id,
     );
+    this.logger.log(buildPingFreshnessSignal(body.pings.map((ping) => ping.timestamp)));
     return { accepted, jobId };
   }
 

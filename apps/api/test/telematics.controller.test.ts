@@ -1,13 +1,15 @@
 import { getQueueToken } from "@nestjs/bullmq";
 import { BadRequestException, type INestApplication } from "@nestjs/common";
 import { Test } from "@nestjs/testing";
-import { UserRole } from "@prisma/client";
+import { TripStatus, UserRole } from "@prisma/client";
+import { Logger } from "nestjs-pino";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 
 import { ZodValidationPipe } from "../src/common/zod-validation.pipe";
 import { AuthGuard } from "../src/modules/auth/auth.guard";
 import { AUTH } from "../src/modules/auth/auth.tokens";
+import { DriverScopeService } from "../src/modules/auth/driver-scope.service";
 import { RolesGuard } from "../src/modules/auth/roles.guard";
 import { GeofencesService } from "../src/modules/geofences/geofences.service";
 import { PrismaService } from "../src/modules/prisma/prisma.service";
@@ -18,7 +20,9 @@ import {
   TelematicsService,
   type GpsIngestJobData,
 } from "../src/modules/telematics/telematics.service";
+import { resetDb } from "./db";
 import { makeGpsPingInput } from "./fixtures/gps-ping";
+import { seedDriver, seedTrip, seedUser, seedVehicle } from "./fixtures/trip";
 
 // Tests for the telematics ingestion ENDPOINT (ADR-0029 T3). Two layers,
 // mirroring how every write-path controller is tested here plus the RBAC
@@ -164,21 +168,24 @@ const fakeQueue = {
 };
 
 // AUTH stub identical in spirit to roles.guard.test.ts: AuthGuard calls
-// getSession({ headers }); we drive the caller's role via `x-test-role` so one
-// app instance serves every case. No header → null session → 401.
+// getSession({ headers }); we drive the caller's role via `x-test-role` — and,
+// for the D4 own-trip predicate tests, the caller's USER ID via `x-test-user`
+// (the rbac.matrix.test.ts idiom), so a session can be a real seeded user the
+// Driver.userId link points at. No role header → null session → 401.
 const AUTH_STUB = {
   api: {
     getSession: async ({ headers }: { headers: Headers }) => {
       const role = headers.get("x-test-role");
       if (role === null) return null;
+      const userId = headers.get("x-test-user") ?? "user_test";
       return {
         session: {
           id: "sess_test",
           token: "tok_test",
-          userId: "user_test",
+          userId,
           expiresAt: new Date(Date.now() + 60_000),
         },
-        user: { id: "user_test", email: "user@fleetco.test", name: "Test", role },
+        user: { id: userId, email: "user@fleetco.test", name: "Test", role },
       };
     },
   },
@@ -201,6 +208,13 @@ describe("Telematics ingest HTTP boundary (real AuthGuard + RolesGuard chain)", 
         // Override the gps-ingest queue with the fake so these auth/validation
         // tests need no live Redis; the worker test exercises the real queue.
         { provide: getQueueToken(GPS_INGEST_QUEUE), useValue: fakeQueue },
+        // D4: TelematicsService injects the REAL DriverScopeService (the
+        // own-trip predicate resolves the Driver.userId link against real
+        // Postgres rows the ownership tests seed).
+        DriverScopeService,
+        // The controller's ping-freshness SLI line needs the pino Logger
+        // token; the rbac.matrix.test.ts stub idiom.
+        { provide: Logger, useValue: { log: () => undefined } },
         AuthGuard,
         RolesGuard,
         { provide: AUTH, useValue: AUTH_STUB },
@@ -225,10 +239,16 @@ describe("Telematics ingest HTTP boundary (real AuthGuard + RolesGuard chain)", 
     lastJob = null;
   });
 
-  // POST a JSON body; `role` undefined → no header → 401 path.
-  async function post(body: unknown, role?: string): Promise<{ status: number; json: unknown }> {
+  // POST a JSON body; `role` undefined → no header → 401 path. `user` drives
+  // x-test-user for the D4 ownership tests (defaults to user_test in the stub).
+  async function post(
+    body: unknown,
+    role?: string,
+    user?: string,
+  ): Promise<{ status: number; json: unknown }> {
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (role !== undefined) headers["x-test-role"] = role;
+    if (user !== undefined) headers["x-test-user"] = user;
     const res = await fetch(`${baseUrl}/api/v1/telematics/pings`, {
       method: "POST",
       headers,
@@ -259,7 +279,12 @@ describe("Telematics ingest HTTP boundary (real AuthGuard + RolesGuard chain)", 
     expect(lastJob).toBeNull();
   });
 
-  test("DRIVER (reserved, no capabilities) → 403, nothing enqueued", async () => {
+  test("DRIVER with NO linked Driver row → 403 fail-closed (the predicate, not the guard), nothing enqueued", async () => {
+    // Pre-D4 this 403 came from RolesGuard (no gps:ingest). The D4 grant means
+    // a DRIVER session now PASSES the guard and reaches the own-trip
+    // predicate, where the unlinked session fails closed inside
+    // resolveOwnDriverId (the D2 posture) — same status, different (and
+    // load-bearing) enforcement layer. `user_test` has no Driver row.
     const { status } = await post(validBatch, UserRole.DRIVER);
     expect(status).toBe(403);
     expect(lastJob).toBeNull();
@@ -291,5 +316,156 @@ describe("Telematics ingest HTTP boundary (real AuthGuard + RolesGuard chain)", 
     );
     expect(status).toBe(400);
     expect(lastJob).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // Part 3 — the D4 own-trip predicate (DRIVER path, real Postgres rows).
+  //
+  // The grant-with-scope pair (ADR-0034 c5 / ADR-0035 D4): DRIVER now holds
+  // gps:ingest, so these pin the SERVICE predicate that makes the grant safe —
+  // a driver batch is accepted ONLY for the driver's own IN_PROGRESS trip with
+  // the matching vehicle, and ANY violation rejects the WHOLE batch (403,
+  // fail-closed) before anything is enqueued. Real rows via the trip fixtures;
+  // the session's user id rides x-test-user so it points at the seeded login.
+  // -------------------------------------------------------------------------
+  describe("D4 own-trip predicate (DRIVER, real rows)", () => {
+    let prisma: PrismaService;
+    let adminId: string;
+    let driverUserId: string;
+    let vehicleId: string;
+    let tripId: string;
+
+    beforeAll(() => {
+      prisma = app.get(PrismaService);
+    });
+
+    beforeEach(async () => {
+      await resetDb(prisma);
+      adminId = await seedUser(prisma, UserRole.ADMIN);
+      driverUserId = await seedUser(prisma, UserRole.DRIVER);
+      const driver = await seedDriver(prisma, adminId, { userId: driverUserId });
+      const vehicle = await seedVehicle(prisma, adminId);
+      vehicleId = vehicle.id;
+      const trip = await seedTrip(prisma, {
+        vehicleId,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.IN_PROGRESS,
+        startedAt: new Date(),
+      });
+      tripId = trip.id;
+    });
+
+    test("own IN_PROGRESS trip + matching vehicle → 202, enqueued with the driver session's createdById", async () => {
+      const { status, json } = await post(
+        { pings: [makeGpsPingInput({ vehicleId, tripId })] },
+        UserRole.DRIVER,
+        driverUserId,
+      );
+      expect(status).toBe(202);
+      expect(json).toEqual({ accepted: 1, jobId: "job_fake_1" });
+      expect(lastJob?.data.createdById).toBe(driverUserId);
+      expect(lastJob?.data.pings[0].tripId).toBe(tripId);
+    });
+
+    test("a foreign trip (another driver's) → 403 whole batch, nothing enqueued (existence-hiding 403, not 404)", async () => {
+      const otherDriver = await seedDriver(prisma, adminId, {
+        licenseNumber: `LIC-${Date.now()}`,
+      });
+      const otherVehicle = await seedVehicle(prisma, adminId, {
+        registrationNumber: "BA-2-PA-0001",
+      });
+      const foreignTrip = await seedTrip(prisma, {
+        vehicleId: otherVehicle.id,
+        driverId: otherDriver.id,
+        createdById: adminId,
+        status: TripStatus.IN_PROGRESS,
+        startedAt: new Date(),
+      });
+      const { status } = await post(
+        { pings: [makeGpsPingInput({ vehicleId: otherVehicle.id, tripId: foreignTrip.id })] },
+        UserRole.DRIVER,
+        driverUserId,
+      );
+      expect(status).toBe(403);
+      expect(lastJob).toBeNull();
+    });
+
+    test("a driver ping WITHOUT tripId → 403 (the phone producer is bound to a trip)", async () => {
+      const { status } = await post(
+        { pings: [makeGpsPingInput({ vehicleId })] },
+        UserRole.DRIVER,
+        driverUserId,
+      );
+      expect(status).toBe(403);
+      expect(lastJob).toBeNull();
+    });
+
+    test("vehicleId not matching the trip's vehicle → 403 (spoofed/stale payload)", async () => {
+      const otherVehicle = await seedVehicle(prisma, adminId, {
+        registrationNumber: "BA-3-PA-0002",
+      });
+      const { status } = await post(
+        { pings: [makeGpsPingInput({ vehicleId: otherVehicle.id, tripId })] },
+        UserRole.DRIVER,
+        driverUserId,
+      );
+      expect(status).toBe(403);
+      expect(lastJob).toBeNull();
+    });
+
+    test("own trip that is NOT IN_PROGRESS → 403 (on-trip-only collection, ADR-0035 c1)", async () => {
+      const planned = await seedTrip(prisma, {
+        vehicleId,
+        driverId: (await prisma.driver.findFirstOrThrow({ where: { userId: driverUserId } })).id,
+        createdById: adminId,
+        status: TripStatus.PLANNED,
+      });
+      const { status } = await post(
+        { pings: [makeGpsPingInput({ vehicleId, tripId: planned.id })] },
+        UserRole.DRIVER,
+        driverUserId,
+      );
+      expect(status).toBe(403);
+      expect(lastJob).toBeNull();
+    });
+
+    test("a mixed batch (one owned ping + one foreign) → 403 for the WHOLE batch, nothing enqueued", async () => {
+      const otherDriver = await seedDriver(prisma, adminId, {
+        licenseNumber: `LIC-MIX-${Date.now()}`,
+      });
+      const otherVehicle = await seedVehicle(prisma, adminId, {
+        registrationNumber: "BA-4-PA-0003",
+      });
+      const foreignTrip = await seedTrip(prisma, {
+        vehicleId: otherVehicle.id,
+        driverId: otherDriver.id,
+        createdById: adminId,
+        status: TripStatus.IN_PROGRESS,
+        startedAt: new Date(),
+      });
+      const { status } = await post(
+        {
+          pings: [
+            makeGpsPingInput({ vehicleId, tripId }),
+            makeGpsPingInput({ vehicleId: otherVehicle.id, tripId: foreignTrip.id }),
+          ],
+        },
+        UserRole.DRIVER,
+        driverUserId,
+      );
+      expect(status).toBe(403);
+      expect(lastJob).toBeNull();
+    });
+
+    test("ADMIN stays unscoped — a batch with no tripId still → 202 (the c11 synthetic path)", async () => {
+      const { status } = await post(
+        { pings: [makeGpsPingInput({ vehicleId })] },
+        UserRole.ADMIN,
+        adminId,
+      );
+      expect(status).toBe(202);
+      expect(lastJob?.data.createdById).toBe(adminId);
+    });
   });
 });

@@ -205,16 +205,18 @@ export const ROLE_CAPABILITY_MAP: Record<UserRole, ReadonlySet<Capability>> = {
   //      create or delete either. Route gate = which operation classes; row
   //      scope = which records. Both are required.
   //
-  //  (2) `gps:ingest` and `gps:read-derived` — the other two caps ADR-0034 c6
-  //      assigns DRIVER — are DEFERRED, not forgotten. ADR-0034 c5's hard rule is
-  //      that no DRIVER WRITE capability enters this map without its row-level
-  //      predicate IN THE SAME CHANGE. `gps:ingest` is write-equivalent and its
-  //      own-vehicle scope is the offline-producer work (D4/D5, ADR-0035);
-  //      `gps:read-derived` would, unscoped, expose every vehicle's derived
-  //      status, and its own-vehicle scope is the geofence-context work (D6).
-  //      Each is granted when its scope lands — the lean set (c6) is reached
-  //      incrementally, never as an unscoped write.
-  [UserRole.DRIVER]: new Set<Capability>(["trips:*", "fuel-logs:*"]),
+  //  (2) `gps:ingest` — GRANTED as of D4 (ADR-0035; the 2026-07-10 resumption),
+  //      honoring ADR-0034 c5's hard rule by landing ATOMICALLY with its
+  //      row-level predicate: `TelematicsService.assertDriverCanIngest` scopes
+  //      a DRIVER batch to the driver's OWN IN_PROGRESS trip — every ping must
+  //      carry `tripId`, each trip must resolve to the actor's own Driver row
+  //      (DriverScopeService) with status IN_PROGRESS, and each ping's
+  //      `vehicleId` must equal that trip's vehicle; ANY violation rejects the
+  //      WHOLE batch 403, fail-closed, before anything is enqueued.
+  //      `gps:read-derived` — the last cap of ADR-0034 c6's lean set — stays
+  //      DEFERRED to D6: unscoped it would expose every vehicle's derived
+  //      status; its own-vehicle scope is the geofence-context work.
+  [UserRole.DRIVER]: new Set<Capability>(["trips:*", "fuel-logs:*", "gps:ingest"]),
 };
 
 // Does `role` hold `capability`? Exact set-membership against the coarse map

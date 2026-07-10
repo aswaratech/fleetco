@@ -98,6 +98,79 @@ export const SLI_TRIP_START_SUCCESS = "trip_start_success";
 export const SLI_REMINDER_DELIVERY = "reminder_delivery";
 
 /**
+ * The value of the `sli` field tagging a telematics ping-freshness signal.
+ * ADR-0026 commitment 6 NAMED the indicator and set its provisional 95.0%
+ * target — deliberately below the 99.0% API SLO because ping delivery rides
+ * third-party mobile networks in mountainous Nepal; ADR-0035 commitment 8
+ * CONSUMES that target (it does not re-set it) and refines the window to
+ * "while a trip is active and the app is foregrounded" — exactly when the D4
+ * phone producer runs, so instrumenting the authenticated ingest path IS the
+ * window. The ingest controller emits ONE line per ACCEPTED batch carrying
+ * this tag plus `sli_good` (the batch's OLDEST fix is within
+ * TELEMATICS_FRESH_SECONDS of arrival), `batch_size`, and
+ * `max_fix_age_seconds`. NEVER coordinates/speed/heading — fix AGE derives
+ * from the timestamp, which ADR-0027 c9 leaves outside Tier 5; the Tier-5
+ * fields never enter a log line. THE VALID EVENT IS AN ACCEPTED BATCH — a
+ * rejected (400/401/403) batch emits nothing (the "count attempts, not
+ * non-attempts" discipline), and the Traccar machine path is NOT tagged (its
+ * cadence is the gateway's forward loop, not this producer's — its freshness
+ * story is the M-program's). A future 28-day report filters
+ * `sli === "telematics_ping_freshness"` and computes the share with
+ * `sli_good === true` against the 95.0% target.
+ */
+export const SLI_TELEMATICS_PING_FRESHNESS = "telematics_ping_freshness";
+
+/**
+ * PROVISIONAL freshness bound (seconds): a batch is "fresh" when its oldest
+ * fix is at most this old on arrival. 120s covers the D4 producer's flush
+ * cadence (~30s batches) with headroom for a retry and a slow cell, without
+ * masking a stuck producer. Like the GPS-retention window and the due-soon
+ * windows, the NUMBER is the PO's to finalize against real production data
+ * (the docs/tech-debt.md owner-level-number pattern); this constant only
+ * instruments the indicator.
+ */
+export const TELEMATICS_FRESH_SECONDS = 120;
+
+/**
+ * The structured per-accepted-batch signal the ingest route logs. A future
+ * 28-day report filters log lines where `sli === "telematics_ping_freshness"`
+ * and computes the SLI as the share with `sli_good === true`.
+ */
+export interface PingFreshnessSignal {
+  sli: typeof SLI_TELEMATICS_PING_FRESHNESS;
+  sli_good: boolean;
+  batch_size: number;
+  max_fix_age_seconds: number;
+}
+
+/**
+ * Build the freshness signal for an accepted batch from its fix timestamps
+ * (the validated ISO strings — the only ping field that may enter a log).
+ * `now` is injectable for tests. Ages clamp at 0: a device clock slightly
+ * ahead of the server yields a "future" fix, which is a clock-skew artifact,
+ * not a stale batch — it must never count against the SLI.
+ */
+export function buildPingFreshnessSignal(
+  timestamps: readonly string[],
+  now: Date = new Date(),
+): PingFreshnessSignal {
+  let maxAgeMs = 0;
+  for (const iso of timestamps) {
+    const ageMs = now.getTime() - new Date(iso).getTime();
+    if (ageMs > maxAgeMs) {
+      maxAgeMs = ageMs;
+    }
+  }
+  const maxAgeSeconds = Math.round(maxAgeMs / 1000);
+  return {
+    sli: SLI_TELEMATICS_PING_FRESHNESS,
+    sli_good: maxAgeSeconds <= TELEMATICS_FRESH_SECONDS,
+    batch_size: timestamps.length,
+    max_fix_age_seconds: maxAgeSeconds,
+  };
+}
+
+/**
  * The structured per-request signal merged onto a request-completion log line.
  * A future 28-day report filters log lines where `sli === "api_availability"`
  * and computes the SLI as the share with `sli_good === true`.
