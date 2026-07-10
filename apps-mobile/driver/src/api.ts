@@ -91,3 +91,17 @@ export async function patchTrip(
 export async function createFuelLog(body: FuelLogPayload): Promise<{ id: string }> {
   return apiFetch<{ id: string }>("/api/v1/fuel-logs", { method: "POST", body });
 }
+
+// POST a batch of GPS fixes for the driver's active trip (ADR-0035 D4). The
+// server's own-trip predicate enforces that every ping carries the driver's own
+// IN_PROGRESS trip (a foreign/ended trip or a missing tripId 403s the whole
+// batch); the route answers 202 and the worker inserts asynchronously. The wire
+// shape is src/gps.ts's hand-mirrored WirePing (ADR-0033 c3).
+export async function postGpsPings(
+  pings: readonly import("./gps").WirePing[],
+): Promise<{ accepted: number; jobId: string | null }> {
+  return apiFetch<{ accepted: number; jobId: string | null }>("/api/v1/telematics/pings", {
+    method: "POST",
+    body: { pings },
+  });
+}

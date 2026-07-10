@@ -15,6 +15,7 @@ import {
 import { createFuelLog, listMyTrips, patchTrip } from "./src/api";
 import { authClient } from "./src/auth";
 import { fuelLogPayload, previewTotalCostPaisa } from "./src/fuel";
+import { reconcileTripGps, startTripGps, stopTripGps } from "./src/gps-task";
 import { consumeSessionExpired } from "./src/session-expired";
 import {
   isStartable,
@@ -90,15 +91,20 @@ function TripScreen() {
   const [trips, setTrips] = useState<DriverTrip[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [gpsNote, setGpsNote] = useState<string | null>(null);
 
   // Initial load on mount: the fetch + setState live in the promise continuation
   // (never synchronously in the effect body), and the `active` flag drops a late
-  // response that resolves after unmount.
+  // response that resolves after unmount. The loaded list also feeds the D4
+  // GPS self-heal (capture restarted after an app relaunch mid-trip; stopped if
+  // the trip ended elsewhere) — a native call, not a setState, so it rides the
+  // same continuation without tripping the set-state-in-effect rule.
   useEffect(() => {
     let active = true;
     listMyTrips()
       .then((items) => {
         if (active) setTrips(items);
+        void reconcileTripGps(items);
       })
       .catch(() => {
         if (active) {
@@ -114,17 +120,41 @@ function TripScreen() {
   // Start / stop, then refresh the list. Runs from an onPress handler (not an
   // effect), so these are ordinary event-driven state updates. `readings` carries
   // the meter reading(s) the vehicle calls for (ADR-0036) — km, hours, or both.
+  //
+  // D4 GPS ordering is load-bearing against the server's own-trip predicate
+  // (pings are accepted only while the trip is IN_PROGRESS): on START the trip
+  // is patched first, then capture begins; on STOP capture is drained FIRST
+  // (the final flush must still target an IN_PROGRESS trip), then the patch
+  // completes it. A capture problem never blocks the trip action — denial or
+  // an unavailable runtime degrades to an honest note (ADR-0035 c1
+  // best-effort posture).
   const transition = useCallback(
     async (trip: DriverTrip, readings: TripReadings, kind: "start" | "stop") => {
       setBusyId(trip.id);
       setError(null);
+      setGpsNote(null);
       try {
         const nowIso = new Date().toISOString();
+        if (kind === "stop") {
+          await stopTripGps();
+        }
         const payload =
           kind === "start"
             ? tripStartPayload(readings, nowIso)
             : tripStopPayload(readings, nowIso);
         await patchTrip(trip.id, payload);
+        if (kind === "start") {
+          const gps = await startTripGps({ tripId: trip.id, vehicleId: trip.vehicle.id });
+          if (gps === "denied") {
+            setGpsNote(
+              "Trip started. GPS capture is off — allow location access to record the route.",
+            );
+          } else if (gps === "unavailable") {
+            setGpsNote(
+              "Trip started. GPS capture needs the dev build (not Expo Go) — see dev-setup.md.",
+            );
+          }
+        }
         setTrips(await listMyTrips());
       } catch {
         setError(kind === "start" ? "Could not start the trip." : "Could not end the trip.");
@@ -138,6 +168,7 @@ function TripScreen() {
   return (
     <View style={styles.subScreen}>
       {error ? <Text style={styles.error}>{error}</Text> : null}
+      {gpsNote ? <Text style={styles.empty}>{gpsNote}</Text> : null}
 
       {trips === null ? (
         <ActivityIndicator accessibilityLabel="Loading trips" style={styles.loading} />

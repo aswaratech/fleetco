@@ -1,5 +1,10 @@
 import { registerRootComponent } from 'expo';
 
+// Register the D4 trip-GPS location task BEFORE the app registers —
+// expo-task-manager requires task definitions to exist at module load,
+// outside any component (its defineTask contract).
+import './src/gps-task';
+
 import App from './App';
 
 // registerRootComponent calls AppRegistry.registerComponent('main', () => App);
