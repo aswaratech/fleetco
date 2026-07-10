@@ -1,4 +1,5 @@
 import { ForbiddenException, Injectable } from "@nestjs/common";
+import type { AgentPhoneLink } from "@prisma/client";
 
 import type { Actor } from "../auth/driver-scope.service";
 import { roleHasCapability } from "../auth/permissions";
@@ -63,5 +64,22 @@ export class WhatsAppIdentityService {
     }
 
     return { userId, role };
+  }
+
+  // Look up the AgentPhoneLink for a raw inbound `From`, ACTIVE OR NOT — null
+  // on an unparseable number or no link. This is the worker's NON-authorizing
+  // lookup (W4): the STOP/START keyword flow needs the link row itself (a
+  // START must find a DEACTIVATED link, which resolveSenderToActor would
+  // fail closed on), and the conversation pointer lives on the row. It grants
+  // nothing: every agent turn still passes through resolveSenderToActor above
+  // — the single authorization chokepoint.
+  async findLinkForPhone(rawFrom: string): Promise<AgentPhoneLink | null> {
+    let phoneE164: string;
+    try {
+      phoneE164 = normalizeE164(rawFrom);
+    } catch {
+      return null;
+    }
+    return this.prisma.agentPhoneLink.findUnique({ where: { phoneE164 } });
   }
 }

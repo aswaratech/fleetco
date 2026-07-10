@@ -28,6 +28,7 @@ import { RetentionModule } from "./modules/retention/retention.module";
 import { TelematicsModule } from "./modules/telematics/telematics.module";
 import { TripsModule } from "./modules/trips/trips.module";
 import { VehiclesModule } from "./modules/vehicles/vehicles.module";
+import { WhatsAppModule } from "./modules/whatsapp/whatsapp.module";
 
 @Module({
   imports: [
@@ -105,6 +106,11 @@ import { VehiclesModule } from "./modules/vehicles/vehicles.module";
     // key surfaces at startup, not on the first chat turn. No HTTP surface
     // until A5.
     AgentModule,
+    // ADR-0046 W4: the WhatsApp agent channel — the Twilio-signature-guarded
+    // inbound webhook, the whatsapp-inbound queue + worker, and the
+    // WhatsAppSender seam. Fails closed (503 webhook, mock sender) until the
+    // operator sets the TWILIO_* env, so registering it is inert off-box.
+    WhatsAppModule,
   ],
 })
 export class AppModule {}
