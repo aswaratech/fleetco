@@ -84,6 +84,13 @@ export function visionExtractorFactory(
     AgentService,
     AgentAttachmentsService,
   ],
-  exports: [LlmClient],
+  // AgentService joined the exports with ADR-0046 W4: the WhatsApp channel
+  // runs turns through the agent's PUBLIC interface (runTurn /
+  // createConversation) from its queue worker. Named cost (ADR-0046 c1):
+  // runTurn TRUSTS its caller-supplied actor — the HTTP path's RolesGuard
+  // enforced agent:use, so every non-HTTP caller MUST bring its own turn-time
+  // authorization wall (the WhatsApp resolver's fail-closed agent:use
+  // re-check, ADR-0046 c9B). Do not export this to a caller that does not.
+  exports: [LlmClient, AgentService],
 })
 export class AgentModule {}

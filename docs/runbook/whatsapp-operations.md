@@ -54,9 +54,14 @@ A phone link maps a verified E.164 number to an ADMIN user. It is created only b
 3. Edit `/opt/fleetco/.env`, replace `TWILIO_AUTH_TOKEN`, and recreate the api container.
 4. Verify inbound (a test message is accepted, not 403'd) and outbound (a reply arrives) per §Verification.
 
-## Handling opt-out (`STOP`)
+## Handling opt-out (`STOP`) and re-activation (`START`)
 
-WhatsApp Business policy requires honoring opt-out. When a user sends `STOP`, the processor deactivates their `AgentPhoneLink` and the number thereafter resolves as unmapped (fail closed). `[W4: exact keyword handling + re-activation path to be filled in when the processor lands.]`
+WhatsApp Business policy requires honoring opt-out. The worker handles both keywords before any agent turn (trimmed, case-insensitive, exact match — `stop`, ` STOP `, and `Stop` all count):
+
+- **`STOP`** deactivates the sender's `AgentPhoneLink` (idempotent — an already-inactive link stays inactive), audited as an `opt_out` row in the `WhatsAppMessageLog`. **No reply is sent** (answering an opt-out violates the policy). Every later message from the number fails closed as unauthorized until re-activation.
+- **`START`** re-activates a deactivated link (idempotent), audited as `opt_in`, also with no reply (a courtesy confirmation is a billed message carrying no information). Re-activation is **user-recoverable opt-in to an operator-provisioned link only** — it creates nothing, and every subsequent message still passes the turn-time `agent:use` check, so START grants nothing the user's live role does not hold.
+- **Permanent removal** (the operator revoking a number, not the user pausing it): delete the link row — `DELETE FROM agent_phone_link WHERE "phoneE164" = '+977…';` via psql on the box. A deleted number cannot self-reactivate with START; re-linking requires the provisioning script.
+- Keywords from an unmapped number change nothing (audited as `dropped_unmapped`, no reply — the open-relay posture).
 
 ## Investigating an incident
 
