@@ -43,10 +43,17 @@
 		-Server
 	}
 
-	# Same-origin split (ADR-0014 §2). better-auth is mounted at /auth/{*splat}
-	# and the health probes live at the root (/health, /health/ready), both
-	# outside the Next.js app — so all three prefixes route to the api.
-	@api path /api/* /auth/* /health*
+	# Same-origin split (ADR-0014 §2). better-auth is mounted at /auth/{*splat},
+	# the health probes live at the root (/health, /health/ready), and the
+	# session-identity route GET /me (auth.controller.ts — the ONE root-level
+	# API route; every other controller lives under /api/v1/) is outside the
+	# Next.js app too — so all four route to the api. /me was missing here
+	# until the 2026-07-10 local deploy dry-run caught it: behind Caddy it fell
+	# through to the web service and 404'd, so every server-rendered page threw
+	# (the (app) shell calls /me for nav), while dev setups — web talking
+	# straight to :3001 — could never see it. A new root-level API route must
+	# be added to this matcher; prefer /api/v1/* so it routes by prefix.
+	@api path /api/* /auth/* /health* /me
 	handle @api {
 		reverse_proxy api:3001
 	}
