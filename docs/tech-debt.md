@@ -8,6 +8,14 @@ Each entry has a short title, a brief description of what is owed, the slice or 
 
 This section lists active debt entries.
 
+### API responses expose `x-powered-by: Express` through Caddy
+
+- **What is owed:** Disable Express's `x-powered-by` response header (a one-liner on the Nest HTTP adapter in `apps/api/src/main.ts`). The 2026-07-02 Caddy hardening strips the `Server` banner at the proxy, but `x-powered-by: Express` rides through untouched on every API response — free framework fingerprinting, in the same family as the banner the proxy already removes.
+- **Where surfaced:** the 2026-07-10 local deploy dry-run, inspecting live response headers while validating the Caddy security-header block.
+- **Why accepted now:** the dry-run PR was scoped to deploy-surface fixes confirmed by the walk; this is an API behavior change (response headers) that deserves its own tiny commit with a header assertion in a controller test, not a rider on a rehearsal PR. Low severity: hygiene, not a vulnerability.
+- **Estimate to discharge:** ~15 minutes — the adapter one-liner plus a header assertion added to an existing controller test; check no existing test pins the header's presence.
+- **Revisit when:** the next API hygiene batch, or any pre/post-deploy hardening pass (always-allowed ADR-0041 c3 lane).
+
 ### Devanagari vision OCR blocked upstream — the image-intake pause (ADR-0044 V0 verdict) and the owed GPU oracle test
 
 - **What is owed:** The ADR-0044 image-intake pipeline (V3–V7, shipped and tested on `main`) is **paused** because every locally-runnable vision model corrupts vision-read Devanagari through the llama.cpp runtime while handling English flawlessly and Devanagari-as-text perfectly (five model/quant combinations tested; full evidence in ADR-0044's 2026-07-06 annotation). Owed: a **GPU-runtime oracle test** of official model weights (DeepSeek-OCR / Qwen2.5-VL via transformers or vLLM, ~an hour of rented GPU) to prove whether the models or the runtime are at fault — the answer decides between waiting for an upstream llama.cpp fix, a different self-hosted serving shape, or the hosted-API annotation.
@@ -62,6 +70,7 @@ This section lists active debt entries.
 - **Why accepted now:** `NEXT_PUBLIC_*` build-time inlining is the standard Next.js pattern, and for the ADR-0014 §2 same-origin deploy the public origin IS known before the build if the operator sets the variable — so the Step-0 note fully prevents the failure at zero code cost. The runtime-config alternative is real work (a small web config-loading change + its own verification) and is not owed until the build-time bake actually bites or the deploy stops being single-same-origin.
 - **Estimate to discharge:** ~half a day — move the web origin to a runtime read (or a deploy-time rebuild arg), drop the `NEXT_PUBLIC_API_URL` build-time bake, verify the browser bundle no longer hardcodes the origin, and simplify the deploy checklist (the pre-merge Step 0 becomes unnecessary).
 - **Revisit when:** any of: (a) the build-time bake causes a real failed deploy (the Step 0 was missed); (b) the deploy stops being single-same-origin (separate web / API domains make a single baked origin wrong more often); (c) a web-app config refactor is happening anyway and this rides along.
+- **Correction (2026-07-10, local deploy dry-run):** the clause above claiming "the on-box `.env` value correctly fixes server-side fetches" is **false** — verified from the built image: Next.js inlines `NEXT_PUBLIC_*` into the **server** bundle too (19 baked occurrences under the image's `.next/server/`), so the on-box value is runtime-inert for the web app entirely. The operator-facing docs (deploy.md steps 0 + 5, `docker-compose.prod.yml`'s web comment, `.env.production.example`) were corrected in the dry-run PR. This strengthens the runtime-config discharge case: the bake is total (browser + SSR), and SSR consequently traverses the **public origin** even from inside the box — the hairpin failure mode now documented in deploy.md's "What can go wrong". The Step-0 mitigation remains fully effective when followed.
 
 ### Preventive-maintenance "due-soon" windows are provisional (500 km / 250 tenths-of-hour / 30 days) pending the PO's pick
 
