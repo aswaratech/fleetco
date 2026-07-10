@@ -133,16 +133,21 @@ docker compose -f "${COMPOSE_FILE}" exec -T postgres dropdb -U "${DB_USER}" --if
 docker compose -f "${COMPOSE_FILE}" exec -T postgres createdb -U "${DB_USER}" "${RESTORE_DB}"
 docker compose -f "${COMPOSE_FILE}" exec -T postgres psql -U "${DB_USER}" -d "${RESTORE_DB}" <"${restore_sql}"
 
-echo "restore: sanity check on ${RESTORE_DB} (row counts + admin User) —"
+echo "restore: sanity check on ${RESTORE_DB} (row counts + admin user) —"
 # Wrapped in `if` so a missing-table error (empty/bad dump) surfaces as a clear
 # warning rather than aborting before the cutover guidance below prints.
+# Table names are the Prisma @@map names (snake_case: vehicle, trip, fuel_log,
+# expense_log, user — see apps/api/prisma/schema.prisma), NOT the PascalCase
+# model names. The original PascalCase queries could never match a real dump —
+# every sanity query failed against a correctly-restored database (caught by
+# the 2026-07-10 local restore drill). "user" stays quoted: reserved word.
 if ! docker compose -f "${COMPOSE_FILE}" exec -T postgres \
   psql -U "${DB_USER}" -d "${RESTORE_DB}" \
-  -c 'SELECT count(*) AS vehicles FROM "Vehicle";' \
-  -c 'SELECT count(*) AS trips FROM "Trip";' \
-  -c 'SELECT count(*) AS fuel_logs FROM "FuelLog";' \
-  -c 'SELECT count(*) AS expense_logs FROM "ExpenseLog";' \
-  -c 'SELECT count(*) AS users FROM "User";'; then
+  -c 'SELECT count(*) AS vehicles FROM "vehicle";' \
+  -c 'SELECT count(*) AS trips FROM "trip";' \
+  -c 'SELECT count(*) AS fuel_logs FROM "fuel_log";' \
+  -c 'SELECT count(*) AS expense_logs FROM "expense_log";' \
+  -c 'SELECT count(*) AS users FROM "user";'; then
   echo "restore: WARNING — sanity-check query failed (tables missing? empty dump?). Inspect ${RESTORE_DB} by hand." >&2
 fi
 
