@@ -219,7 +219,7 @@ export ANDROID_HOME="$HOME/Library/Android/sdk"  # put both exports in your shel
 mkdir -p "$ANDROID_HOME"
 yes | sdkmanager --sdk_root="$ANDROID_HOME" --licenses
 sdkmanager --sdk_root="$ANDROID_HOME" "platform-tools" "emulator" \
-  "system-images;android-36;google_apis;arm64-v8a"
+  "system-images;android-35;google_apis;arm64-v8a"
 ```
 
 (The `openjdk@17` **formula** installs user-space with no sudo — verified on the first
@@ -246,7 +246,7 @@ npx expo prebuild --platform android   # regenerates android/ from app.json
 # APK lands at android/app/build/outputs/apk/debug/app-debug.apk
 
 # One-time AVD create, then boot + install:
-avdmanager create avd -n fleetco-dev -k "system-images;android-36;google_apis;arm64-v8a" -d pixel_7
+avdmanager create avd -n fleetco-dev -k "system-images;android-35;google_apis;arm64-v8a" -d pixel_7
 emulator -avd fleetco-dev &
 adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 # The dev APK loads JS from the Metro dev server; the emulator reaches the host's
