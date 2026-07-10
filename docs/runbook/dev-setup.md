@@ -245,9 +245,12 @@ npx expo prebuild --platform android   # regenerates android/ from app.json
 (cd android && ./gradlew assembleDebug)
 # APK lands at android/app/build/outputs/apk/debug/app-debug.apk
 
-# One-time AVD create, then boot + install:
-avdmanager create avd -n fleetco-dev -k "system-images;android-35;google_apis;arm64-v8a" -d pixel_7
-emulator -avd fleetco-dev &
+# One-time AVD create, then boot + install. Use the SDK-LOCAL avdmanager: the
+# Homebrew shim resolves the SDK relative to its own install dir (which holds
+# no system images) and fails with "Valid system image paths are: null".
+"$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n fleetco-dev \
+  -k "system-images;android-35;google_apis;arm64-v8a" -d pixel_7
+"$ANDROID_HOME/emulator/emulator" -avd fleetco-dev &
 adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 # The dev APK loads JS from the Metro dev server; the emulator reaches the host's
 # localhost as 10.0.2.2 (the LAN-IP note above is for Expo Go on a physical phone):
