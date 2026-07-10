@@ -76,3 +76,7 @@ This is new feature scope opened before the first deploy reaches daily use, whic
 - **ADR-0027 (GPS data classification)** — amended in one respect: commitment 2's on-trip-only collection scope does not govern dedicated hardware on company-owned vehicles (commitment 8 above); every other Tier-5 control carries over and extends to Traccar's store and logs. ADR-0027 carries a dated annotation.
 - **ADR-0029 / ADR-0030** — consumed unchanged: the ingest queue, `GpsPing` hybrid storage, the raw/derived read split, and the geofence aggregate are exactly what this program feeds and reads.
 - **ADR-0014 (single-VPS deployment)** — executed, at last, as M1.
+
+---
+
+**Annotation (2026-07-10, append-only):** The "deferred, not cancelled" status this ADR recorded for the driver-phone producer (§Alternatives, §Relationship to prior ADRs) converts to **resumed**: the PO re-prioritized on 2026-07-10 and picked D4–D6 back up (the ADR-0041 c2 in-phase path; the deploy-first alternative was surfaced and declined). Nothing else here changes — hardware trackers remain the PRIMARY producer, this program's M1 deploy + M10 pilot remain the operator-led remainder, and the phone producer lands as the secondary on-trip source ADR-0035 defines.
