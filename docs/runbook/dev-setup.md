@@ -212,14 +212,19 @@ hand-edited** — native configuration lives only in `app.json` (+ config plugin
 **One-time toolchain install (macOS; ~6–10 GB of downloads):**
 
 ```sh
-brew install --cask temurin@17 android-commandlinetools
-export JAVA_HOME=$(/usr/libexec/java_home -v 17)
+brew install openjdk@17
+brew install --cask android-commandlinetools
+export JAVA_HOME="$(brew --prefix openjdk@17)/libexec/openjdk.jdk/Contents/Home"
 export ANDROID_HOME="$HOME/Library/Android/sdk"  # put both exports in your shell profile
 mkdir -p "$ANDROID_HOME"
 yes | sdkmanager --sdk_root="$ANDROID_HOME" --licenses
 sdkmanager --sdk_root="$ANDROID_HOME" "platform-tools" "emulator" \
   "system-images;android-36;google_apis;arm64-v8a"
 ```
+
+(The `openjdk@17` **formula** installs user-space with no sudo — verified on the first
+executed build, 2026-07-11. The `temurin@17` cask is the system-wide alternative, but
+its `.pkg` installer requires sudo, so it cannot run from a non-interactive shell.)
 
 Gradle fetches the exact `platforms;android-*` / `build-tools;*` levels the Expo SDK
 pins on first build; the license acceptance above covers them.
