@@ -143,6 +143,38 @@ describe("POST /api/v1/whatsapp/inbound", () => {
     expect((added[0]?.data as { body: string }).body).toBe("");
   });
 
+  test("a media webhook forwards the FIRST media item to the job (W5)", async () => {
+    const mediaUrl = "https://api.twilio.com/2010-04-01/Accounts/AC123/Messages/SM1/Media/ME1";
+    const payload = makePayload({
+      NumMedia: "1",
+      MediaUrl0: mediaUrl,
+      MediaContentType0: "image/jpeg",
+    });
+    const res = await post(payload);
+    expect(res.status).toBe(202);
+    expect(added[0]?.data).toEqual({
+      messageSid: payload.MessageSid,
+      from: payload.From,
+      body: payload.Body,
+      mediaUrl,
+      mediaContentType: "image/jpeg",
+    });
+  });
+
+  test("NumMedia=0 yields a text-only job even if a stray MediaUrl0 is posted (defensive)", async () => {
+    const payload = makePayload({
+      NumMedia: "0",
+      MediaUrl0: "https://api.twilio.com/stray",
+    });
+    const res = await post(payload);
+    expect(res.status).toBe(202);
+    expect(Object.keys(added[0]?.data as Record<string, unknown>).sort()).toEqual([
+      "body",
+      "from",
+      "messageSid",
+    ]);
+  });
+
   test("a bad signature is 403 and enqueues nothing", async () => {
     const res = await post(makePayload(), "aW52YWxpZC1zaWduYXR1cmU=");
     expect(res.status).toBe(403);

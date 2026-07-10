@@ -5,15 +5,18 @@ import type { Job } from "bullmq";
 
 import { env } from "../../config/env";
 import type { Actor } from "../auth/driver-scope.service";
-// AgentService / PrismaService / WhatsAppIdentityService / WhatsAppSender are
-// injected via emitDecoratorMetadata; value imports for DI, the same pattern
-// as every worker.
+// The injected services are resolved via emitDecoratorMetadata; value imports
+// for DI, the same pattern as every worker.
+// eslint-disable-next-line @typescript-eslint/consistent-type-imports
+import { AgentAttachmentsService } from "../agent/agent-attachments.service";
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports
 import { AgentService, type AgentTurnResult } from "../agent/agent.service";
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports
 import { PrismaService } from "../prisma/prisma.service";
 import { normalizeE164 } from "./phone-e164";
 import { chunkWhatsAppBody, renderTurnForWhatsApp } from "./render-turn";
+// eslint-disable-next-line @typescript-eslint/consistent-type-imports
+import { TwilioMediaClient } from "./twilio-media.client";
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports
 import { WhatsAppIdentityService } from "./whatsapp-identity.service";
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports
@@ -54,6 +57,13 @@ import type { WhatsAppInboundJobData } from "./whatsapp.schemas";
 //       is exactly the double-fire the dedup exists to prevent.
 //   (h) render (the c6 honesty renderer) → chunk → send, one outbound ledger
 //       row per segment.
+/** The server-authored reply when an inbound photo cannot be received (W5).
+ * Server speech as itself — the c4c rule cuts both ways, and silence here
+ * would let the turn answer a caption as if the photo had arrived. */
+export const MEDIA_FAILED_NOTICE =
+  "Your photo could not be received (download or unsupported file type — JPEG, PNG, or " +
+  "WEBP under 10 MB). Send it again, or type the details instead.";
+
 @Processor(WHATSAPP_INBOUND_QUEUE, { concurrency: WHATSAPP_INBOUND_CONCURRENCY })
 export class WhatsAppInboundProcessor extends WorkerHost {
   constructor(
@@ -61,6 +71,8 @@ export class WhatsAppInboundProcessor extends WorkerHost {
     private readonly identity: WhatsAppIdentityService,
     private readonly agent: AgentService,
     private readonly sender: WhatsAppSender,
+    private readonly attachments: AgentAttachmentsService,
+    private readonly media: TwilioMediaClient,
   ) {
     super();
   }
@@ -198,6 +210,15 @@ export class WhatsAppInboundProcessor extends WorkerHost {
       return;
     }
 
+    // Nothing to act on: no text and no media (a sticker, a location share, a
+    // reaction — shapes W5 does not consume). Dropping here spends no LLM
+    // tokens on an empty turn and creates no conversation for it; the ledger
+    // row is the audit.
+    if (body.trim() === "" && data.mediaUrl === undefined) {
+      await this.finish(row.id, "ignored_empty");
+      return;
+    }
+
     // (e) Get-or-create the link's stable conversation (c4). The pointer read
     // is a same-module read of the link plus a shared-Prisma read of the
     // conversation row (the ReportsService public-data-seam precedent);
@@ -223,10 +244,42 @@ export class WhatsAppInboundProcessor extends WorkerHost {
       });
     }
 
+    // (W5) The photo path — download the signature-verified media item and
+    // store it as a first-class AgentAttachment (magic-byte sniff + 10 MB cap
+    // re-run inside upload(), never trusting Twilio's declared type). The
+    // attachment then rides the turn exactly like a web-composer photo
+    // (claim-on-send, extraction step 0), and with the image intake PAUSED
+    // (AGENT_OCR_URL unset — the standing ADR-0044 decision) the turn
+    // degrades to the honest not-configured notice: built, inert. Any
+    // download/validation failure drops the WHOLE message with a
+    // server-authored notice — running a caption-only turn would answer as
+    // if the photo had arrived.
+    let attachmentId: string | undefined;
+    if (data.mediaUrl !== undefined) {
+      try {
+        const downloaded = await this.media.download(data.mediaUrl);
+        const attachment = await this.attachments.upload(
+          conversationId,
+          {
+            buffer: downloaded.bytes,
+            mimetype: downloaded.declaredContentType ?? "application/octet-stream",
+            size: downloaded.bytes.length,
+            originalname: "whatsapp-photo",
+          },
+          actor,
+        );
+        attachmentId = attachment.id;
+      } catch {
+        await this.sendSegment(link.phoneE164, MEDIA_FAILED_NOTICE, conversationId, null);
+        await this.finish(row.id, "media_failed", conversationId);
+        return;
+      }
+    }
+
     // (f) The turn, as the resolved human (ADR-0021 / ADR-0043 c1).
     let result: AgentTurnResult;
     try {
-      result = await this.agent.runTurn(conversationId, body, actor);
+      result = await this.agent.runTurn(conversationId, body, actor, attachmentId);
     } catch (error) {
       if (error instanceof ConflictException) {
         // (g) Same-conversation collision: another turn holds the in-flight
@@ -254,33 +307,17 @@ export class WhatsAppInboundProcessor extends WorkerHost {
       [...result.messages].reverse().find((m) => m.role === "assistant" && m.content !== "") ??
       null;
     for (const chunk of chunkWhatsAppBody(rendered)) {
-      try {
-        const sent = await this.sender.send({ to: link.phoneE164, body: chunk });
-        await this.prisma.whatsAppMessageLog.create({
-          data: {
-            direction: "outbound",
-            phone: link.phoneE164,
-            providerSid: sent.sid ?? null,
-            status: "sent",
-            conversationId,
-            messageId: assistantRow?.id ?? null,
-          },
-        });
-      } catch {
-        // A failed segment: record it and withhold the rest (out-of-order
-        // fragments would garble the reply). The turn's writes stand — the
-        // ledger row is the operator's signal. Delivery-status tracking past
+      const delivered = await this.sendSegment(
+        link.phoneE164,
+        chunk,
+        conversationId,
+        assistantRow?.id ?? null,
+      );
+      if (!delivered) {
+        // A failed segment: the rest is withheld (out-of-order fragments
+        // would garble the reply). The turn's writes stand — the ledger row
+        // is the operator's signal. Delivery-status tracking past
         // sync-accepted is the deferred StatusCallback (ADR-0046 c7).
-        await this.prisma.whatsAppMessageLog.create({
-          data: {
-            direction: "outbound",
-            phone: link.phoneE164,
-            providerSid: null,
-            status: "failed",
-            conversationId,
-            messageId: assistantRow?.id ?? null,
-          },
-        });
         break;
       }
     }
@@ -292,8 +329,48 @@ export class WhatsAppInboundProcessor extends WorkerHost {
     });
   }
 
+  /** Send ONE outbound segment and write its ledger row (`sent` + provider
+   * SID, or `failed` with providerSid null). Never throws — the boolean lets
+   * the caller decide whether to continue a multi-segment reply. */
+  private async sendSegment(
+    phoneE164: string,
+    bodyText: string,
+    conversationId: string | null,
+    messageId: string | null,
+  ): Promise<boolean> {
+    try {
+      const sent = await this.sender.send({ to: phoneE164, body: bodyText });
+      await this.prisma.whatsAppMessageLog.create({
+        data: {
+          direction: "outbound",
+          phone: phoneE164,
+          providerSid: sent.sid ?? null,
+          status: "sent",
+          conversationId,
+          messageId,
+        },
+      });
+      return true;
+    } catch {
+      await this.prisma.whatsAppMessageLog.create({
+        data: {
+          direction: "outbound",
+          phone: phoneE164,
+          providerSid: null,
+          status: "failed",
+          conversationId,
+          messageId,
+        },
+      });
+      return false;
+    }
+  }
+
   /** Set a terminal status on the inbound claim row. */
-  private async finish(rowId: string, status: string): Promise<void> {
-    await this.prisma.whatsAppMessageLog.update({ where: { id: rowId }, data: { status } });
+  private async finish(rowId: string, status: string, conversationId?: string): Promise<void> {
+    await this.prisma.whatsAppMessageLog.update({
+      where: { id: rowId },
+      data: { status, ...(conversationId !== undefined ? { conversationId } : {}) },
+    });
   }
 }

@@ -1,6 +1,6 @@
 # whatsapp channel operations
 
-> **STATUS: DRAFT — written from ADR-0046 (the WhatsApp agent channel), and the mechanism it operates does not fully exist yet.** This skeleton lands with W1 (the ADR); the code it references is built across W2–W5 (`AgentPhoneLink` + the provisioning script in W2, the `WhatsAppSender` seam in W3, the inbound webhook + worker in W4, the inert photo path in W5). It is fleshed out and promoted to `STATUS: ACTIVE` — with a real "Last verified" date — in W5, once the first production deploy exists (ADR-0042 M1 / `docs/runbook/deploy.md`), a real Twilio WhatsApp sender is registered, the `TWILIO_*` secrets are set, the PO's phone link is provisioned, and each procedure below has been run once. See `docs/runbook/README.md` for the runbook discipline and `docs/architecture/decisions/0046-whatsapp-agent-channel.md` for the architecture this operates.
+> **STATUS: DRAFT — the mechanism is fully built (W1–W5 complete, 2026-07-10) but has never run in production.** Every procedure below now has real code behind it: `AgentPhoneLink` + the provisioning script (W2), the `WhatsAppSender` seam (W3), the signature-guarded inbound webhook + worker (W4), and the photo path (W5, inert behind the standing image-intake pause). The one thing this file still awaits is the M1 first production deploy (ADR-0042 / `docs/runbook/deploy.md`): promotion to `STATUS: ACTIVE` — with a real "Last verified" date — happens when the operator has registered a real Twilio WhatsApp sender, set the `TWILIO_*` secrets, provisioned the PO's phone link, and run §Verification once against the deployed system. See `docs/runbook/README.md` for the runbook discipline and `docs/architecture/decisions/0046-whatsapp-agent-channel.md` for the architecture this operates.
 
 ## When this procedure applies
 
@@ -54,6 +54,13 @@ A phone link maps a verified E.164 number to an ADMIN user. It is created only b
 3. Edit `/opt/fleetco/.env`, replace `TWILIO_AUTH_TOKEN`, and recreate the api container.
 4. Verify inbound (a test message is accepted, not 403'd) and outbound (a reply arrives) per §Verification.
 
+## Photo messages (the receipt path — currently paused)
+
+A photo sent to the company number is downloaded from Twilio (Basic-auth, host-allowlisted to `api.twilio.com` only), magic-byte-sniffed (JPEG/PNG/WEBP, 10 MB cap — the declared content type is never trusted), stored as a first-class agent attachment, and attached to the turn exactly like a web-composer photo. **The image-intake pipeline is PAUSED** (`AGENT_OCR_URL` unset — the ADR-0044 V0 decision of 2026-07-06), so today the turn degrades to the honest "image extraction is not configured" notice: the photo is stored and auditable, but nothing is extracted from it. Un-pausing is the agent's own procedure (`docs/runbook/agent-operations.md` — the OCR sidecar + `AGENT_OCR_URL`), not a WhatsApp change; the moment it un-pauses, WhatsApp photos feed the extract→propose→confirm flow with no code change here.
+
+- A photo that cannot be downloaded or fails the sniff/cap drops the **whole** message (caption included) with a server-authored "photo could not be received" reply, audited as `media_failed` — a caption-only turn would answer as if the photo had arrived.
+- A message with neither text nor a supported media item (a sticker, location, reaction) is dropped as `ignored_empty` with no reply and no LLM cost.
+
 ## Handling opt-out (`STOP`) and re-activation (`START`)
 
 WhatsApp Business policy requires honoring opt-out. The worker handles both keywords before any agent turn (trimmed, case-insensitive, exact match — `stop`, ` STOP `, and `Stop` all count):
@@ -71,4 +78,13 @@ WhatsApp Business policy requires honoring opt-out. The worker handles both keyw
 
 ## Verification
 
-Not yet verified — this procedure is `DRAFT` (written from ADR-0046, mechanism built across W2–W5, not executed against production). Replace with the date + `STATUS: ACTIVE` after the first real inbound message is accepted (signature verified), runs a turn as the resolved ADMIN, and the reply is delivered — with the `WhatsAppMessageLog` and `/agent/activity` rows confirming it.
+Not yet verified — this procedure is `DRAFT` (mechanism complete as of W5, never executed against production). The first-run checklist, post-M1, after §First-time setup and provisioning the PO's link:
+
+1. **Text round-trip:** WhatsApp "how many vehicles are active" to the company number → a reply arrives in-thread; the `WhatsAppMessageLog` shows the inbound row `processed` + outbound row(s) `sent` with provider SIDs, and the conversation appears in the web chat list.
+2. **A write with an action card:** "log 40 litres of diesel for <vehicle> at 180 per litre" → the reply carries the ✓ action card with the changed fields and a deep-link; `/agent/activity` shows the action; the deep-link opens the record.
+3. **Photo (paused-state):** send any photo → the reply is the honest "image extraction is not configured" degradation; the attachment row exists.
+4. **Fail-closed:** a message from an unlinked number gets NO reply and a `dropped_unmapped` row.
+5. **Opt-out round-trip:** `STOP` → no reply, link deactivated, next message dropped; `START` → link reactivated, messages flow.
+6. **The kill switch:** clear `TWILIO_*`, recreate the api container, confirm the webhook answers 503; restore.
+
+Replace this section's first line with the run date + flip the header to `STATUS: ACTIVE` when all six pass.
