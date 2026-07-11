@@ -127,25 +127,30 @@ export async function enqueuePings(pings: readonly WirePing[]): Promise<void> {
     return;
   }
   const db = await getDb();
-  await db.withTransactionAsync(async () => {
-    for (const ping of pings) {
-      await db.runAsync(
-        `INSERT INTO outbox_pings
-           (vehicle_id, trip_id, latitude, longitude, altitude, speed, heading, timestamp)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?);`,
-        [
-          ping.vehicleId,
-          ping.tripId,
-          ping.latitude,
-          ping.longitude,
-          ping.altitude,
-          ping.speed,
-          ping.heading,
-          ping.timestamp,
-        ],
-      );
-    }
-  });
+  // Deliberately NO explicit transaction: pings are independent rows, a
+  // partial batch is fine under the at-least-once posture, and each runAsync
+  // autocommits. The D5 E2E caught the alternative failing live: a
+  // withTransactionAsync left OPEN when the backgrounded JS thread paused
+  // mid-callback (bundled build, API 35) wedged every later statement on the
+  // shared connection — enqueues, depth checks and the drain all queued
+  // behind it forever. Autocommit statements cannot be left half-open.
+  for (const ping of pings) {
+    await db.runAsync(
+      `INSERT INTO outbox_pings
+         (vehicle_id, trip_id, latitude, longitude, altitude, speed, heading, timestamp)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?);`,
+      [
+        ping.vehicleId,
+        ping.tripId,
+        ping.latitude,
+        ping.longitude,
+        ping.altitude,
+        ping.speed,
+        ping.heading,
+        ping.timestamp,
+      ],
+    );
+  }
 
   const aged = await db.runAsync(
     "DELETE FROM outbox_pings WHERE timestamp < ?;",

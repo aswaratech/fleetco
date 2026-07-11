@@ -41,7 +41,7 @@ import {
   type ActiveTripRef,
 } from "./gps";
 import { enqueuePings } from "./outbox-sqlite";
-import { drainOutboxNow } from "./sync-runtime";
+import { drainOutboxNow, notifyCapture } from "./sync-runtime";
 
 export const GPS_TASK_NAME = "fleetco-gps-capture";
 const ACTIVE_TRIP_KEY = "fleetco.gps.activeTrip";
@@ -82,17 +82,28 @@ async function resolveActiveRef(): Promise<ActiveTripRef | null> {
   }
 }
 
-// Buffer fixes durably against the bound trip. An outbox failure costs those
-// fixes (count-only warning — c1's gap tolerance), never the capture loop.
+// Buffer fixes durably against the bound trip, then nudge the SyncManager —
+// capture events are the delivery trigger that survives backgrounding (see
+// notifyCapture). An outbox failure costs those fixes (count-only warning —
+// c1's gap tolerance), never the capture loop. The watchdog bounds the wait:
+// a wedged database write must resolve this call anyway, or it would jam the
+// task-manager event queue and take capture down with it (the failure mode
+// the D5 E2E caught live).
 async function enqueueFixes(fixes: readonly Location.LocationObject[]): Promise<void> {
   const ref = await resolveActiveRef();
   if (!ref || fixes.length === 0) {
     return;
   }
   try {
-    await enqueuePings(fixes.map((fix) => pingFromFix(fix, ref)));
+    await Promise.race([
+      enqueuePings(fixes.map((fix) => pingFromFix(fix, ref))),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("outbox write timed out")), 10_000),
+      ),
+    ]);
+    notifyCapture();
   } catch {
-    console.warn(`gps: lost ${fixes.length} fix(es) — the outbox write failed`);
+    console.warn(`gps: lost ${fixes.length} fix(es) — the outbox write failed or timed out`);
   }
 }
 

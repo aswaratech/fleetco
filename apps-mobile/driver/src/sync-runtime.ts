@@ -133,6 +133,19 @@ export async function drainOutboxNow(): Promise<void> {
   await runDrain();
 }
 
+// Capture-driven trigger: the task handler calls this after buffering fixes,
+// so delivery rides the capture cadence instead of depending on setInterval —
+// which the OS throttles for a backgrounded app (observed on the bundled
+// build; the FGS keeps capture alive, not JS timers). Deliberately a no-op
+// until startSync has run: the headless runtime never starts sync (see the
+// header), so this cannot resurrect the headless-drain 401 footgun.
+export function notifyCapture(): void {
+  if (!started) {
+    return;
+  }
+  void kickSync();
+}
+
 // Wire the triggers once, from the signed-in shell's mount. Idempotent; never
 // throws (a broken trigger wiring must not take the app down with it).
 export function startSync(): void {
