@@ -1,6 +1,7 @@
 import { InjectQueue } from "@nestjs/bullmq";
-import { Injectable, NotFoundException } from "@nestjs/common";
+import { ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import {
+  TripStatus,
   type GeofenceType,
   type Prisma,
   type VehicleKind,
@@ -26,6 +27,14 @@ import { PrismaService } from "../prisma/prisma.service";
 // runtime value for DI, same eslint override as PrismaService above.
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports
 import { GeofencesService } from "../geofences/geofences.service";
+
+// DriverScopeService supplies the D4 own-record predicate's driver resolution
+// (ADR-0034 c4/c5) — the auth module's PUBLIC export for exactly this class of
+// consumer (TelematicsModule already imports AuthModule). Injected as a runtime
+// value, same eslint override as PrismaService above; `Actor` rides along as a
+// type-only specifier.
+// eslint-disable-next-line @typescript-eslint/consistent-type-imports
+import { DriverScopeService, type Actor } from "../auth/driver-scope.service";
 
 // The named queue this feature owns (ADR-0029 commitment 2: per-feature queue
 // ownership — the root config lives in the @Global() QueueModule from T1, but
@@ -217,7 +226,64 @@ export class TelematicsService {
     private readonly prisma: PrismaService,
     @InjectQueue(GPS_INGEST_QUEUE) private readonly queue: Queue<GpsIngestJobData>,
     private readonly geofences: GeofencesService,
+    private readonly driverScope: DriverScopeService,
   ) {}
+
+  /**
+   * D4's row-level own-record predicate (ADR-0034 c5: a DRIVER write capability
+   * enters the capability map ONLY with its scope in the same change; ADR-0035
+   * c1's on-trip collection boundary). For a DRIVER actor, every ping in the
+   * batch must carry a `tripId`; each distinct trip must be the driver's OWN
+   * (`trip.driverId === resolveOwnDriverId(actor)`, via the Driver.userId link)
+   * and IN_PROGRESS; and each ping's `vehicleId` must equal its trip's vehicle.
+   * The phone producer only ever reports the active trip it is bound to, so
+   * anything else is a spoofed or stale payload — ANY violation rejects the
+   * WHOLE batch with 403, fail-closed, matching the worker's all-or-nothing
+   * `createMany` posture (a partially-accepted batch would lie about what was
+   * stored). The bare 403 deliberately hides whether a foreign trip exists
+   * (the existence-hiding rule the D2 read paths follow with 404).
+   *
+   * Non-DRIVER actors return immediately with zero queries — the ADMIN
+   * synthetic-ingest path (ADR-0029 c11) is unchanged. The check runs BEFORE
+   * enqueue: the worker has no client to answer, so pre-enqueue is the one
+   * place a synchronous 403 can exist. The one indexed Driver lookup + one
+   * indexed Trip lookup it costs on the driver path is accepted deliberately
+   * over the 202-fast micro-optimization — the c5 atomic rule outranks it.
+   * An unlinked DRIVER session throws 403 inside resolveOwnDriverId (the D2
+   * fail-closed posture).
+   */
+  async assertDriverCanIngest(actor: Actor, pings: GpsPingInput[]): Promise<void> {
+    const ownDriverId = await this.driverScope.resolveOwnDriverId(actor);
+    if (ownDriverId === null) {
+      return;
+    }
+
+    const tripIds = new Set<string>();
+    for (const ping of pings) {
+      if (!ping.tripId) {
+        throw new ForbiddenException("Driver pings must carry the active trip's tripId.");
+      }
+      tripIds.add(ping.tripId);
+    }
+
+    const trips = await this.prisma.trip.findMany({
+      where: { id: { in: [...tripIds] } },
+      select: { id: true, driverId: true, vehicleId: true, status: true },
+    });
+    const tripById = new Map(trips.map((trip) => [trip.id, trip]));
+
+    for (const ping of pings) {
+      const trip = ping.tripId ? tripById.get(ping.tripId) : undefined;
+      if (
+        !trip ||
+        trip.driverId !== ownDriverId ||
+        trip.status !== TripStatus.IN_PROGRESS ||
+        trip.vehicleId !== ping.vehicleId
+      ) {
+        throw new ForbiddenException();
+      }
+    }
+  }
 
   /**
    * Producer half of the ingestion path (ADR-0029 commitment 10). Enqueue the

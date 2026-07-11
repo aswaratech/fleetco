@@ -19,7 +19,12 @@
     "@better-auth/expo": "~1.6.19",
     "better-auth": "~1.6.19",
     "expo": "~56.0.12",
+    "expo-constants": "~56.0.18",
+    "expo-linking": "~56.0.14",
+    "expo-location": "~56.0.18",
+    "expo-network": "~56.0.5",
     "expo-secure-store": "^56.0.4",
+    "expo-web-browser": "~56.0.5",
     "expo-status-bar": "~56.0.4",
     "react": "19.2.3",
     "react-native": "0.85.3"

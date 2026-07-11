@@ -8,6 +8,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest"
 
 import { seedGatewayUser } from "../scripts/seed-gateway-user";
 import { GeofencesService } from "../src/modules/geofences/geofences.service";
+import { DriverScopeService } from "../src/modules/auth/driver-scope.service";
 import { PrismaService } from "../src/modules/prisma/prisma.service";
 import { INGEST_API_KEY_TOKEN, IngestKeyGuard } from "../src/modules/telematics/ingest-key.guard";
 import { GPS_INGEST_QUEUE, TelematicsService } from "../src/modules/telematics/telematics.service";
@@ -150,6 +151,7 @@ describe("TraccarIngestService (IMEI resolution + drop taxonomy, real Prisma)", 
         TraccarIngestService,
         TelematicsService,
         GeofencesService,
+        DriverScopeService,
         PrismaService,
         { provide: getQueueToken(GPS_INGEST_QUEUE), useValue: fakeQueue },
       ],
@@ -246,6 +248,7 @@ describe("Traccar ingest HTTP boundary (IngestKeyGuard, real HTTP)", () => {
         TraccarIngestService,
         TelematicsService,
         GeofencesService,
+        DriverScopeService,
         PrismaService,
         IngestKeyGuard,
         { provide: INGEST_API_KEY_TOKEN, useValue: KEY },
@@ -314,6 +317,7 @@ describe("Traccar ingest HTTP boundary (IngestKeyGuard, real HTTP)", () => {
         TraccarIngestService,
         TelematicsService,
         GeofencesService,
+        DriverScopeService,
         PrismaService,
         IngestKeyGuard,
         { provide: INGEST_API_KEY_TOKEN, useValue: null },
