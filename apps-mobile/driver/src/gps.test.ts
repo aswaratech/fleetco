@@ -1,21 +1,13 @@
 import { describe, expect, it } from "@jest/globals";
 
-import {
-  BATCH_MAX,
-  chunkPings,
-  FLUSH_MAX_INTERVAL_MS,
-  FLUSH_MAX_PINGS,
-  pingFromFix,
-  shouldFlush,
-  type ActiveTripRef,
-  type WirePing,
-} from "./gps";
+import { pingFromFix, type ActiveTripRef, type WirePing } from "./gps";
 
-// D4's pure capture logic (ADR-0035 c1). The load-bearing pins: the wire ping
+// The pure capture logic (ADR-0035 c1). The load-bearing pins: the wire ping
 // matches the server's `.strict()` PingSchema EXACTLY (an extra key would 400
-// the whole batch), out-of-range rider values become null (never clamped —
-// a single clamped lie or -1 "unknown" would otherwise 400 the batch), and
-// the flush decision holds the freshness envelope the server SLI measures.
+// the whole batch) and out-of-range rider values become null (never clamped —
+// a single clamped lie or -1 "unknown" would otherwise 400 the batch).
+// Delivery-side pins (drain chunking, backoff, classification) live in
+// sync.test.ts since D5 moved delivery to the SyncManager.
 
 const REF: ActiveTripRef = { tripId: "cktrip1234567890", vehicleId: "ckveh1234567890" };
 
@@ -96,35 +88,3 @@ describe("pingFromFix", () => {
   });
 });
 
-describe("chunkPings", () => {
-  const ping = pingFromFix(fix(), REF);
-
-  it("returns one chunk under the cap and splits above it", () => {
-    expect(chunkPings([ping, ping])).toHaveLength(1);
-    const many = Array.from({ length: BATCH_MAX + 1 }, () => ping);
-    const chunks = chunkPings(many);
-    expect(chunks).toHaveLength(2);
-    expect(chunks[0]).toHaveLength(BATCH_MAX);
-    expect(chunks[1]).toHaveLength(1);
-  });
-
-  it("returns no chunks for an empty buffer (an empty batch would 400)", () => {
-    expect(chunkPings([])).toHaveLength(0);
-  });
-});
-
-describe("shouldFlush", () => {
-  it("never flushes an empty buffer", () => {
-    expect(shouldFlush(0, FLUSH_MAX_INTERVAL_MS * 2)).toBe(false);
-  });
-
-  it("flushes on the count threshold", () => {
-    expect(shouldFlush(FLUSH_MAX_PINGS, 0)).toBe(true);
-    expect(shouldFlush(FLUSH_MAX_PINGS - 1, 0)).toBe(false);
-  });
-
-  it("flushes on the interval cap even with one fix buffered", () => {
-    expect(shouldFlush(1, FLUSH_MAX_INTERVAL_MS)).toBe(true);
-    expect(shouldFlush(1, FLUSH_MAX_INTERVAL_MS - 1)).toBe(false);
-  });
-});
