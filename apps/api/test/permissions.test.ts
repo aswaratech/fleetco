@@ -3,20 +3,22 @@ import { describe, expect, test } from "vitest";
 
 import { roleHasCapability } from "../src/modules/auth/permissions";
 
-// D2 (ADR-0034 c5/c6): the DRIVER role is DEFINED with exactly the two write
-// capabilities whose own-record scope D2 ships — trips:* and fuel-logs:*. The
-// other two caps in the eventual lean set (gps:ingest, gps:read-derived) are
-// DEFERRED to D4–D6 with their scopes (c5's hard rule: no write cap without its
-// row predicate in the same change), so DRIVER must NOT hold them yet.
+// ADR-0034 c5/c6: the DRIVER role's lean capability set is reached
+// INCREMENTALLY, each write cap landing atomically with its row-level scope
+// (c5's hard rule). D2 shipped trips:* + fuel-logs:* with the own-record
+// predicate; D4 (ADR-0035, resumed 2026-07-10) shipped gps:ingest with the
+// own-IN_PROGRESS-trip predicate (TelematicsService.assertDriverCanIngest).
+// gps:read-derived stays deferred to D6 (own-vehicle scope, geofence context).
 describe("DRIVER capability set (ADR-0034 c5/c6)", () => {
   test("DRIVER holds trips:* and fuel-logs:* (granted in D2)", () => {
     expect(roleHasCapability(UserRole.DRIVER, "trips:*")).toBe(true);
     expect(roleHasCapability(UserRole.DRIVER, "fuel-logs:*")).toBe(true);
   });
 
-  test("DRIVER does NOT yet hold the deferred GPS caps, raw read, or other operational caps", () => {
-    // Deferred to D4/D5 (gps:ingest) and D6 (gps:read-derived), each with its scope.
-    expect(roleHasCapability(UserRole.DRIVER, "gps:ingest")).toBe(false);
+  test("DRIVER holds gps:ingest (D4, with its scope); the D6 cap, raw read, and operational caps stay off", () => {
+    // Granted in D4 with assertDriverCanIngest (ADR-0034 c5 honored);
+    // gps:read-derived stays deferred to D6 with its own-vehicle scope.
+    expect(roleHasCapability(UserRole.DRIVER, "gps:ingest")).toBe(true);
     expect(roleHasCapability(UserRole.DRIVER, "gps:read-derived")).toBe(false);
     // Always ADMIN-only — the raw trace is the most-privileged class (ADR-0027 c7).
     expect(roleHasCapability(UserRole.DRIVER, "gps:read-raw")).toBe(false);
