@@ -20,6 +20,14 @@ export const LOG_REDACT_PATHS: readonly string[] = [
   "*.licenseNumber",
   "*.phone",
   "*.contactPerson",
+  // Consignee + site-contact person names (ADR-0047 c6 — the Tier-2 PII
+  // amendment for trip dispatch). The consignee/site phones inherit the
+  // `*.phone` path above; these two NAME paths are the new coverage the
+  // dispatch order (Trip.consigneeName) and the Site aggregate
+  // (Site.contactName) need so a person's name never lands in a log line.
+  // Same `*.<key>` one-level-under-a-wrapper form as *.fullName above.
+  "*.consigneeName",
+  "*.contactName",
   "*.dateOfBirth",
   // GPS telematics location keys (ADR-0029 commitment 12 / ADR-0027
   // commitment 5). The GpsPing coordinate + movement fields are Tier 5 (a raw

@@ -14,7 +14,22 @@ import { z } from "zod";
 // TripStatus enum — must mirror TripStatus in prisma/schema.prisma.
 // Order matches the Prisma enum so an audit grep finds both lists side
 // by side; the order has no runtime significance.
-const TRIP_STATUSES = ["PLANNED", "IN_PROGRESS", "COMPLETED", "CANCELLED"] as const;
+//
+// ADR-0047 c1 (ticket W2) added OFFERED and ACCEPTED (the dispatch →
+// acceptance states) between PLANNED and IN_PROGRESS. W2 is schema-only
+// staging: the two values join this array (so the wire schemas accept
+// them) and the Prisma enum, but the dispatch TRANSITION SEMANTICS
+// (PLANNED → OFFERED → ACCEPTED → IN_PROGRESS, CANCELLED from any
+// non-terminal) land in W4 — see TRIP_STATUS_TRANSITIONS below, whose two
+// new keys are placeholders that preserve the current behavior until then.
+const TRIP_STATUSES = [
+  "PLANNED",
+  "OFFERED",
+  "ACCEPTED",
+  "IN_PROGRESS",
+  "COMPLETED",
+  "CANCELLED",
+] as const;
 
 // GET /api/v1/trips query parameters (iter 8 — read path).
 // Filter / sort / pagination contract mirrors the Drivers and Vehicles
@@ -444,12 +459,24 @@ export type UpdateTripInput = z.infer<typeof UpdateTripSchema>;
 // are allowed: the service-side `update()` treats the matrix as a
 // guard on actual changes only.
 //
+// ADR-0047 W2 STAGING NOTE. OFFERED and ACCEPTED now exist in
+// TRIP_STATUSES, so this `Record` is REQUIRED by the type system to carry
+// a key for each. W2 is schema-only: the two new keys are PLACEHOLDERS
+// (empty outbound lists) and the pre-dispatch behavior is unchanged —
+// PLANNED still reaches IN_PROGRESS directly, so every existing transition
+// test holds. The real dispatch lifecycle (PLANNED → OFFERED → ACCEPTED →
+// IN_PROGRESS, with CANCELLED reachable from every non-terminal state) is
+// wired in W4, which rewrites the four affected rows. Do NOT rely on the
+// OFFERED/ACCEPTED rows until W4.
+//
 // Exported so the service and its tests can share the source of truth.
 export const TRIP_STATUS_TRANSITIONS: Record<
   (typeof TRIP_STATUSES)[number],
   readonly (typeof TRIP_STATUSES)[number][]
 > = {
   PLANNED: ["IN_PROGRESS", "CANCELLED"],
+  OFFERED: [], // W4: → ACCEPTED, CANCELLED
+  ACCEPTED: [], // W4: → IN_PROGRESS, CANCELLED
   IN_PROGRESS: ["COMPLETED", "CANCELLED"],
   COMPLETED: [],
   CANCELLED: [],
