@@ -1,5 +1,5 @@
 import { getQueueToken } from "@nestjs/bullmq";
-import { BadRequestException, type INestApplication } from "@nestjs/common";
+import { BadRequestException } from "@nestjs/common";
 import type { NestExpressApplication } from "@nestjs/platform-express";
 import { Test } from "@nestjs/testing";
 import { TripStatus, UserRole } from "@prisma/client";
