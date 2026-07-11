@@ -49,6 +49,11 @@ const ACTIVE_TRIP_KEY = "fleetco.gps.activeTrip";
 let activeRef: ActiveTripRef | null = null;
 let watch: Location.LocationSubscription | null = null;
 let appStateWired = false;
+// Believed FGS state. Trustworthy because beginFgs only attempts while the
+// app is ACTIVE — the one state where a refusal cannot happen silently (see
+// beginFgs). Reset on stop and on every process restart (module state), so a
+// service killed out from under us is re-cycled on the next cold launch.
+let fgsUp = false;
 
 // The trip binding, surviving a headless relaunch: memory first, secure-store
 // as the durable copy (written on start, cleared on stop).
@@ -135,6 +140,13 @@ function endWatch(): void {
 // watch on background, resume on foreground while a trip is bound. The FGS
 // path needs none of this — running backgrounded is its whole point. Fixes
 // are already in the outbox, so pausing loses nothing buffered.
+//
+// The "active" branch also UPGRADES watch→FGS when background permission
+// exists: an FGS start can be refused while the app isn't fully foregrounded
+// (the cold-launch reconcile hits this — observed live on API 35), so every
+// return to the foreground is a chance to converge onto the D5 mechanism.
+// The FGS is started BEFORE the watch is torn down; the overlap instant can
+// duplicate a fix, which the at-least-once posture already tolerates.
 function wireAppStatePauseResume(): void {
   if (appStateWired) {
     return;
@@ -145,11 +157,8 @@ function wireAppStatePauseResume(): void {
       try {
         if (state === "background" || state === "inactive") {
           endWatch();
-        } else if (state === "active" && activeRef && !watch) {
-          const fgsRunning = await isFgsCapturing();
-          if (!fgsRunning) {
-            await beginWatch();
-          }
+        } else if (state === "active") {
+          await ensureCaptureMechanism();
         }
       } catch {
         // pause/resume is best-effort; the reconcile on trips load backstops it.
@@ -160,7 +169,11 @@ function wireAppStatePauseResume(): void {
 
 // ——— the foreground-service path (background permission granted) ———
 
-async function isFgsCapturing(): Promise<boolean> {
+// NOTE: hasStartedLocationUpdatesAsync reports task REGISTRATION, not whether
+// the foreground service is actually up — expo exposes no FGS-state query.
+// Registration is still the right signal for "capture intent exists" (the
+// reconcile + stop paths); the FGS itself is made reliable by beginFgs below.
+async function isTaskRegistered(): Promise<boolean> {
   try {
     return await Location.hasStartedLocationUpdatesAsync(GPS_TASK_NAME);
   } catch {
@@ -168,7 +181,24 @@ async function isFgsCapturing(): Promise<boolean> {
   }
 }
 
+// Two discovered API-35 truths shape this function (both observed live in the
+// D5 E2E, 2026-07-11):
+//   1. A location-FGS start is REFUSED while the app is not fully
+//      foregrounded — and expo logs the refusal as a native WARNING while the
+//      JS promise RESOLVES, so failure is undetectable from JS. Attempting
+//      only while AppState is "active" is the only reliable guard.
+//   2. startLocationUpdatesAsync on an ALREADY-REGISTERED task (registration
+//      persists across app restarts) just updates options — the consumer does
+//      not re-run its foreground-service start. A stop→start cycle forces the
+//      full start path, so a task left FGS-less by an earlier refusal
+//      actually recovers.
 async function beginFgs(): Promise<void> {
+  if (AppState.currentState !== "active") {
+    throw new Error("app not foregrounded yet");
+  }
+  if (await isTaskRegistered()) {
+    await Location.stopLocationUpdatesAsync(GPS_TASK_NAME);
+  }
   await Location.startLocationUpdatesAsync(GPS_TASK_NAME, {
     accuracy: Location.Accuracy.High,
     timeInterval: CAPTURE_INTERVAL_MS,
@@ -181,11 +211,38 @@ async function beginFgs(): Promise<void> {
       killServiceOnDestroy: false,
     },
   });
+  fgsUp = true;
 }
 
 async function endFgs(): Promise<void> {
-  if (await isFgsCapturing()) {
+  fgsUp = false;
+  if (await isTaskRegistered()) {
     await Location.stopLocationUpdatesAsync(GPS_TASK_NAME);
+  }
+}
+
+// Converge onto the best capture mechanism the current grants allow — the
+// FGS when background permission exists (cycling the task if needed), the
+// in-app watch otherwise. Shared by the AppState foreground hook and the
+// reconcile, both of which may find capture degraded (an FGS refused during
+// a cold launch, a service killed by the OS). No-op unless a trip is bound,
+// the app is truly active, and the FGS isn't already believed up.
+async function ensureCaptureMechanism(): Promise<void> {
+  if (!activeRef || AppState.currentState !== "active" || fgsUp) {
+    return;
+  }
+  const background = await Location.getBackgroundPermissionsAsync();
+  if (background.granted) {
+    try {
+      await beginFgs();
+      endWatch();
+      return;
+    } catch {
+      console.warn("gps: foreground-service start failed; using the in-app watch");
+    }
+  }
+  if (!watch) {
+    await beginWatch();
   }
 }
 
@@ -216,10 +273,23 @@ export async function startTripGps(ref: ActiveTripRef): Promise<StartGpsResult> 
     if (background.granted) {
       try {
         await beginFgs();
+        wireAppStatePauseResume();
         return "started-background";
       } catch {
-        // The service refused to start (OEM quirk, Expo Go) — fall through to
-        // the watch rather than losing capture entirely.
+        // A location FGS start is refused while the app is not fully
+        // foregrounded — the cold-launch reconcile lands in that window
+        // (observed live: expo's LocationTaskConsumer "cannot be started
+        // while the app is in the background", ~0.7s after launch). One
+        // short retry covers the race; a real failure (OEM quirk, Expo Go)
+        // still falls through to the watch rather than losing capture.
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+          await beginFgs();
+          wireAppStatePauseResume();
+          return "started-background";
+        } catch {
+          console.warn("gps: foreground service failed to start; falling back to the in-app watch");
+        }
       }
     }
     await beginWatch();
@@ -265,8 +335,11 @@ export async function stopTripGps(): Promise<void> {
 
 // Self-heal on trips load (an app relaunch mid-trip, or a trip ended
 // elsewhere while capture kept running):
-//   - an IN_PROGRESS trip + foreground permission + no capture running →
-//     resume silently (get*, never request* — no prompt from a list load);
+//   - an IN_PROGRESS trip + foreground permission → re-bind the trip ref
+//     (the server's answer beats any stale persisted binding) and converge
+//     onto the best mechanism (get*, never request* — no prompt from a list
+//     load). A task registration that survived a restart FGS-less is exactly
+//     what ensureCaptureMechanism recovers.
 //   - no IN_PROGRESS trip + any capture running → stop, clear, drain.
 // Structural trip type so this stays decoupled from src/trips.ts.
 export async function reconcileTripGps(
@@ -274,13 +347,17 @@ export async function reconcileTripGps(
 ): Promise<void> {
   try {
     const inProgress = trips.find((trip) => trip.status === "IN_PROGRESS");
-    const capturing = watch !== null || (await isFgsCapturing());
-    if (inProgress && !capturing) {
+    if (inProgress) {
       const permission = await Location.getForegroundPermissionsAsync();
-      if (permission.granted) {
-        await startTripGps({ tripId: inProgress.id, vehicleId: inProgress.vehicle.id });
+      if (!permission.granted) {
+        return;
       }
-    } else if (!inProgress && capturing) {
+      const ref = { tripId: inProgress.id, vehicleId: inProgress.vehicle.id };
+      activeRef = ref;
+      await SecureStore.setItemAsync(ACTIVE_TRIP_KEY, JSON.stringify(ref));
+      wireAppStatePauseResume();
+      await ensureCaptureMechanism();
+    } else if (watch !== null || (await isTaskRegistered())) {
       await stopTripGps();
     }
   } catch {

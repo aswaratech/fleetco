@@ -10,7 +10,7 @@
 
 import * as Location from "expo-location";
 import * as SecureStore from "expo-secure-store";
-import { Linking } from "react-native";
+import { Linking, PermissionsAndroid, Platform } from "react-native";
 
 const DISMISSED_KEY = "fleetco.gps.onboarding.dismissed";
 
@@ -45,7 +45,12 @@ export type BackgroundGpsRequestResult =
 
 // The ladder itself: foreground first (background is meaningless without it),
 // then background ("Allow all the time" — on API 30+ Android renders this as
-// a settings screen, and the promise resolves when the driver returns).
+// a settings screen, and the promise resolves when the driver returns), then
+// POST_NOTIFICATIONS (runtime on API 33+; RN's built-in PermissionsAndroid —
+// no new dep). The foreground-service notification is the design's honest
+// "recording is running" signal (ADR-0027 c2), so it is part of the ladder —
+// but a notification refusal only mutes the signal, never capture itself, so
+// it does not change the result.
 export async function requestBackgroundGps(): Promise<BackgroundGpsRequestResult> {
   try {
     const foreground = await Location.requestForegroundPermissionsAsync();
@@ -53,7 +58,17 @@ export async function requestBackgroundGps(): Promise<BackgroundGpsRequestResult
       return "denied";
     }
     const background = await Location.requestBackgroundPermissionsAsync();
-    return background.granted ? "background" : "foreground";
+    if (!background.granted) {
+      return "foreground";
+    }
+    if (Platform.OS === "android") {
+      try {
+        await PermissionsAndroid.request("android.permission.POST_NOTIFICATIONS");
+      } catch {
+        // older Android (pre-13) has no such runtime permission — fine
+      }
+    }
+    return "background";
   } catch {
     return "unavailable";
   }
