@@ -94,6 +94,27 @@ describe("agent capability token (ADR-0043 c1, ticket A5)", () => {
   });
 });
 
+describe("gps:ingest grant (ADR-0035 D4 — granted WITH its own-trip scope)", () => {
+  test("gps:ingest is ADMIN + DRIVER — not OFFICE_STAFF", () => {
+    expect(roleHasCapability(UserRole.ADMIN, "gps:ingest")).toBe(true);
+    // The D4 grant (ADR-0034 c5's hard rule): DRIVER holds this ONLY because
+    // the same change landed TelematicsService.assertDriverCanIngest — the
+    // own-IN_PROGRESS-trip batch predicate (telematics.controller.test.ts
+    // pins its 202/403 matrix over real rows). Route token = "may ingest";
+    // service predicate = "only for your own active trip". Both required.
+    expect(roleHasCapability(UserRole.DRIVER, "gps:ingest")).toBe(true);
+    // OFFICE_STAFF stays off the ingest path (ADR-0029 c11's posture: office
+    // staff read derived positions, they do not produce them).
+    expect(roleHasCapability(UserRole.OFFICE_STAFF, "gps:ingest")).toBe(false);
+  });
+
+  test("gps:read-derived stays OFF DRIVER — the D6 deferral holds", () => {
+    // Unscoped it would expose every vehicle's derived status; its
+    // own-vehicle scope is the geofence-context work (D6, ADR-0033 c8).
+    expect(roleHasCapability(UserRole.DRIVER, "gps:read-derived")).toBe(false);
+  });
+});
+
 describe("tracker-register capability tokens (ADR-0042 M4)", () => {
   test("trackers:read is on the operational floor; trackers:write is ADMIN-only", () => {
     expect(roleHasCapability(UserRole.ADMIN, "trackers:read")).toBe(true);

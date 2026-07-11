@@ -5,6 +5,7 @@ import { GeofenceType, VehicleStatus } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 
 import { GeofencesService } from "../src/modules/geofences/geofences.service";
+import { DriverScopeService } from "../src/modules/auth/driver-scope.service";
 import { PrismaService } from "../src/modules/prisma/prisma.service";
 import { GeofenceStatusQuerySchema } from "../src/modules/telematics/telematics.schemas";
 import {
@@ -48,6 +49,7 @@ describe("TelematicsService reads + geofencing (ADR-0029 T5)", () => {
       providers: [
         TelematicsService,
         GeofencesService,
+        DriverScopeService,
         PrismaService,
         { provide: getQueueToken(GPS_INGEST_QUEUE), useValue: fakeQueue },
       ],
@@ -497,6 +499,7 @@ describe("TelematicsService.latestPositions (ADR-0042 M7)", () => {
       providers: [
         TelematicsService,
         GeofencesService,
+        DriverScopeService,
         PrismaService,
         { provide: getQueueToken(GPS_INGEST_QUEUE), useValue: fakeQueue },
       ],

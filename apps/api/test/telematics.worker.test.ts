@@ -5,6 +5,7 @@ import { type Queue } from "bullmq";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "vitest";
 
 import { GeofencesService } from "../src/modules/geofences/geofences.service";
+import { DriverScopeService } from "../src/modules/auth/driver-scope.service";
 import { PrismaService } from "../src/modules/prisma/prisma.service";
 import { QueueModule } from "../src/modules/queue/queue.module";
 import { GpsIngestProcessor } from "../src/modules/telematics/gps-ingest.processor";
@@ -68,7 +69,13 @@ describe("gps-ingest worker (enqueue → bulk insert, ADR-0029 T3)", () => {
       // Real service (producer + insert) + the real @Processor worker + Prisma.
       // GeofencesService is the G5 dependency of TelematicsService (ADR-0030);
       // it needs only PrismaService and is inert on the ingest/worker path.
-      providers: [TelematicsService, GeofencesService, GpsIngestProcessor, PrismaService],
+      providers: [
+        TelematicsService,
+        GeofencesService,
+        DriverScopeService,
+        GpsIngestProcessor,
+        PrismaService,
+      ],
     }).compile();
 
     app = moduleRef.createNestApplication({ logger: false });

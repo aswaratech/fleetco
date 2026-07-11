@@ -10,6 +10,8 @@ import { AuthGuard } from "../src/modules/auth/auth.guard";
 import { AUTH } from "../src/modules/auth/auth.tokens";
 import { RolesGuard } from "../src/modules/auth/roles.guard";
 import { GeofencesService } from "../src/modules/geofences/geofences.service";
+import { DriverScopeService } from "../src/modules/auth/driver-scope.service";
+import { Logger } from "nestjs-pino";
 import { PrismaService } from "../src/modules/prisma/prisma.service";
 import { TelematicsController } from "../src/modules/telematics/telematics.controller";
 import {
@@ -246,11 +248,13 @@ describe("Telematics read RBAC (gps:read-raw / gps:read-derived, ADR-0029 T5)", 
       providers: [
         TelematicsService,
         GeofencesService,
+        DriverScopeService,
         PrismaService,
         { provide: getQueueToken(GPS_INGEST_QUEUE), useValue: fakeQueue },
         AuthGuard,
         RolesGuard,
         { provide: AUTH, useValue: AUTH_STUB },
+        { provide: Logger, useValue: { log: () => undefined } },
       ],
     }).compile();
 
@@ -393,11 +397,13 @@ describe("Telematics geofence-status by stored fence (integration, ADR-0030 G5)"
       providers: [
         TelematicsService,
         GeofencesService,
+        DriverScopeService,
         PrismaService,
         { provide: getQueueToken(GPS_INGEST_QUEUE), useValue: fakeQueue },
         AuthGuard,
         RolesGuard,
         { provide: AUTH, useValue: AUTH_STUB },
+        { provide: Logger, useValue: { log: () => undefined } },
       ],
     }).compile();
 
