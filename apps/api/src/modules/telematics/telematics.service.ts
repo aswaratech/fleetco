@@ -46,6 +46,15 @@ import { DriverScopeService, type Actor } from "../auth/driver-scope.service";
 // compile error.
 export const GPS_INGEST_QUEUE = "gps-ingest";
 
+// PROVISIONAL tolerance around a COMPLETED trip's [startedAt, endedAt] window
+// when accepting late-delivered offline pings (ADR-0035 c5, the D5 outbox
+// path). Both trip timestamps and the device fix come from the same phone
+// clock, so real skew largely cancels; this slack absorbs stop-ordering
+// jitter (the outbox may hold fixes captured right up to the stop tap). The
+// NUMBER follows the owner-level-provisional pattern (the GPS-retention
+// window, the due-soon windows): tune with pilot data, never silently.
+export const INGEST_WINDOW_SLACK_MS = 5 * 60 * 1000;
+
 // The job name within the queue. One job = one batch (ADR-0026 commitment 4:
 // the batch is the unit, not the ping).
 export const GPS_INGEST_JOB_NAME = "ingest-batch";
@@ -230,14 +239,35 @@ export class TelematicsService {
   ) {}
 
   /**
-   * D4's row-level own-record predicate (ADR-0034 c5: a DRIVER write capability
+   * The row-level own-record predicate (ADR-0034 c5: a DRIVER write capability
    * enters the capability map ONLY with its scope in the same change; ADR-0035
    * c1's on-trip collection boundary). For a DRIVER actor, every ping in the
    * batch must carry a `tripId`; each distinct trip must be the driver's OWN
-   * (`trip.driverId === resolveOwnDriverId(actor)`, via the Driver.userId link)
-   * and IN_PROGRESS; and each ping's `vehicleId` must equal its trip's vehicle.
-   * The phone producer only ever reports the active trip it is bound to, so
-   * anything else is a spoofed or stale payload — ANY violation rejects the
+   * (`trip.driverId === resolveOwnDriverId(actor)`, via the Driver.userId link);
+   * each ping's `vehicleId` must equal its trip's vehicle; and the trip must be
+   * either
+   *
+   *   - IN_PROGRESS (the live D4 path), or
+   *   - COMPLETED with the ping's device-fix `timestamp` inside the trip's
+   *     [startedAt − slack, endedAt + slack] window — the D5 offline-outbox
+   *     path. ADR-0035 c5's ratified discharge keeps LATE-DELIVERED on-trip
+   *     pings ("the minimization boundary is capture time, not delivery
+   *     time"): a trip stopped offline legitimately drains its tail after the
+   *     stop. The window check is what makes that safe — a COMPLETED trip
+   *     accepts only fixes that were CAPTURED while it ran. Both trip
+   *     timestamps and the fix timestamp come from the same device clock, so
+   *     skew largely cancels; INGEST_WINDOW_SLACK_MS covers ordering jitter.
+   *     COMPLETED trips are service-guaranteed to carry non-null
+   *     startedAt/endedAt (trips.schemas cross-field validation); a
+   *     direct-DB row violating that fails closed here (null window → 403).
+   *
+   * PLANNED trips stay 403 (nothing to capture yet). CANCELLED trips stay 403
+   * — a recorded judgment call: cancellation does not require `endedAt`, so a
+   * cancelled trip has NO bounded window and accepting it would be an
+   * unbounded replay/spoof surface; a cancelled trip's trace is not
+   * operationally meaningful (flagged in the D5 PR for the PO).
+   *
+   * Anything else is a spoofed or stale payload — ANY violation rejects the
    * WHOLE batch with 403, fail-closed, matching the worker's all-or-nothing
    * `createMany` posture (a partially-accepted batch would lie about what was
    * stored). The bare 403 deliberately hides whether a foreign trip exists
@@ -246,11 +276,8 @@ export class TelematicsService {
    * Non-DRIVER actors return immediately with zero queries — the ADMIN
    * synthetic-ingest path (ADR-0029 c11) is unchanged. The check runs BEFORE
    * enqueue: the worker has no client to answer, so pre-enqueue is the one
-   * place a synchronous 403 can exist. The one indexed Driver lookup + one
-   * indexed Trip lookup it costs on the driver path is accepted deliberately
-   * over the 202-fast micro-optimization — the c5 atomic rule outranks it.
-   * An unlinked DRIVER session throws 403 inside resolveOwnDriverId (the D2
-   * fail-closed posture).
+   * place a synchronous 403 can exist. An unlinked DRIVER session throws 403
+   * inside resolveOwnDriverId (the D2 fail-closed posture).
    */
   async assertDriverCanIngest(actor: Actor, pings: GpsPingInput[]): Promise<void> {
     const ownDriverId = await this.driverScope.resolveOwnDriverId(actor);
@@ -268,20 +295,34 @@ export class TelematicsService {
 
     const trips = await this.prisma.trip.findMany({
       where: { id: { in: [...tripIds] } },
-      select: { id: true, driverId: true, vehicleId: true, status: true },
+      select: {
+        id: true,
+        driverId: true,
+        vehicleId: true,
+        status: true,
+        startedAt: true,
+        endedAt: true,
+      },
     });
     const tripById = new Map(trips.map((trip) => [trip.id, trip]));
 
     for (const ping of pings) {
       const trip = ping.tripId ? tripById.get(ping.tripId) : undefined;
-      if (
-        !trip ||
-        trip.driverId !== ownDriverId ||
-        trip.status !== TripStatus.IN_PROGRESS ||
-        trip.vehicleId !== ping.vehicleId
-      ) {
+      if (!trip || trip.driverId !== ownDriverId || trip.vehicleId !== ping.vehicleId) {
         throw new ForbiddenException();
       }
+      if (trip.status === TripStatus.IN_PROGRESS) {
+        continue;
+      }
+      if (trip.status === TripStatus.COMPLETED && trip.startedAt && trip.endedAt) {
+        const fixMs = new Date(ping.timestamp).getTime();
+        const windowStart = trip.startedAt.getTime() - INGEST_WINDOW_SLACK_MS;
+        const windowEnd = trip.endedAt.getTime() + INGEST_WINDOW_SLACK_MS;
+        if (fixMs >= windowStart && fixMs <= windowEnd) {
+          continue;
+        }
+      }
+      throw new ForbiddenException();
     }
   }
 
