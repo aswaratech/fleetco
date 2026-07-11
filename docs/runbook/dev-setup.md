@@ -199,6 +199,72 @@ reuse the D2 setup (a linked DRIVER with an own trip):
    NPR 1818.75 (= liters × price, derived server-side). A driver fuel log must carry one
    of their own trips — a tripless driver log is rejected (400), a foreign trip 404s.
 
+## Building the driver app (local prebuild)
+
+D4+ slices use native modules Expo Go does not bundle (`expo-location`'s foreground
+service now; SQLCipher at D5), so from D4 the on-device runtime is a **locally built
+dev APK** — the ADR-0033 c7 build path the PO chose on 2026-07-10 (local prebuild over
+EAS Build; ADR-0033's dated annotation records the decision). The CNG discipline is
+unchanged: the generated `android/` tree is **gitignored, disposable, never
+hand-edited** — native configuration lives only in `app.json` (+ config plugins), and
+`npx expo prebuild` regenerates the tree at will.
+
+**One-time toolchain install (macOS; ~6–10 GB of downloads):**
+
+```sh
+brew install openjdk@17
+brew install --cask android-commandlinetools
+export JAVA_HOME="$(brew --prefix openjdk@17)/libexec/openjdk.jdk/Contents/Home"
+export ANDROID_HOME="$HOME/Library/Android/sdk"  # put both exports in your shell profile
+mkdir -p "$ANDROID_HOME"
+yes | sdkmanager --sdk_root="$ANDROID_HOME" --licenses
+sdkmanager --sdk_root="$ANDROID_HOME" "platform-tools" "emulator" \
+  "system-images;android-35;google_apis;arm64-v8a"
+```
+
+(The `openjdk@17` **formula** installs user-space with no sudo — verified on the first
+executed build, 2026-07-11. The `temurin@17` cask is the system-wide alternative, but
+its `.pkg` installer requires sudo, so it cannot run from a non-interactive shell.)
+
+Gradle fetches the exact `platforms;android-*` / `build-tools;*` levels the Expo SDK
+pins on first build; the license acceptance above covers them.
+
+**The expo-doctor cadence (ADR-0033 c4 — manual, never in the polled CI gate):** from
+`apps-mobile/driver/`, run `npx expo-doctor` (a) **before adding any native
+dependency** (the New-Architecture vetting c2 requires) and (b) **before each
+prebuild/build session**. Doctor and prebuild touch the network/registry — exactly why
+c4 keeps them out of CI; this manual cadence is the compensating procedure.
+
+**Build + run on the emulator:**
+
+```sh
+cd apps-mobile/driver
+pnpm install --ignore-workspace
+npx expo-doctor                        # the c4 cadence
+npx expo prebuild --platform android   # regenerates android/ from app.json
+(cd android && ./gradlew assembleDebug)
+# APK lands at android/app/build/outputs/apk/debug/app-debug.apk
+
+# One-time AVD create, then boot + install. Use the SDK-LOCAL avdmanager: the
+# Homebrew shim resolves the SDK relative to its own install dir (which holds
+# no system images) and fails with "Valid system image paths are: null".
+"$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n fleetco-dev \
+  -k "system-images;android-35;google_apis;arm64-v8a" -d pixel_7
+"$ANDROID_HOME/emulator/emulator" -avd fleetco-dev &
+adb install -r android/app/build/outputs/apk/debug/app-debug.apk
+# The dev APK loads JS from the Metro dev server; the emulator reaches the host's
+# localhost as 10.0.2.2 (the LAN-IP note above is for Expo Go on a physical phone):
+EXPO_PUBLIC_API_URL=http://10.0.2.2:3001 pnpm start
+```
+
+(`npx expo run:android` wraps prebuild + Gradle + install + Metro in one command once
+the toolchain exists — the daily-driver shortcut for the explicit steps above.)
+
+**Release builds / signing:** a release keystore is a Tier-1 operator secret
+(ADR-0013) — generated and held by the operator (`keytool -genkeypair …`), never
+created by an agent, never committed. Wire it in only when a real driver-device
+rollout happens; debug builds (auto-signed) cover development and the emulator.
+
 ## What can go wrong
 
 ### Port 5432 (Postgres) is already in use
