@@ -154,6 +154,8 @@ function TripScreen() {
               "Trip started. GPS capture needs the dev build (not Expo Go) — see dev-setup.md.",
             );
           }
+          // "started" is the silent happy path — the app is visibly open and
+          // capturing (ADR-0035 c8's foreground-only D4 window).
         }
         setTrips(await listMyTrips());
       } catch {
