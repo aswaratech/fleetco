@@ -16,7 +16,7 @@
     "test": "jest"
   },
   "dependencies": {
-    "@better-auth/expo": "~1.6.19",
+    "@better-auth/expo": "~1.6.20",
     "better-auth": "~1.6.19",
     "expo": "~56.0.12",
     "expo-secure-store": "^56.0.4",
