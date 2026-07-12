@@ -6,7 +6,10 @@ import {
   isStoppable,
   meterIncludesHours,
   meterIncludesOdometer,
+  milestonePayload,
+  milestoneSteps,
   navigateUrl,
+  PROGRESS_MILESTONES,
   tripStartPayload,
   tripStopPayload,
   TRIP_STATUS_LABELS,
@@ -14,6 +17,33 @@ import {
   type DriverTrip,
   type MeterType,
 } from "./trips";
+
+// A minimal DriverTrip for the pure-helper tests: order + milestone fields null
+// unless a test overrides them. Shared so a new required field on DriverTrip is
+// added in exactly one place.
+function makeTrip(overrides: Partial<DriverTrip> = {}): DriverTrip {
+  return {
+    id: "t1",
+    status: "IN_PROGRESS",
+    vehicle: { id: "v1", registrationNumber: "BA 1 KA 1234", meterType: "ODOMETER_KM" },
+    materialType: null,
+    materialNote: null,
+    pickupSite: null,
+    dropoffSite: null,
+    consigneeName: null,
+    consigneePhone: null,
+    expectedLoadCount: null,
+    specialInstructions: null,
+    docketNumber: null,
+    offeredAt: null,
+    acceptedAt: null,
+    arrivedPickupAt: null,
+    loadedAt: null,
+    arrivedDropoffAt: null,
+    deliveredAt: null,
+    ...overrides,
+  };
+}
 
 describe("tripStartPayload", () => {
   it("builds an odometer-only start (km-metered vehicle)", () => {
@@ -93,20 +123,7 @@ describe("meterIncludesOdometer / meterIncludesHours", () => {
 });
 
 describe("isStartable / isStoppable", () => {
-  const trip = (status: DriverTrip["status"]): DriverTrip => ({
-    id: "t1",
-    status,
-    vehicle: { id: "v1", registrationNumber: "BA 1 KA 1234", meterType: "ODOMETER_KM" },
-    materialType: null,
-    materialNote: null,
-    pickupSite: null,
-    dropoffSite: null,
-    consigneeName: null,
-    consigneePhone: null,
-    expectedLoadCount: null,
-    specialInstructions: null,
-    docketNumber: null,
-  });
+  const trip = (status: DriverTrip["status"]): DriverTrip => makeTrip({ status });
 
   // ADR-0047 c7/c8: isStartable moved PLANNED → ACCEPTED (the one real code
   // break). The driver flow is OFFERED → ACCEPTED → start, so Start appears
@@ -173,5 +190,77 @@ describe("TripStatus mirror consistency (ADR-0047 c1, five mirrors)", () => {
 
   it("TRIP_STATUS_LABELS labels every status (no drift between the type and the map)", () => {
     expect(Object.keys(TRIP_STATUS_LABELS).sort()).toEqual([...TRIP_STATUSES].sort());
+  });
+});
+
+describe("milestonePayload", () => {
+  const nowIso = "2026-07-13T06:00:00.000Z";
+
+  // Each builder sets EXACTLY its one milestone timestamp (progress is
+  // timestamps, not statuses — ADR-0047 c1/c8) — no status, no other field.
+  it("builds a single-field PATCH body for each milestone, stamping nowIso", () => {
+    expect(milestonePayload("arrivedPickupAt", nowIso)).toEqual({ arrivedPickupAt: nowIso });
+    expect(milestonePayload("loadedAt", nowIso)).toEqual({ loadedAt: nowIso });
+    expect(milestonePayload("arrivedDropoffAt", nowIso)).toEqual({ arrivedDropoffAt: nowIso });
+    expect(milestonePayload("deliveredAt", nowIso)).toEqual({ deliveredAt: nowIso });
+  });
+
+  it("carries no status field (a milestone tap never changes the trip status)", () => {
+    const payload = milestonePayload("loadedAt", nowIso);
+    expect("status" in payload).toBe(false);
+    expect(Object.keys(payload)).toEqual(["loadedAt"]);
+  });
+});
+
+describe("PROGRESS_MILESTONES", () => {
+  it("lists the four driver-tappable milestones in dispatch order", () => {
+    expect(PROGRESS_MILESTONES.map((m) => m.field)).toEqual([
+      "arrivedPickupAt",
+      "loadedAt",
+      "arrivedDropoffAt",
+      "deliveredAt",
+    ]);
+  });
+
+  it("uses the DESIGN action label 'Mark arrived at pickup' for the first tap", () => {
+    expect(PROGRESS_MILESTONES[0].action).toBe("Mark arrived at pickup");
+  });
+});
+
+describe("milestoneSteps", () => {
+  it("makes the first milestone actionable when none are done", () => {
+    const steps = milestoneSteps(makeTrip());
+    expect(steps.map((s) => s.isDone)).toEqual([false, false, false, false]);
+    // Only the first un-done milestone is actionable (in-order advance).
+    expect(steps.map((s) => s.actionable)).toEqual([true, false, false, false]);
+    expect(steps[0].at).toBeNull();
+  });
+
+  it("advances the actionable flag to the next un-done milestone as taps land", () => {
+    const steps = milestoneSteps(
+      makeTrip({
+        arrivedPickupAt: "2026-07-13T06:00:00.000Z",
+        loadedAt: "2026-07-13T06:20:00.000Z",
+      }),
+    );
+    expect(steps.map((s) => s.isDone)).toEqual([true, true, false, false]);
+    // arrivedDropoff (index 2) is the next actionable; done rows carry their time.
+    expect(steps.map((s) => s.actionable)).toEqual([false, false, true, false]);
+    expect(steps[0].at).toBe("2026-07-13T06:00:00.000Z");
+    expect(steps[1].at).toBe("2026-07-13T06:20:00.000Z");
+  });
+
+  it("marks every milestone done and none actionable once delivered", () => {
+    const iso = "2026-07-13T07:00:00.000Z";
+    const steps = milestoneSteps(
+      makeTrip({
+        arrivedPickupAt: iso,
+        loadedAt: iso,
+        arrivedDropoffAt: iso,
+        deliveredAt: iso,
+      }),
+    );
+    expect(steps.every((s) => s.isDone)).toBe(true);
+    expect(steps.some((s) => s.actionable)).toBe(false);
   });
 });
