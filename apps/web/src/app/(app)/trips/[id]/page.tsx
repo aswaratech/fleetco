@@ -2,12 +2,18 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
 import { NepaliDate } from "@/components/nepali-date";
+import { Badge } from "@/components/ui/badge";
 import { Breadcrumb } from "@/components/ui/breadcrumb";
 import { Button } from "@/components/ui/button";
 import { DetailRow } from "@/components/ui/detail-row";
 import { apiFetch, ApiError } from "@/lib/api";
 
-import { TRIP_STATUS_LABELS, type TripDetail } from "../types";
+import {
+  MATERIAL_TYPE_LABELS,
+  TRIP_STATUS_BADGE,
+  TRIP_STATUS_LABELS,
+  type TripDetail,
+} from "../types";
 import { DeleteTripDialog } from "./delete-trip-dialog";
 
 // Trip detail — iter 8 of the Trips slice. Server-rendered shell
@@ -70,6 +76,37 @@ function formatDistance(start: number | null, end: number | null): string {
   return `${delta.toLocaleString("en-US")} km`;
 }
 
+// Time-of-day (UTC) for a milestone row, paired with <NepaliDate> for the date.
+function formatTimeUTC(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  const hh = String(date.getUTCHours()).padStart(2, "0");
+  const mm = String(date.getUTCMinutes()).padStart(2, "0");
+  return `${hh}:${mm} UTC`;
+}
+
+// The dispatch → delivery milestones, in monotonic order (ADR-0047 c1/c3). Each
+// is a nullable timestamp on the Trip; a reached milestone shows its BS date +
+// time, an unreached one a muted em-dash — "where is this load" without a status
+// explosion.
+const MILESTONES: {
+  key:
+    | "offeredAt"
+    | "acceptedAt"
+    | "arrivedPickupAt"
+    | "loadedAt"
+    | "arrivedDropoffAt"
+    | "deliveredAt";
+  label: string;
+}[] = [
+  { key: "offeredAt", label: "Offered" },
+  { key: "acceptedAt", label: "Accepted" },
+  { key: "arrivedPickupAt", label: "Arrived at pickup" },
+  { key: "loadedAt", label: "Loaded" },
+  { key: "arrivedDropoffAt", label: "Arrived at drop-off" },
+  { key: "deliveredAt", label: "Delivered" },
+];
+
 export default async function TripDetailPage({
   params,
 }: DetailPageProps): Promise<React.ReactElement> {
@@ -91,6 +128,17 @@ export default async function TripDetailPage({
   }
 
   const statusLabel = TRIP_STATUS_LABELS[trip.status] ?? trip.status;
+  const hasOrder =
+    trip.materialType !== null ||
+    trip.pickupSiteId !== null ||
+    trip.dropoffSiteId !== null ||
+    trip.offeredAt !== null;
+  const materialValue =
+    trip.materialType !== null
+      ? `${MATERIAL_TYPE_LABELS[trip.materialType] ?? trip.materialType}${
+          trip.materialNote ? ` — ${trip.materialNote}` : ""
+        }`
+      : "—";
 
   return (
     <main className="bg-surface-canvas min-h-svh">
@@ -110,11 +158,14 @@ export default async function TripDetailPage({
                 },
               ]}
             />
-            <h1 className="text-text-primary text-2xl font-semibold">
-              Trip · {trip.vehicle.registrationNumber}
-            </h1>
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="text-text-primary text-2xl font-semibold">
+                Trip · {trip.vehicle.registrationNumber}
+              </h1>
+              <Badge variant={TRIP_STATUS_BADGE[trip.status] ?? "neutral"}>{statusLabel}</Badge>
+            </div>
             <p className="text-text-muted text-sm">
-              {statusLabel} · {trip.startedAt ? formatDateTime(trip.startedAt) : "Not yet started"}
+              {trip.startedAt ? formatDateTime(trip.startedAt) : "Not yet started"}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -171,6 +222,104 @@ export default async function TripDetailPage({
             <DetailRow label="Phone" value={trip.driver.phone} mono />
           </dl>
         </section>
+
+        <section className="border-border-subtle bg-surface-raised rounded border p-6 shadow-sm">
+          <h2 className="text-text-primary mb-4 text-sm font-semibold uppercase tracking-wide">
+            Order
+          </h2>
+          {hasOrder ? (
+            <dl className="grid grid-cols-1 gap-x-8 gap-y-4 sm:grid-cols-2">
+              <DetailRow label="Material" value={materialValue} className="sm:col-span-2" />
+              <DetailRow
+                label="Pickup site"
+                value={
+                  trip.pickupSite ? (
+                    <Link
+                      href={`/sites/${trip.pickupSite.id}`}
+                      className="text-text-primary hover:text-text-secondary underline-offset-2 hover:underline"
+                    >
+                      {trip.pickupSite.name}
+                    </Link>
+                  ) : (
+                    "—"
+                  )
+                }
+              />
+              <DetailRow
+                label="Drop-off site"
+                value={
+                  trip.dropoffSite ? (
+                    <Link
+                      href={`/sites/${trip.dropoffSite.id}`}
+                      className="text-text-primary hover:text-text-secondary underline-offset-2 hover:underline"
+                    >
+                      {trip.dropoffSite.name}
+                    </Link>
+                  ) : (
+                    "—"
+                  )
+                }
+              />
+              <DetailRow label="Consignee" value={trip.consigneeName ?? "—"} />
+              <DetailRow
+                label="Consignee phone"
+                value={
+                  trip.consigneePhone ? (
+                    <a
+                      href={`tel:${trip.consigneePhone}`}
+                      className="text-text-primary hover:text-text-secondary underline-offset-2 hover:underline"
+                    >
+                      {trip.consigneePhone}
+                    </a>
+                  ) : (
+                    "—"
+                  )
+                }
+              />
+              <DetailRow
+                label="Expected load count"
+                value={trip.expectedLoadCount !== null ? String(trip.expectedLoadCount) : "—"}
+                numeric
+              />
+              <DetailRow label="Docket" value={trip.docketNumber ?? "—"} mono />
+              <DetailRow
+                label="Special instructions"
+                value={trip.specialInstructions ?? "—"}
+                className="sm:col-span-2"
+              />
+            </dl>
+          ) : (
+            <p className="text-text-muted text-sm">Not yet dispatched.</p>
+          )}
+        </section>
+
+        {hasOrder ? (
+          <section className="border-border-subtle bg-surface-raised rounded border p-6 shadow-sm">
+            <h2 className="text-text-primary mb-4 text-sm font-semibold uppercase tracking-wide">
+              Progress
+            </h2>
+            {trip.status === "OFFERED" && !trip.acceptedAt ? (
+              <p className="text-text-muted mb-4 text-sm">Awaiting driver acceptance.</p>
+            ) : null}
+            <ol className="space-y-3">
+              {MILESTONES.map((m) => {
+                const iso = trip[m.key];
+                return (
+                  <li key={m.key} className="flex items-baseline justify-between gap-4 text-sm">
+                    <span className="text-text-secondary">{m.label}</span>
+                    {iso ? (
+                      <span className="text-text-primary tabular-nums">
+                        <NepaliDate iso={iso} /> · {formatTimeUTC(iso)}
+                      </span>
+                    ) : (
+                      <span className="text-text-muted">—</span>
+                    )}
+                  </li>
+                );
+              })}
+            </ol>
+          </section>
+        ) : null}
 
         <section className="border-border-subtle bg-surface-raised rounded border p-6 shadow-sm">
           <h2 className="text-text-primary mb-4 text-sm font-semibold uppercase tracking-wide">
