@@ -25,6 +25,7 @@ import { QueueModule } from "./modules/queue/queue.module";
 import { RedisModule } from "./modules/redis/redis.module";
 import { ReportsModule } from "./modules/reports/reports.module";
 import { RetentionModule } from "./modules/retention/retention.module";
+import { RoutingModule } from "./modules/routing/routing.module";
 import { SitesModule } from "./modules/sites/sites.module";
 import { TelematicsModule } from "./modules/telematics/telematics.module";
 import { TripsModule } from "./modules/trips/trips.module";
@@ -104,6 +105,12 @@ import { WhatsAppModule } from "./modules/whatsapp/whatsapp.module";
     // dispatch). Grouped with the other location aggregate (Geofences); its
     // `sites:*` capability rides the existing RolesGuard spine.
     SitesModule,
+    // ADR-0047 W6: the provider-agnostic route-preview seam (RoutingProvider —
+    // the no-network Mock now, a live Google/OSM impl M1-gated) behind the
+    // dispatch map's pickup→drop-off polyline + estimated ETA. Injects ONLY the
+    // provider (no Prisma, no Trip reach), so it adds no dependency to
+    // TripsService and no DI-ripple; its `route-preview` endpoint is `trips:*`-gated.
+    RoutingModule,
     MaintenanceModule,
     NotificationModule,
     NotificationLogsModule,

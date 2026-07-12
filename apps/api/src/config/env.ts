@@ -225,6 +225,28 @@ const envSchema = z.object({
   // production the operator sets the deploy host; in local dev set
   // http://localhost:3000. Empty-string -> undefined.
   WEB_PUBLIC_URL: z.preprocess(emptyStringAsUndefined, z.string().url().optional()),
+
+  // Routing-provider selection for the in-app route-preview line + ETA on the
+  // admin dispatch map (ADR-0047 c9 — the RoutingProvider seam). UNSET / "mock"
+  // (the dev / test / CI default) binds the no-network MockRoutingProvider: a
+  // deterministic haversine estimate with ZERO coordinate egress, so the build
+  // stays green with no key. Setting a LIVE provider name (e.g. "google" for
+  // Google Directions' live-traffic ETA, or "osrm" for a self-hosted free-flow
+  // router) is M1-GATED ACTIVATION — the live impl is NOT built in this program,
+  // so a selected-but-unbuilt provider binds a stub that fails loudly on use
+  // (LiveRoutingProviderStub) rather than silently returning a Mock estimate.
+  // Tier-4 config, defaulted-by-absence like DEEPSEEK_MODEL. Empty-string ->
+  // undefined, like SENTRY_DSN.
+  ROUTING_PROVIDER: z.preprocess(emptyStringAsUndefined, z.string().optional()),
+
+  // The LIVE routing provider's API key (ADR-0047 c9 — a Google Directions/Routes
+  // billing key, or a self-hosted router's token). Tier-1 secret per ADR-0013: it
+  // lives ONLY in the production secret store (ADR-0014), is NEVER committed to
+  // any file, and is NEVER logged (the `*.key` pino redact path is the backstop;
+  // the primary defense is that no routing code logs it). OPTIONAL and UNUSED
+  // until the operator activates a live ROUTING_PROVIDER at M1 — the Mock needs
+  // no key and makes zero egress. Empty-string -> undefined, like DEEPSEEK_API_KEY.
+  ROUTING_API_KEY: z.preprocess(emptyStringAsUndefined, z.string().optional()),
 });
 
 export type Env = z.infer<typeof envSchema>;
