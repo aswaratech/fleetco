@@ -319,6 +319,46 @@ export class TripsService {
   }
 
   /**
+   * Assert that any pickup / drop-off Site ids being SET on a dispatch exist,
+   * BEFORE the write (ADR-0047 W4), so a stale endpoint surfaces as a
+   * deterministic 400 naming the exact field ("Pickup site … does not
+   * exist.") rather than leaning on a Prisma error code. This is necessary
+   * because the two write paths raise DIFFERENT codes for a missing Site: the
+   * create path (scalar FK) raises P2003, but the update path (nested
+   * `connect`) raises P2025 — which is ambiguous with "trip row vanished" and
+   * therefore cannot be attributed to the Site reliably. A single shared
+   * pre-check names the endpoint the same way on both paths. Only non-null ids
+   * are checked (null = disconnect / clear); the one findMany runs only when at
+   * least one Site is being set (a PLANNED create / a non-order PATCH does no
+   * extra query). The P2003 arm in create() remains as TOCTOU-race defense.
+   */
+  private async assertSitesExist(
+    pickupSiteId: string | null | undefined,
+    dropoffSiteId: string | null | undefined,
+  ): Promise<void> {
+    const wantPickup = typeof pickupSiteId === "string" && pickupSiteId.length > 0;
+    const wantDropoff = typeof dropoffSiteId === "string" && dropoffSiteId.length > 0;
+    if (!wantPickup && !wantDropoff) return;
+
+    const ids: string[] = [];
+    if (wantPickup) ids.push(pickupSiteId as string);
+    if (wantDropoff) ids.push(dropoffSiteId as string);
+
+    const found = await this.prisma.site.findMany({
+      where: { id: { in: ids } },
+      select: { id: true },
+    });
+    const foundIds = new Set(found.map((s) => s.id));
+
+    if (wantPickup && !foundIds.has(pickupSiteId as string)) {
+      throw new BadRequestException(`Pickup site "${pickupSiteId as string}" does not exist.`);
+    }
+    if (wantDropoff && !foundIds.has(dropoffSiteId as string)) {
+      throw new BadRequestException(`Drop-off site "${dropoffSiteId as string}" does not exist.`);
+    }
+  }
+
+  /**
    * Create a Trip. `createdById` is supplied by the controller from
    * the authenticated session, not by the client. CreateTripSchema's
    * `.strict()` keeps `createdById` (and any other unknown key) off
@@ -375,6 +415,10 @@ export class TripsService {
     if (crossFieldErrors.length > 0) {
       throw new BadRequestException(crossFieldErrors.join(" "));
     }
+
+    // Name a stale pickup/drop-off Site with a deterministic 400 before the
+    // write (ADR-0047 W4). Same pre-check the PATCH path uses.
+    await this.assertSitesExist(input.pickupSiteId, input.dropoffSiteId);
 
     const data: Prisma.TripUncheckedCreateInput = {
       vehicleId: input.vehicleId,
@@ -448,10 +492,12 @@ export class TripsService {
         if (fieldName.toLowerCase().includes("driver")) {
           throw new BadRequestException(`Driver "${input.driverId}" does not exist.`);
         }
-        // Dispatch order FKs (ADR-0047 W4) — same 400-naming-the-field pattern
-        // as vehicle/driver. The constraint names (Trip_pickupSiteId_fkey /
-        // Trip_dropoffSiteId_fkey) carry the disjoint "pickup" / "dropoff"
-        // substrings, so a stale Site id is attributed to the right endpoint.
+        // Dispatch order FKs (ADR-0047 W4). assertSitesExist above already
+        // named a stale Site with a 400; these arms are the TOCTOU-race defense
+        // (a Site deleted between that pre-check and this scalar insert → P2003).
+        // The constraint names (Trip_pickupSiteId_fkey / Trip_dropoffSiteId_fkey)
+        // carry the disjoint "pickup" / "dropoff" substrings, so the race is
+        // still attributed to the right endpoint rather than the generic message.
         if (fieldName.toLowerCase().includes("pickup")) {
           throw new BadRequestException(
             `Pickup site "${input.pickupSiteId ?? ""}" does not exist.`,
@@ -598,6 +644,15 @@ export class TripsService {
     if (crossFieldErrors.length > 0) {
       throw new BadRequestException(crossFieldErrors.join(" "));
     }
+
+    // Name a stale pickup/drop-off Site with a deterministic 400 before the
+    // write (ADR-0047 W4) — only for the Site FKs this PATCH is actually
+    // SETTING (a non-null connect). An untouched or cleared (null) Site is
+    // skipped, so a status-only or notes-only PATCH does no extra query.
+    await this.assertSitesExist(
+      has("pickupSiteId") ? input.pickupSiteId : undefined,
+      has("dropoffSiteId") ? input.dropoffSiteId : undefined,
+    );
 
     const data: Prisma.TripUpdateInput = {
       ...(has("vehicleId") &&
@@ -780,20 +835,12 @@ export class TripsService {
         if (fieldName.toLowerCase().includes("driver")) {
           throw new BadRequestException(`Driver "${input.driverId ?? ""}" does not exist.`);
         }
-        // Dispatch order FKs (ADR-0047 W4) — reachable when a PATCH connects a
-        // stale pickup/drop-off Site id. Same 400-naming-the-field contract.
-        if (fieldName.toLowerCase().includes("pickup")) {
-          throw new BadRequestException(
-            `Pickup site "${input.pickupSiteId ?? ""}" does not exist.`,
-          );
-        }
-        if (fieldName.toLowerCase().includes("dropoff")) {
-          throw new BadRequestException(
-            `Drop-off site "${input.dropoffSiteId ?? ""}" does not exist.`,
-          );
-        }
+        // NB: a stale pickup/drop-off Site is caught by assertSitesExist BEFORE
+        // this write. On PATCH a Site is connected via a nested `connect`, which
+        // raises P2025 (ambiguous with "trip row vanished"), NOT P2003 — so it
+        // cannot be named reliably in this arm; the pre-check names the endpoint.
         throw new BadRequestException(
-          `One of vehicleId, driverId, pickupSiteId or dropoffSiteId references a record that does not exist.`,
+          `One of vehicleId or driverId references a record that does not exist.`,
         );
       }
       throw error;

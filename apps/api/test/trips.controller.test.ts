@@ -5,7 +5,7 @@ import {
   type INestApplication,
 } from "@nestjs/common";
 import { Test, type TestingModule } from "@nestjs/testing";
-import { TripStatus, UserRole, type Vehicle, type Driver } from "@prisma/client";
+import { MaterialType, TripStatus, UserRole, type Vehicle, type Driver } from "@prisma/client";
 import { Logger } from "nestjs-pino";
 import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -24,6 +24,7 @@ import {
   UpdateTripSchema,
 } from "../src/modules/trips/trips.schemas";
 import { resetDb } from "./db";
+import { seedSite } from "./fixtures/site";
 import { seedDriver, seedTrip, seedUser, seedVehicle } from "./fixtures/trip";
 
 // A non-DRIVER acting principal for the existing (ADMIN/OFFICE_STAFF) cases and
@@ -470,6 +471,62 @@ describe("TripsController write-path schemas (iter-9 contract)", () => {
       expect(parsed.startOdometerKm).toBe(80000);
       expect(parsed.endOdometerKm).toBe(80350);
     });
+
+    // ADR-0047 W4: the dispatch order + milestone rules on the create body.
+
+    test("OFFERED without an order → BadRequestException (superRefine order-required)", () => {
+      // The superRefine runs validateTripCrossFields on the body; OFFERED
+      // requires materialType + pickupSiteId + dropoffSiteId.
+      expect(() =>
+        createPipe.transform({ vehicleId: "vh_1", driverId: "dr_1", status: "OFFERED" }),
+      ).toThrow(BadRequestException);
+    });
+
+    test("OFFERED with a full order parses through", () => {
+      const parsed = createPipe.transform({
+        vehicleId: "vh_1",
+        driverId: "dr_1",
+        status: "OFFERED",
+        materialType: "GRAVEL",
+        pickupSiteId: "site_pickup",
+        dropoffSiteId: "site_dropoff",
+        consigneeName: "Ram Prasad",
+        consigneePhone: "+977-9800000000",
+        expectedLoadCount: 3,
+        specialInstructions: "Call on arrival",
+        docketNumber: "DKT-42",
+      });
+      expect(parsed.status).toBe("OFFERED");
+      expect(parsed.materialType).toBe("GRAVEL");
+      expect(parsed.pickupSiteId).toBe("site_pickup");
+      expect(parsed.expectedLoadCount).toBe(3);
+    });
+
+    test("invalid materialType enum → BadRequestException", () => {
+      expect(() =>
+        createPipe.transform({
+          vehicleId: "vh_1",
+          driverId: "dr_1",
+          status: "OFFERED",
+          materialType: "PLUTONIUM",
+          pickupSiteId: "site_pickup",
+          dropoffSiteId: "site_dropoff",
+        }),
+      ).toThrow(BadRequestException);
+    });
+
+    test("milestone timestamps out of order (acceptedAt before offeredAt) → BadRequestException", () => {
+      // The superRefine runs the monotonic-milestone rule on the create body.
+      expect(() =>
+        createPipe.transform({
+          vehicleId: "vh_1",
+          driverId: "dr_1",
+          status: "PLANNED",
+          offeredAt: "2026-07-01T10:00:00Z",
+          acceptedAt: "2026-07-01T09:00:00Z",
+        }),
+      ).toThrow(BadRequestException);
+    });
   });
 
   describe("UpdateTripSchema", () => {
@@ -504,6 +561,42 @@ describe("TripsController write-path schemas (iter-9 contract)", () => {
 
     test("invalid datetime string → BadRequestException", () => {
       expect(() => updatePipe.transform({ startedAt: "not-a-datetime" })).toThrow(
+        BadRequestException,
+      );
+    });
+
+    // ADR-0047 W4: the dispatch order + milestone fields on the PATCH body.
+    // (The order-required + monotonic cross-field rules run in the SERVICE
+    // against the merged shape — UpdateTripSchema has no superRefine — so
+    // those rejections are covered in trips.service.test.ts, not here.)
+
+    test("a dispatch-order PATCH (material + endpoints + consignee) parses through", () => {
+      const parsed = updatePipe.transform({
+        status: "OFFERED",
+        materialType: "SAND",
+        pickupSiteId: "site_pickup",
+        dropoffSiteId: "site_dropoff",
+        consigneeName: "Sita Devi",
+        consigneePhone: "+977-9811111111",
+        expectedLoadCount: 2,
+      });
+      expect(parsed.status).toBe("OFFERED");
+      expect(parsed.materialType).toBe("SAND");
+      expect(parsed.pickupSiteId).toBe("site_pickup");
+    });
+
+    test("a progress-milestone PATCH parses through", () => {
+      const parsed = updatePipe.transform({ arrivedPickupAt: "2026-07-01T09:30:00Z" });
+      expect(parsed.arrivedPickupAt).toBe("2026-07-01T09:30:00Z");
+    });
+
+    test("explicit null clears a Site FK (the reassign-back / disconnect branch)", () => {
+      const parsed = updatePipe.transform({ pickupSiteId: null });
+      expect(parsed.pickupSiteId).toBeNull();
+    });
+
+    test("invalid materialType enum on PATCH → BadRequestException", () => {
+      expect(() => updatePipe.transform({ materialType: "PLUTONIUM" })).toThrow(
         BadRequestException,
       );
     });
@@ -913,6 +1006,51 @@ describe("TripsController.create / update / remove (integration, real Prisma)", 
         driverRequest,
       ),
     ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  // ADR-0047 W4: a DRIVER accepts their OWN offered trip through the controller
+  // (the actor is threaded from the session); a foreign trip 404s (existence-
+  // hiding). The order + endpoints are pre-set on the seeded OFFERED trip.
+  test("a DRIVER accepts their own offered trip (→ ACCEPTED); a foreign offered trip 404s", async () => {
+    const driverUserId = await seedUser(prisma, UserRole.DRIVER);
+    const ownDriver = await seedDriver(prisma, adminId, { userId: driverUserId });
+    const driverRequest = {
+      session: { user: { id: driverUserId, role: "DRIVER" } },
+    } as unknown as AuthenticatedRequest;
+
+    const pickup = await seedSite(prisma, { createdById: adminId, name: "Kalimati Crusher" });
+    const dropoff = await seedSite(prisma, { createdById: adminId, name: "Pokhara Site" });
+    const orderSeed = {
+      materialType: MaterialType.GRAVEL,
+      pickupSiteId: pickup.id,
+      dropoffSiteId: dropoff.id,
+      offeredAt: new Date("2026-07-01T08:00:00Z"),
+      status: TripStatus.OFFERED,
+    };
+
+    const ownTrip = await seedTrip(prisma, {
+      vehicleId: vehicle.id,
+      driverId: ownDriver.id,
+      createdById: adminId,
+      ...orderSeed,
+    });
+    const accepted = await controller.update(
+      ownTrip.id,
+      { status: TripStatus.ACCEPTED },
+      driverRequest,
+    );
+    expect(accepted.status).toBe(TripStatus.ACCEPTED);
+    expect(accepted.acceptedAt).not.toBeNull();
+
+    const foreignTrip = await seedTrip(prisma, {
+      vehicleId: vehicle.id,
+      driverId: driver.id,
+      createdById: adminId,
+      ...orderSeed,
+    });
+    await expect(
+      controller.update(foreignTrip.id, { status: TripStatus.ACCEPTED }, driverRequest),
+    ).rejects.toBeInstanceOf(NotFoundException);
   });
 
   test("remove() deletes the row and resolves without a body (HTTP 204)", async () => {
