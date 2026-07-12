@@ -1053,6 +1053,70 @@ describe("TripsController.create / update / remove (integration, real Prisma)", 
     ).rejects.toBeInstanceOf(NotFoundException);
   });
 
+  // ADR-0047 c9/W7: a DRIVER reads their OWN trip and receives the pickup/
+  // drop-off Site COORDINATES (latitude/longitude). The driver app's "Navigate"
+  // deep-link routes to those pins off the trip the driver already reads —
+  // a DRIVER holds trips:* but NOT sites:*, so the sites:*-gated GET /sites/:id
+  // is unreachable to them (permissions.ts). Both the detail (DETAIL_INCLUDE via
+  // getById) and the slim list (LIST_SELECT) project { id, name, latitude,
+  // longitude }; the exact-match assertions also pin that the Tier-2 site
+  // contact (contactName/contactPhone) never leaks into the nested Site.
+  test("a DRIVER's own trip detail + list project the pickup/drop-off Site coordinates (W7 Navigate)", async () => {
+    const driverUserId = await seedUser(prisma, UserRole.DRIVER);
+    const ownDriver = await seedDriver(prisma, adminId, { userId: driverUserId });
+    const driverRequest = {
+      session: { user: { id: driverUserId, role: "DRIVER" } },
+    } as unknown as AuthenticatedRequest;
+
+    const pickup = await seedSite(prisma, {
+      createdById: adminId,
+      name: "Kalimati Crusher",
+      latitude: 27.7031,
+      longitude: 85.2925,
+    });
+    const dropoff = await seedSite(prisma, {
+      createdById: adminId,
+      name: "Pokhara Site",
+      latitude: 28.2096,
+      longitude: 83.9856,
+    });
+    const ownTrip = await seedTrip(prisma, {
+      vehicleId: vehicle.id,
+      driverId: ownDriver.id,
+      createdById: adminId,
+      materialType: MaterialType.GRAVEL,
+      pickupSiteId: pickup.id,
+      dropoffSiteId: dropoff.id,
+      offeredAt: new Date("2026-07-01T08:00:00Z"),
+      status: TripStatus.OFFERED,
+    });
+
+    // Detail (DETAIL_INCLUDE): the coordinates the Navigate deep-link reads.
+    // toEqual pins the projection to EXACTLY these four keys — no contact PII.
+    const detail = await controller.getById(ownTrip.id, driverRequest);
+    expect(detail.pickupSite).toEqual({
+      id: pickup.id,
+      name: "Kalimati Crusher",
+      latitude: 27.7031,
+      longitude: 85.2925,
+    });
+    expect(detail.dropoffSite).toEqual({
+      id: dropoff.id,
+      name: "Pokhara Site",
+      latitude: 28.2096,
+      longitude: 83.9856,
+    });
+
+    // List (LIST_SELECT): the same coordinates ride the slim list projection,
+    // so the driver's Requests tab renders the pins without a second fetch.
+    const list = await controller.list({ status: [TripStatus.OFFERED] }, driverRequest);
+    const row = list.items.find((t) => t.id === ownTrip.id);
+    expect(row?.pickupSite?.latitude).toBe(27.7031);
+    expect(row?.pickupSite?.longitude).toBe(85.2925);
+    expect(row?.dropoffSite?.latitude).toBe(28.2096);
+    expect(row?.dropoffSite?.longitude).toBe(83.9856);
+  });
+
   test("remove() deletes the row and resolves without a body (HTTP 204)", async () => {
     const created = await service.create(
       {
