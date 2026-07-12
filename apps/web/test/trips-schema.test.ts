@@ -143,3 +143,116 @@ describe("CreateTripFormSchema meter-aware cross-field (ADR-0036 B2)", () => {
     expect(result.success).toBe(true);
   });
 });
+
+/**
+ * Pins the OFFERED-order client-side cross-field rule (ADR-0047 c3). Dispatching
+ * a trip = saving it as OFFERED with a driver, a vehicle, and the order; the form
+ * must require material + pickup + drop-off at OFFERED (mirroring the API's
+ * authoritative rule), validate the material against the MaterialType enum, and
+ * require the free-text note when the material is "Other". The order is
+ * unconstrained before OFFERED — a PLANNED draft carries whatever is filled.
+ */
+describe("CreateTripFormSchema OFFERED-order cross-field (ADR-0047 c3)", () => {
+  const OFFERED_BASE = { ...BASE, status: "OFFERED", meterType: "ODOMETER_KM" };
+  const FULL_ORDER = {
+    materialType: "SAND",
+    pickupSiteId: "site_pickup",
+    dropoffSiteId: "site_drop",
+  };
+
+  test("OFFERED with material + pickup + drop-off is valid (no meter reading needed)", () => {
+    const result = CreateTripFormSchema.safeParse({ ...OFFERED_BASE, ...FULL_ORDER });
+    expect(result.success).toBe(true);
+  });
+
+  test("OFFERED missing material is invalid (flags materialType)", () => {
+    const result = CreateTripFormSchema.safeParse({
+      ...OFFERED_BASE,
+      pickupSiteId: "site_pickup",
+      dropoffSiteId: "site_drop",
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.some((i) => i.path.includes("materialType"))).toBe(true);
+    }
+  });
+
+  test("OFFERED missing pickup site is invalid (flags pickupSiteId)", () => {
+    const result = CreateTripFormSchema.safeParse({
+      ...OFFERED_BASE,
+      materialType: "SAND",
+      dropoffSiteId: "site_drop",
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.some((i) => i.path.includes("pickupSiteId"))).toBe(true);
+    }
+  });
+
+  test("OFFERED missing drop-off site is invalid (flags dropoffSiteId)", () => {
+    const result = CreateTripFormSchema.safeParse({
+      ...OFFERED_BASE,
+      materialType: "SAND",
+      pickupSiteId: "site_pickup",
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.some((i) => i.path.includes("dropoffSiteId"))).toBe(true);
+    }
+  });
+
+  test("material OTHER without a note is invalid (flags materialNote)", () => {
+    const result = CreateTripFormSchema.safeParse({
+      ...OFFERED_BASE,
+      materialType: "OTHER",
+      pickupSiteId: "site_pickup",
+      dropoffSiteId: "site_drop",
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.some((i) => i.path.includes("materialNote"))).toBe(true);
+    }
+  });
+
+  test("material OTHER with a note is valid", () => {
+    const result = CreateTripFormSchema.safeParse({
+      ...OFFERED_BASE,
+      materialType: "OTHER",
+      materialNote: "Crushed concrete",
+      pickupSiteId: "site_pickup",
+      dropoffSiteId: "site_drop",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  test("an unknown material value is rejected (the MaterialType enum guard)", () => {
+    const result = CreateTripFormSchema.safeParse({
+      ...OFFERED_BASE,
+      materialType: "PLUTONIUM",
+      pickupSiteId: "site_pickup",
+      dropoffSiteId: "site_drop",
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.some((i) => i.path.includes("materialType"))).toBe(true);
+    }
+  });
+
+  test("a PLANNED draft needs no order (it is required only at OFFERED)", () => {
+    const result = CreateTripFormSchema.safeParse({
+      ...BASE,
+      status: "PLANNED",
+      meterType: "ODOMETER_KM",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  test("an ACCEPTED trip is not re-gated on the order (only OFFERED gates it, mirroring the API)", () => {
+    const result = CreateTripFormSchema.safeParse({
+      ...BASE,
+      status: "ACCEPTED",
+      meterType: "ODOMETER_KM",
+    });
+    expect(result.success).toBe(true);
+  });
+});
