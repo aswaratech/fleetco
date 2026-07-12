@@ -13,23 +13,37 @@ import {
   View,
 } from "react-native";
 
-import { acceptTrip, ApiError, createFuelLog, listMyTrips, patchTrip } from "./src/api";
+import {
+  acceptTrip,
+  ApiError,
+  createFuelLog,
+  listMyTrips,
+  patchTrip,
+  patchTripMilestone,
+  routePreview,
+} from "./src/api";
 import { authClient } from "./src/auth";
 import { fuelLogPayload, previewTotalCostPaisa } from "./src/fuel";
 import { reconcileTripGps, startTripGps, stopTripGps } from "./src/gps-task";
+import { formatEtaLabel, type RoutePreviewResult } from "./src/routing";
 import { consumeSessionExpired } from "./src/session-expired";
+import { TripMap } from "./src/trip-map";
 import {
   isStartable,
   isStoppable,
   MATERIAL_TYPE_LABELS,
   meterIncludesHours,
   meterIncludesOdometer,
+  milestonePayload,
+  milestoneSteps,
   navigateUrl,
   tripStartPayload,
   tripStopPayload,
   TRIP_STATUS_LABELS,
   type DriverSite,
   type DriverTrip,
+  type MilestoneField,
+  type MilestoneStep,
   type TripReadings,
 } from "./src/trips";
 
@@ -198,12 +212,39 @@ function TripScreen() {
     [],
   );
 
+  // A live-progress tap (ADR-0047 c8, W8): stamp one milestone timestamp on the
+  // driver's own IN_PROGRESS trip and refresh, so the detail view re-renders the
+  // row as done (a timestamp, not a toggle). Event-driven (an onPress handler),
+  // so these setStates are unconstrained. No status change; the server enforces
+  // the monotonic order, and its rejection message surfaces via ApiError.
+  const markMilestone = useCallback(async (trip: DriverTrip, field: MilestoneField) => {
+    setBusyId(trip.id);
+    setError(null);
+    setGpsNote(null);
+    try {
+      await patchTripMilestone(trip.id, milestonePayload(field, new Date().toISOString()));
+      setTrips(await listMyTrips());
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Could not update progress.");
+    } finally {
+      setBusyId(null);
+    }
+  }, []);
+
   // An open order-detail view replaces the list (no nav library — a local
-  // conditional, same idiom as the tab shell). Refetches on start/stop keep the
-  // same trip id, so the detail view stays in sync with the row.
+  // conditional, same idiom as the tab shell). Refetches on start/stop/progress
+  // keep the same trip id, so the detail view stays in sync with the row.
   const detailTrip = trips?.find((trip) => trip.id === detailId) ?? null;
   if (detailTrip) {
-    return <OrderDetail trip={detailTrip} onBack={() => setDetailId(null)} />;
+    return (
+      <OrderDetail
+        trip={detailTrip}
+        onBack={() => setDetailId(null)}
+        onProgress={(field) => void markMilestone(detailTrip, field)}
+        progressBusy={busyId === detailTrip.id}
+        actionError={error}
+      />
+    );
   }
 
   return (
@@ -351,6 +392,18 @@ function openNavigate(site: DriverSite | null): void {
   void Linking.openURL(navigateUrl(site.latitude, site.longitude));
 }
 
+// A done milestone's stamped time as device-local HH:MM (ADR-0047 c8 — "a
+// timestamp, not a toggle"). Device-local is the driver's own Nepal time; this
+// is a TIME-OF-DAY, not a calendar date, so no Bikram Sambat rendering is
+// involved (BS governs Y/M/D dates; a same-haul progress clock does not). Returns
+// "" for a null/invalid stamp so the row degrades quietly.
+function formatClock(iso: string | null): string {
+  if (!iso) return "";
+  const t = new Date(iso);
+  if (Number.isNaN(t.getTime())) return "";
+  return t.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
 // The Requests tab (ADR-0047 c8): the driver's OFFERED trips as cards, each with
 // an Accept action and a tap into the order-detail view. Accepting
 // (OFFERED → ACCEPTED) moves the trip to the Trips tab as startable; there is no
@@ -480,28 +533,63 @@ function RequestCard({
 
 // The order-detail view (ADR-0047 c8/c9/c10). Reached from a request card or an
 // accepted/active trip row. Renders the haulage order in the DESIGN.md field
-// order — material, pickup/drop-off, a prominent Navigate button (Google Maps
-// deep-link, c9), the consignee as a tap-to-call row (tel:; Tier-2 PII, never a
-// log line or URL param — c6), load count, instructions, docket. The inline map
-// + live progress taps are W8. onAccept is supplied only for an OFFERED trip
-// (the Requests flow); an accepted/active trip's detail is read-only here.
+// order — material, pickup/drop-off (as pins on an inline map with a route +
+// ETA preview, W8), a prominent Navigate button (Google Maps deep-link, c9), the
+// consignee as a tap-to-call row (tel:; Tier-2 PII, never a log line or URL
+// param — c6), load count, instructions, docket. While the trip is IN_PROGRESS
+// it shows the live progress taps (W8). onAccept is supplied only for an OFFERED
+// trip (the Requests flow); onProgress only for an active trip (the Trips flow).
 function OrderDetail({
   trip,
   onBack,
   onAccept,
   accepting,
   actionError,
+  onProgress,
+  progressBusy,
 }: {
   trip: DriverTrip;
   onBack: () => void;
   onAccept?: (id: string) => void;
   accepting?: boolean;
   actionError?: string | null;
+  onProgress?: (field: MilestoneField) => void;
+  progressBusy?: boolean;
 }) {
   // A narrowed const so the tap-to-call closure captures a non-null phone (a
   // bare property access would not narrow into the closure — and must never
-  // build "tel:null").
+  // build "tel:null"). Same narrowing for the two pins, which the map needs
+  // non-null.
   const phone = trip.consigneePhone;
+  const pickup = trip.pickupSite;
+  const dropoff = trip.dropoffSite;
+
+  // Route/ETA preview for the inline map (ADR-0047 c9). Best-effort: a failed or
+  // absent preview leaves the pins WITHOUT a route line (never an error). The
+  // fetch + setState live in the promise continuation guarded by `active` (the
+  // expo-SDK56 set-state-in-effect rule), dropping a response that resolves after
+  // the detail view closes.
+  const [route, setRoute] = useState<RoutePreviewResult | null>(null);
+  useEffect(() => {
+    if (!pickup || !dropoff) return;
+    let active = true;
+    routePreview(pickup, dropoff)
+      .then((r) => {
+        if (active) setRoute(r);
+      })
+      .catch(() => {
+        if (active) setRoute(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [pickup, dropoff]);
+
+  // The live progress checklist shows only while the trip is running (ADR-0047
+  // c8). offeredAt/acceptedAt were server-stamped earlier; these four are the
+  // driver's taps.
+  const steps = trip.status === "IN_PROGRESS" ? milestoneSteps(trip) : null;
+
   return (
     <ScrollView style={styles.subScreen} contentContainerStyle={styles.fuelContent}>
       <Pressable onPress={onBack} style={styles.backLink}>
@@ -519,15 +607,28 @@ function OrderDetail({
       <Text style={styles.detailValue}>{materialLabel(trip)}</Text>
 
       <Text style={styles.label}>Pickup</Text>
-      <Text style={styles.detailValue}>{siteName(trip.pickupSite)}</Text>
+      <Text style={styles.detailValue}>{siteName(pickup)}</Text>
       <Text style={styles.label}>Drop-off</Text>
-      <Text style={styles.detailValue}>{siteName(trip.dropoffSite)}</Text>
+      <Text style={styles.detailValue}>{siteName(dropoff)}</Text>
 
-      {trip.pickupSite ? (
-        <Button title="Navigate to pickup" onPress={() => openNavigate(trip.pickupSite)} />
+      {pickup && dropoff ? (
+        <>
+          <TripMap
+            pickup={pickup}
+            dropoff={dropoff}
+            routeGeometryLatLng={route ? route.geometryLatLng : null}
+          />
+          {route ? (
+            <Text style={styles.etaLabel}>
+              {formatEtaLabel(route.distanceMeters, route.durationSeconds)}
+            </Text>
+          ) : null}
+        </>
       ) : null}
-      {trip.dropoffSite ? (
-        <Button title="Navigate to drop-off" onPress={() => openNavigate(trip.dropoffSite)} />
+
+      {pickup ? <Button title="Navigate to pickup" onPress={() => openNavigate(pickup)} /> : null}
+      {dropoff ? (
+        <Button title="Navigate to drop-off" onPress={() => openNavigate(dropoff)} />
       ) : null}
 
       <Text style={styles.label}>Consignee</Text>
@@ -547,6 +648,20 @@ function OrderDetail({
       <Text style={styles.label}>Docket</Text>
       <Text style={styles.detailValue}>{trip.docketNumber ?? "—"}</Text>
 
+      {steps ? (
+        <View style={styles.progress}>
+          <Text style={styles.progressTitle}>Progress</Text>
+          {steps.map((step) => (
+            <ProgressRow
+              key={step.field}
+              step={step}
+              busy={progressBusy ?? false}
+              onMark={onProgress ? () => onProgress(step.field) : undefined}
+            />
+          ))}
+        </View>
+      ) : null}
+
       {onAccept && trip.status === "OFFERED" ? (
         <Button
           title={accepting ? "…" : "Accept"}
@@ -555,6 +670,44 @@ function OrderDetail({
         />
       ) : null}
     </ScrollView>
+  );
+}
+
+// One live-progress milestone row (ADR-0047 c8, W8; DESIGN §"Trip dispatch"). A
+// done milestone reads as its done label + the stamped clock time (a timestamp,
+// not a toggle). The single NEXT un-done milestone shows a "Mark …" button (the
+// driver advances in order). A later, not-yet-reachable milestone reads muted
+// with an em-dash — shown so the whole load is visible at a glance, but not yet
+// tappable (an out-of-order tap the server would reject).
+function ProgressRow({
+  step,
+  busy,
+  onMark,
+}: {
+  step: MilestoneStep;
+  busy: boolean;
+  onMark?: () => void;
+}) {
+  if (step.isDone) {
+    return (
+      <View style={styles.progressRow}>
+        <Text style={styles.progressDone}>✓ {step.done}</Text>
+        <Text style={styles.progressTime}>{formatClock(step.at)}</Text>
+      </View>
+    );
+  }
+  if (step.actionable && onMark) {
+    return (
+      <View style={styles.progressRow}>
+        <Button title={busy ? "…" : step.action} onPress={onMark} disabled={busy} />
+      </View>
+    );
+  }
+  return (
+    <View style={styles.progressRow}>
+      <Text style={styles.progressPending}>{step.done}</Text>
+      <Text style={styles.progressTime}>—</Text>
+    </View>
   );
 }
 
@@ -919,6 +1072,41 @@ const styles = StyleSheet.create({
   viewOrderLink: {
     fontSize: 14,
     color: "#1f6feb",
+  },
+  // Dispatch: the inline-map ETA preview label + the live-progress checklist
+  // (ADR-0047 W8).
+  etaLabel: {
+    fontSize: 14,
+    color: "#666",
+    marginTop: 6,
+  },
+  progress: {
+    marginTop: 12,
+    gap: 6,
+  },
+  progressTitle: {
+    fontSize: 13,
+    color: "#666",
+    marginBottom: 2,
+  },
+  progressRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    minHeight: 32,
+  },
+  progressDone: {
+    fontSize: 16,
+    color: "#0a7d33",
+  },
+  progressPending: {
+    fontSize: 16,
+    color: "#999",
+  },
+  progressTime: {
+    fontSize: 14,
+    color: "#666",
+    fontVariant: ["tabular-nums"],
   },
   backLink: {
     alignSelf: "flex-start",
