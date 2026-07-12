@@ -25,6 +25,7 @@ import { QueueModule } from "./modules/queue/queue.module";
 import { RedisModule } from "./modules/redis/redis.module";
 import { ReportsModule } from "./modules/reports/reports.module";
 import { RetentionModule } from "./modules/retention/retention.module";
+import { SitesModule } from "./modules/sites/sites.module";
 import { TelematicsModule } from "./modules/telematics/telematics.module";
 import { TripsModule } from "./modules/trips/trips.module";
 import { VehiclesModule } from "./modules/vehicles/vehicles.module";
@@ -99,6 +100,10 @@ import { WhatsAppModule } from "./modules/whatsapp/whatsapp.module";
     TelematicsModule,
     RetentionModule,
     GeofencesModule,
+    // ADR-0047 W3: the Sites aggregate (reusable pickup/drop-off pins for trip
+    // dispatch). Grouped with the other location aggregate (Geofences); its
+    // `sites:*` capability rides the existing RolesGuard spine.
+    SitesModule,
     MaintenanceModule,
     NotificationModule,
     NotificationLogsModule,

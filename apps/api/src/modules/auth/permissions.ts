@@ -29,6 +29,14 @@ export type Capability =
   | "customers:*"
   | "jobs:*"
   | "trips:*"
+  // Reusable pickup/drop-off pin aggregate (ADR-0047 c4/c10). A COARSE
+  // operation-class token like the Phase-1 aggregates — dispatch (and its Site
+  // CRUD) is operational data entry both live roles do, so it joins the shared
+  // operational floor below (ADMIN + OFFICE_STAFF). Deliberately NOT a
+  // read/write split like geofences: a Site is operational master data (a
+  // crusher's map pin), not users:manage-tier configuration the way a geofence
+  // boundary is. A DRIVER never holds it — orders come only from the admin app.
+  | "sites:*"
   | "fuel-logs:*"
   | "expense-logs:*"
   | "reports:read"
@@ -106,6 +114,9 @@ const OPERATIONAL_CAPABILITIES: readonly Capability[] = [
   "customers:*",
   "jobs:*",
   "trips:*",
+  // Site CRUD (pickup/drop-off pins) is operational data entry the dispatcher
+  // does — the same class as the Phase-1 aggregates above (ADR-0047 c4/c10).
+  "sites:*",
   "fuel-logs:*",
   "expense-logs:*",
   "reports:read",
