@@ -31,6 +31,7 @@ import {
   LayoutDashboard,
   Map,
   MapPin,
+  MapPinned,
   RadioTower,
   Receipt,
   Route,
@@ -88,7 +89,9 @@ export const HOME: NavItem = {
 // Geofences — telematics configuration) and M9 added Live map (Operations,
 // per the DESIGN.md §"Live map" spec) for 17; ADR-0043 A6 added Agent
 // (Operations, ADMIN-only per DESIGN.md §"Agent chat") for 18 and A8 added
-// Agent activity (Logs, ADMIN-only per DESIGN.md §"Agent activity") for 19.
+// Agent activity (Logs, ADMIN-only per DESIGN.md §"Agent activity") for 19;
+// ADR-0047 W5 added Sites (Operations, beside Customers — reusable dispatch
+// pins, both web roles per DESIGN.md §"Sites") for 20.
 export const NAV: readonly NavGroup[] = [
   {
     id: "operations",
@@ -99,6 +102,11 @@ export const NAV: readonly NavGroup[] = [
       { href: "/trips", label: "Trips", icon: Route, allowedRoles: ADMIN_OFFICE },
       { href: "/map", label: "Live map", icon: Map, allowedRoles: ADMIN_OFFICE },
       { href: "/customers", label: "Customers", icon: Building2, allowedRoles: ADMIN_OFFICE },
+      // Reusable dispatch pins — crushers, pits, delivery sites (ADR-0047 c4 /
+      // DESIGN.md §Sites). Master data of the same family as Customers, so it
+      // sits beside it in Operations, both web roles (`sites:*` = ADMIN +
+      // OFFICE_STAFF).
+      { href: "/sites", label: "Sites", icon: MapPinned, allowedRoles: ADMIN_OFFICE },
       { href: "/jobs", label: "Jobs", icon: ClipboardList, allowedRoles: ADMIN_OFFICE },
       // ADMIN-only (ADR-0043 c1 / DESIGN.md §"Agent chat"): the AI agent's
       // conversational surface. The first item whose gate diverges from
@@ -190,8 +198,8 @@ export const NAV: readonly NavGroup[] = [
  * quick-links strip and the command palette flatten the result.
  *
  * Examples:
- *   navForRole("ADMIN")        → all 5 groups, all 19 items
- *   navForRole("OFFICE_STAFF") → all 5 groups, 17 items (all but the
+ *   navForRole("ADMIN")        → all 5 groups, all 20 items
+ *   navForRole("OFFICE_STAFF") → all 5 groups, 18 items (all but the
  *                                ADMIN-only Agent + Agent activity)
  *   navForRole("DRIVER")       → [] (DRIVER has no web surface; uses the Expo app)
  */
