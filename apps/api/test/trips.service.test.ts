@@ -6,6 +6,7 @@ import {
 } from "@nestjs/common";
 import { Test, type TestingModule } from "@nestjs/testing";
 import {
+  MaterialType,
   MeterType,
   TripStatus,
   UserRole,
@@ -22,6 +23,7 @@ import { TripsService, LIST_TAKE_MAX } from "../src/modules/trips/trips.service"
 import { VehiclesService } from "../src/modules/vehicles/vehicles.service";
 import { resetDb } from "./db";
 import { seedGpsPing } from "./fixtures/gps-ping";
+import { seedSite } from "./fixtures/site";
 import { seedDriver, seedTrip, seedUser, seedVehicle } from "./fixtures/trip";
 
 // Integration tests for TripsService against a real Postgres. The
@@ -1686,6 +1688,432 @@ describe("TripsService (integration, real Postgres)", () => {
           STAFF_ACTOR,
         ),
       ).rejects.toBeInstanceOf(BadRequestException);
+    });
+  });
+
+  describe("dispatch lifecycle + order (ADR-0047 W4)", () => {
+    // The dispatch → acceptance lifecycle and the structured haulage order.
+    // Two saved Sites (a crusher pickup + a delivery drop-off) back every
+    // test; a "valid order" is materialType + pickupSiteId + dropoffSiteId,
+    // the c3 requirement at → OFFERED. seedSite is re-seeded per test so the
+    // outer resetDb keeps them clean.
+    let pickupSite: Awaited<ReturnType<typeof seedSite>>;
+    let dropoffSite: Awaited<ReturnType<typeof seedSite>>;
+
+    beforeEach(async () => {
+      pickupSite = await seedSite(prisma, { createdById: adminId, name: "Kalimati Crusher" });
+      dropoffSite = await seedSite(prisma, { createdById: adminId, name: "Pokhara Site" });
+    });
+
+    // A full, valid order patch (material + both endpoints).
+    const validOrder = () => ({
+      materialType: MaterialType.GRAVEL,
+      pickupSiteId: pickupSite.id,
+      dropoffSiteId: dropoffSite.id,
+    });
+
+    // Seed a trip already dispatched to OFFERED (carrying its order + offeredAt)
+    // so the OFFERED → * transitions can be exercised in one step.
+    const seedOffered = (extra: Record<string, unknown> = {}) =>
+      seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.OFFERED,
+        materialType: MaterialType.GRAVEL,
+        pickupSiteId: pickupSite.id,
+        dropoffSiteId: dropoffSite.id,
+        offeredAt: new Date("2026-07-01T08:00:00Z"),
+        ...extra,
+      });
+
+    // ── Legal transitions (each is a mutation-test guard for its edge) ──
+
+    test("PLANNED → OFFERED with a full order stamps offeredAt server-side", async () => {
+      const trip = await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.PLANNED,
+      });
+      const nowMs = Date.now();
+      const result = await service.update(
+        trip.id,
+        { status: TripStatus.OFFERED, ...validOrder() },
+        STAFF_ACTOR,
+      );
+      expect(result.status).toBe(TripStatus.OFFERED);
+      // offeredAt is server-stamped (the client sent none) — a Date near now.
+      expect(result.offeredAt).toBeInstanceOf(Date);
+      expect(Math.abs((result.offeredAt?.getTime() ?? 0) - nowMs)).toBeLessThan(60_000);
+      // The order persisted.
+      expect(result.materialType).toBe(MaterialType.GRAVEL);
+      expect(result.pickupSiteId).toBe(pickupSite.id);
+      expect(result.dropoffSiteId).toBe(dropoffSite.id);
+      // The { id, name } Site projections come back on the detail shape.
+      expect(result.pickupSite?.name).toBe("Kalimati Crusher");
+      expect(result.dropoffSite?.name).toBe("Pokhara Site");
+    });
+
+    test("OFFERED → ACCEPTED stamps acceptedAt server-side", async () => {
+      const trip = await seedOffered();
+      const nowMs = Date.now();
+      const result = await service.update(trip.id, { status: TripStatus.ACCEPTED }, STAFF_ACTOR);
+      expect(result.status).toBe(TripStatus.ACCEPTED);
+      expect(result.acceptedAt).toBeInstanceOf(Date);
+      expect(Math.abs((result.acceptedAt?.getTime() ?? 0) - nowMs)).toBeLessThan(60_000);
+      // offeredAt (already set on the seed) is untouched.
+      expect(result.offeredAt?.toISOString()).toBe("2026-07-01T08:00:00.000Z");
+    });
+
+    test("OFFERED → PLANNED is the reassign-back path (accept-only; no DECLINED status)", async () => {
+      const trip = await seedOffered();
+      const result = await service.update(trip.id, { status: TripStatus.PLANNED }, STAFF_ACTOR);
+      expect(result.status).toBe(TripStatus.PLANNED);
+    });
+
+    test("OFFERED → CANCELLED is legal", async () => {
+      const trip = await seedOffered();
+      const result = await service.update(trip.id, { status: TripStatus.CANCELLED }, STAFF_ACTOR);
+      expect(result.status).toBe(TripStatus.CANCELLED);
+    });
+
+    test("ACCEPTED → IN_PROGRESS starts the trip (km readings required for the ODOMETER_KM default)", async () => {
+      const trip = await seedOffered({
+        status: TripStatus.ACCEPTED,
+        acceptedAt: new Date("2026-07-01T08:05:00Z"),
+      });
+      const result = await service.update(
+        trip.id,
+        {
+          status: TripStatus.IN_PROGRESS,
+          startedAt: "2026-07-01T09:00:00Z",
+          startOdometerKm: 80000,
+        },
+        STAFF_ACTOR,
+      );
+      expect(result.status).toBe(TripStatus.IN_PROGRESS);
+    });
+
+    test("ACCEPTED → CANCELLED is legal", async () => {
+      const trip = await seedOffered({
+        status: TripStatus.ACCEPTED,
+        acceptedAt: new Date("2026-07-01T08:05:00Z"),
+      });
+      const result = await service.update(trip.id, { status: TripStatus.CANCELLED }, STAFF_ACTOR);
+      expect(result.status).toBe(TripStatus.CANCELLED);
+    });
+
+    test("PLANNED → IN_PROGRESS is KEPT for admin-quick trips (ADR-0047 c7 back-compat)", async () => {
+      const trip = await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.PLANNED,
+      });
+      const result = await service.update(
+        trip.id,
+        {
+          status: TripStatus.IN_PROGRESS,
+          startedAt: "2026-07-01T09:00:00Z",
+          startOdometerKm: 80000,
+        },
+        STAFF_ACTOR,
+      );
+      expect(result.status).toBe(TripStatus.IN_PROGRESS);
+    });
+
+    // ── Illegal transitions → 400 ──
+
+    test("PLANNED → ACCEPTED is illegal (must be offered + accepted first)", async () => {
+      const trip = await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.PLANNED,
+      });
+      await expect(
+        service.update(trip.id, { status: TripStatus.ACCEPTED }, STAFF_ACTOR),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    test("OFFERED → IN_PROGRESS is illegal (the driver must Accept first)", async () => {
+      const trip = await seedOffered();
+      await expect(
+        service.update(
+          trip.id,
+          {
+            status: TripStatus.IN_PROGRESS,
+            startedAt: "2026-07-01T09:00:00Z",
+            startOdometerKm: 80000,
+          },
+          STAFF_ACTOR,
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    test("OFFERED → COMPLETED is illegal", async () => {
+      const trip = await seedOffered();
+      await expect(
+        service.update(trip.id, { status: TripStatus.COMPLETED }, STAFF_ACTOR),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    test("ACCEPTED → OFFERED is illegal (re-offer edits driver/vehicle in place, not a status hop)", async () => {
+      const trip = await seedOffered({
+        status: TripStatus.ACCEPTED,
+        acceptedAt: new Date("2026-07-01T08:05:00Z"),
+      });
+      await expect(
+        service.update(trip.id, { status: TripStatus.OFFERED }, STAFF_ACTOR),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    test("COMPLETED → OFFERED is illegal (COMPLETED is terminal)", async () => {
+      const trip = await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.COMPLETED,
+        startedAt: new Date("2026-07-01T09:00:00Z"),
+        endedAt: new Date("2026-07-01T17:00:00Z"),
+        startOdometerKm: 80000,
+        endOdometerKm: 80250,
+      });
+      await expect(
+        service.update(trip.id, { status: TripStatus.OFFERED, ...validOrder() }, STAFF_ACTOR),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    // ── Order-required-at-OFFERED ──
+
+    test("→ OFFERED without any order → BadRequestException", async () => {
+      const trip = await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.PLANNED,
+      });
+      await expect(
+        service.update(trip.id, { status: TripStatus.OFFERED }, STAFF_ACTOR),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    test("→ OFFERED missing just the pickup site → BadRequestException naming pickupSiteId", async () => {
+      const trip = await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.PLANNED,
+      });
+      await expect(
+        service.update(
+          trip.id,
+          {
+            status: TripStatus.OFFERED,
+            materialType: MaterialType.GRAVEL,
+            dropoffSiteId: dropoffSite.id,
+          },
+          STAFF_ACTOR,
+        ),
+      ).rejects.toThrow(/pickupSiteId/);
+    });
+
+    test("→ OFFERED with a stale pickupSiteId → BadRequestException naming the pickup site", async () => {
+      const trip = await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.PLANNED,
+      });
+      await expect(
+        service.update(
+          trip.id,
+          {
+            status: TripStatus.OFFERED,
+            materialType: MaterialType.GRAVEL,
+            pickupSiteId: "site-does-not-exist",
+            dropoffSiteId: dropoffSite.id,
+          },
+          STAFF_ACTOR,
+        ),
+      ).rejects.toThrow(/[Pp]ickup site/);
+    });
+
+    // ── Milestone timestamps ──
+
+    test("progress-timestamp PATCH while IN_PROGRESS is allowed and persists (monotonic)", async () => {
+      const trip = await seedOffered({
+        status: TripStatus.IN_PROGRESS,
+        acceptedAt: new Date("2026-07-01T08:05:00Z"),
+        startedAt: new Date("2026-07-01T09:00:00Z"),
+        startOdometerKm: 80000,
+      });
+      const result = await service.update(
+        trip.id,
+        {
+          arrivedPickupAt: "2026-07-01T09:30:00Z",
+          loadedAt: "2026-07-01T10:00:00Z",
+        },
+        STAFF_ACTOR,
+      );
+      // No status change; the timestamps persisted.
+      expect(result.status).toBe(TripStatus.IN_PROGRESS);
+      expect(result.arrivedPickupAt?.toISOString()).toBe("2026-07-01T09:30:00.000Z");
+      expect(result.loadedAt?.toISOString()).toBe("2026-07-01T10:00:00.000Z");
+    });
+
+    test("a milestone timestamp out of order (loadedAt before arrivedPickupAt) → BadRequestException", async () => {
+      const trip = await seedOffered({
+        status: TripStatus.IN_PROGRESS,
+        acceptedAt: new Date("2026-07-01T08:05:00Z"),
+        startedAt: new Date("2026-07-01T09:00:00Z"),
+        startOdometerKm: 80000,
+      });
+      await expect(
+        service.update(
+          trip.id,
+          {
+            arrivedPickupAt: "2026-07-01T10:00:00Z",
+            loadedAt: "2026-07-01T09:00:00Z", // before arrivedPickupAt
+          },
+          STAFF_ACTOR,
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    test("an explicit client offeredAt on the → OFFERED transition is respected (not overwritten)", async () => {
+      const trip = await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.PLANNED,
+      });
+      const result = await service.update(
+        trip.id,
+        { status: TripStatus.OFFERED, ...validOrder(), offeredAt: "2026-06-30T06:00:00Z" },
+        STAFF_ACTOR,
+      );
+      expect(result.offeredAt?.toISOString()).toBe("2026-06-30T06:00:00.000Z");
+    });
+
+    // ── create() straight into a dispatch state ──
+
+    test("create() straight into OFFERED stamps offeredAt and persists the order", async () => {
+      const nowMs = Date.now();
+      const result = await service.create(
+        { vehicleId: vehicle.id, driverId: driver.id, status: TripStatus.OFFERED, ...validOrder() },
+        adminId,
+        STAFF_ACTOR,
+      );
+      expect(result.status).toBe(TripStatus.OFFERED);
+      expect(result.offeredAt).toBeInstanceOf(Date);
+      expect(Math.abs((result.offeredAt?.getTime() ?? 0) - nowMs)).toBeLessThan(60_000);
+      expect(result.pickupSite?.name).toBe("Kalimati Crusher");
+    });
+
+    test("create() into OFFERED without an order → BadRequestException", async () => {
+      await expect(
+        service.create(
+          { vehicleId: vehicle.id, driverId: driver.id, status: TripStatus.OFFERED },
+          adminId,
+          STAFF_ACTOR,
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    test("create() with a stale dropoffSiteId → BadRequestException naming the drop-off site", async () => {
+      await expect(
+        service.create(
+          {
+            vehicleId: vehicle.id,
+            driverId: driver.id,
+            status: TripStatus.OFFERED,
+            materialType: MaterialType.GRAVEL,
+            pickupSiteId: pickupSite.id,
+            dropoffSiteId: "site-does-not-exist",
+          },
+          adminId,
+          STAFF_ACTOR,
+        ),
+      ).rejects.toThrow(/[Dd]rop-off site/);
+    });
+
+    // ── DRIVER own-record accept + progress (ADR-0034 c4 × ADR-0047) ──
+
+    describe("DRIVER accepts + progresses their own trip", () => {
+      let driverUserId: string;
+      let ownDriver: Driver;
+      let driverActor: Actor;
+
+      beforeEach(async () => {
+        driverUserId = await seedUser(prisma, UserRole.DRIVER);
+        ownDriver = await seedDriver(prisma, adminId, { userId: driverUserId });
+        driverActor = { userId: driverUserId, role: UserRole.DRIVER };
+      });
+
+      test("a DRIVER accepts their OWN offered trip (OFFERED → ACCEPTED), stamping acceptedAt", async () => {
+        const ownTrip = await seedTrip(prisma, {
+          vehicleId: vehicle.id,
+          driverId: ownDriver.id,
+          createdById: adminId,
+          status: TripStatus.OFFERED,
+          materialType: MaterialType.GRAVEL,
+          pickupSiteId: pickupSite.id,
+          dropoffSiteId: dropoffSite.id,
+          offeredAt: new Date("2026-07-01T08:00:00Z"),
+        });
+        const result = await service.update(
+          ownTrip.id,
+          { status: TripStatus.ACCEPTED },
+          driverActor,
+        );
+        expect(result.status).toBe(TripStatus.ACCEPTED);
+        expect(result.acceptedAt).toBeInstanceOf(Date);
+      });
+
+      test("a DRIVER records progress on their OWN in-progress trip", async () => {
+        const ownTrip = await seedTrip(prisma, {
+          vehicleId: vehicle.id,
+          driverId: ownDriver.id,
+          createdById: adminId,
+          status: TripStatus.IN_PROGRESS,
+          materialType: MaterialType.GRAVEL,
+          pickupSiteId: pickupSite.id,
+          dropoffSiteId: dropoffSite.id,
+          offeredAt: new Date("2026-07-01T08:00:00Z"),
+          acceptedAt: new Date("2026-07-01T08:05:00Z"),
+          startedAt: new Date("2026-07-01T09:00:00Z"),
+          startOdometerKm: 80000,
+        });
+        const result = await service.update(
+          ownTrip.id,
+          { arrivedPickupAt: "2026-07-01T09:30:00Z", loadedAt: "2026-07-01T10:00:00Z" },
+          driverActor,
+        );
+        expect(result.arrivedPickupAt?.toISOString()).toBe("2026-07-01T09:30:00.000Z");
+        expect(result.loadedAt?.toISOString()).toBe("2026-07-01T10:00:00.000Z");
+      });
+
+      test("a DRIVER accepting ANOTHER driver's offered trip is rejected with 404 (existence-hiding)", async () => {
+        const foreignTrip = await seedTrip(prisma, {
+          vehicleId: vehicle.id,
+          driverId: driver.id, // the outer, unlinked driver
+          createdById: adminId,
+          status: TripStatus.OFFERED,
+          materialType: MaterialType.GRAVEL,
+          pickupSiteId: pickupSite.id,
+          dropoffSiteId: dropoffSite.id,
+          offeredAt: new Date("2026-07-01T08:00:00Z"),
+        });
+        await expect(
+          service.update(foreignTrip.id, { status: TripStatus.ACCEPTED }, driverActor),
+        ).rejects.toBeInstanceOf(NotFoundException);
+        // The gate fired before the write: the foreign trip stays OFFERED, unaccepted.
+        const after = await prisma.trip.findUniqueOrThrow({ where: { id: foreignTrip.id } });
+        expect(after.status).toBe(TripStatus.OFFERED);
+        expect(after.acceptedAt).toBeNull();
+      });
     });
   });
 

@@ -15,13 +15,13 @@ import { z } from "zod";
 // Order matches the Prisma enum so an audit grep finds both lists side
 // by side; the order has no runtime significance.
 //
-// ADR-0047 c1 (ticket W2) added OFFERED and ACCEPTED (the dispatch →
-// acceptance states) between PLANNED and IN_PROGRESS. W2 is schema-only
-// staging: the two values join this array (so the wire schemas accept
-// them) and the Prisma enum, but the dispatch TRANSITION SEMANTICS
-// (PLANNED → OFFERED → ACCEPTED → IN_PROGRESS, CANCELLED from any
-// non-terminal) land in W4 — see TRIP_STATUS_TRANSITIONS below, whose two
-// new keys are placeholders that preserve the current behavior until then.
+// ADR-0047 c1 added OFFERED and ACCEPTED (the dispatch → acceptance states)
+// between PLANNED and IN_PROGRESS. W2 staged the two values into this array
+// (so the wire schemas accept them) and the Prisma enum; W4 (this ticket)
+// wires the dispatch TRANSITION SEMANTICS (PLANNED → OFFERED → ACCEPTED →
+// IN_PROGRESS, with CANCELLED reachable from any non-terminal state and
+// OFFERED → PLANNED the reassign-back path) — see TRIP_STATUS_TRANSITIONS
+// below.
 const TRIP_STATUSES = [
   "PLANNED",
   "OFFERED",
@@ -29,6 +29,22 @@ const TRIP_STATUSES = [
   "IN_PROGRESS",
   "COMPLETED",
   "CANCELLED",
+] as const;
+
+// MaterialType enum — must mirror MaterialType in prisma/schema.prisma
+// (ADR-0047 c5). Duplicated as a local string tuple for the same reason
+// TRIP_STATUSES is: this file must not pull the Prisma runtime. Order
+// matches the Prisma enum so an audit grep finds both lists side by side.
+// `OTHER` is the escape hatch paired with the free-text materialNote.
+const MATERIAL_TYPES = [
+  "SAND",
+  "AGGREGATE",
+  "GRAVEL",
+  "STONE",
+  "BOULDER",
+  "SOIL",
+  "BRICKS",
+  "OTHER",
 ] as const;
 
 // GET /api/v1/trips query parameters (iter 8 — read path).
@@ -242,6 +258,55 @@ const EngineHoursInt = z
   .min(ENGINE_HOURS_MIN, `Engine hours must be ${ENGINE_HOURS_MIN} or greater.`)
   .max(ENGINE_HOURS_MAX, `Engine hours must be ${ENGINE_HOURS_MAX} or less.`);
 
+// ── Dispatch-order field validators (ADR-0047 W4) ─────────────────────
+// The structured haulage order the trip executes (ADR-0047 c3/c5/c6).
+// Defined once here and applied with `.nullable().optional()` in
+// CreateTripSchema and `.nullable()` (then `.partial()`) in
+// UpdateTripSchema — the same base-validator pattern OdometerInt /
+// EngineHoursInt follow, so the two schemas cannot drift on bounds.
+// Free-text caps mirror NOTES_MAX's rationale (keep the surface
+// predictable; the column itself is unbounded in Postgres).
+const MATERIAL_NOTE_MAX = 500;
+const CONSIGNEE_NAME_MAX = 200;
+const CONSIGNEE_PHONE_MAX = 40;
+const SPECIAL_INSTRUCTIONS_MAX = 1000;
+const DOCKET_NUMBER_MAX = 100;
+// A dispatch is at least one load; the ceiling is generous (one trip is
+// still one load per ADR-0047 c1 — this is the operator's expectation hint,
+// not a hard multiplicity).
+const LOAD_COUNT_MIN = 1;
+const LOAD_COUNT_MAX = 100_000;
+
+const MaterialTypeEnum = z.enum(MATERIAL_TYPES);
+// pickup/drop-off Site ids: any non-empty string (a cuid in practice; the
+// service resolves the FK and maps a stale id to 400, exactly like
+// vehicleId/driverId). No cuid-format check here — same rationale as the
+// IdFilter above.
+const SiteId = z.string().min(1, "Site id must be non-empty.");
+const MaterialNote = z
+  .string()
+  .max(MATERIAL_NOTE_MAX, `materialNote must be at most ${MATERIAL_NOTE_MAX} characters.`);
+const ConsigneeName = z
+  .string()
+  .max(CONSIGNEE_NAME_MAX, `consigneeName must be at most ${CONSIGNEE_NAME_MAX} characters.`);
+const ConsigneePhone = z
+  .string()
+  .max(CONSIGNEE_PHONE_MAX, `consigneePhone must be at most ${CONSIGNEE_PHONE_MAX} characters.`);
+const SpecialInstructions = z
+  .string()
+  .max(
+    SPECIAL_INSTRUCTIONS_MAX,
+    `specialInstructions must be at most ${SPECIAL_INSTRUCTIONS_MAX} characters.`,
+  );
+const DocketNumber = z
+  .string()
+  .max(DOCKET_NUMBER_MAX, `docketNumber must be at most ${DOCKET_NUMBER_MAX} characters.`);
+const ExpectedLoadCount = z
+  .number()
+  .int("expectedLoadCount must be an integer.")
+  .min(LOAD_COUNT_MIN, `expectedLoadCount must be ${LOAD_COUNT_MIN} or greater.`)
+  .max(LOAD_COUNT_MAX, `expectedLoadCount must be ${LOAD_COUNT_MAX} or less.`);
+
 // Mirror of Prisma's MeterType enum values (ADR-0036). This schema file
 // deliberately does not import the Prisma runtime (see the header), so the
 // meter classification is expressed as a local string union; the service
@@ -270,6 +335,22 @@ export interface TripCrossFieldShape {
   endOdometerKm?: number | null | undefined;
   startEngineHours?: number | null | undefined;
   endEngineHours?: number | null | undefined;
+  // Dispatch order + milestones (ADR-0047 W4). The order-required-at-OFFERED
+  // rule reads materialType/pickupSiteId/dropoffSiteId (presence only — the
+  // enum value / FK validity are the schema's / service's job), and the
+  // monotonic rule reads the six milestone timestamps. Typed loosely
+  // (string) because these checks only look at presence + ordering, never
+  // the enum member — this keeps the Prisma `MaterialType` row value
+  // assignable without a runtime coupling (same spirit as TripMeterType).
+  materialType?: string | null | undefined;
+  pickupSiteId?: string | null | undefined;
+  dropoffSiteId?: string | null | undefined;
+  offeredAt?: string | Date | null | undefined;
+  acceptedAt?: string | Date | null | undefined;
+  arrivedPickupAt?: string | Date | null | undefined;
+  loadedAt?: string | Date | null | undefined;
+  arrivedDropoffAt?: string | Date | null | undefined;
+  deliveredAt?: string | Date | null | undefined;
 }
 
 /**
@@ -282,10 +363,18 @@ export interface TripCrossFieldShape {
  *   - COMPLETED:   startedAt + endedAt MUST be set; the meter's start AND end
  *                  reading MUST be set; endedAt >= startedAt; and end >= start
  *                  for whichever reading pair(s) are present.
- *   - PLANNED / CANCELLED: no constraint (a planned trip may have
- *     startedAt prefilled for scheduling; a cancelled trip may have
+ *   - OFFERED (ADR-0047 W4): the order MUST be set — materialType +
+ *                  pickupSiteId + dropoffSiteId. No meter reading is
+ *                  required at OFFERED/ACCEPTED (capture starts at Start).
+ *   - Milestone timestamps (offeredAt, acceptedAt, arrivedPickupAt,
+ *     loadedAt, arrivedDropoffAt, deliveredAt): where present, must be
+ *     monotonic non-decreasing in that dispatch order — for EVERY status
+ *     except CANCELLED.
+ *   - PLANNED / CANCELLED: no order/meter constraint (a planned trip may
+ *     have startedAt prefilled for scheduling; a cancelled trip may have
  *     been cancelled at any lifecycle stage and so any combination of
- *     timing fields is legitimate).
+ *     fields is legitimate — CANCELLED is exempt from the monotonic rule
+ *     too).
  *
  * Meter-aware required readings (ADR-0036 c7). `meterType` says which
  * reading(s) the asset captures:
@@ -320,6 +409,15 @@ export function validateTripCrossFields(
     endOdometerKm,
     startEngineHours,
     endEngineHours,
+    materialType,
+    pickupSiteId,
+    dropoffSiteId,
+    offeredAt,
+    acceptedAt,
+    arrivedPickupAt,
+    loadedAt,
+    arrivedDropoffAt,
+    deliveredAt,
   } = shape;
   const hasStartedAt = startedAt !== null && startedAt !== undefined;
   const hasEndedAt = endedAt !== null && endedAt !== undefined;
@@ -380,6 +478,62 @@ export function validateTripCrossFields(
       }
     }
   }
+
+  // ── Dispatch order + milestones (ADR-0047 W4) ─────────────────────────
+  // CANCELLED is unconstrained (a trip may be aborted at any lifecycle
+  // stage, so any combination of order fields / timestamps is legitimate) —
+  // the same exemption PLANNED/CANCELLED already enjoy for the meter rules.
+  if (status !== "CANCELLED") {
+    // The order (material + pickup + drop-off) is REQUIRED at → OFFERED: a
+    // dispatch cannot go out without knowing what to haul and the two
+    // endpoints (ADR-0047 c3). This mirrors how a start reading is required
+    // at IN_PROGRESS. `offeredAt` itself is NOT required here — the service
+    // stamps it on the transition (ADR-0047 c4 / the service's update()).
+    // driver + vehicle are structurally guaranteed (Trip.vehicleId /
+    // driverId are NOT NULL), so only the order needs an explicit check.
+    if (status === "OFFERED") {
+      if (materialType === null || materialType === undefined) {
+        errors.push("materialType is required when status is OFFERED.");
+      }
+      if (pickupSiteId === null || pickupSiteId === undefined) {
+        errors.push("pickupSiteId is required when status is OFFERED.");
+      }
+      if (dropoffSiteId === null || dropoffSiteId === undefined) {
+        errors.push("dropoffSiteId is required when status is OFFERED.");
+      }
+    }
+
+    // Milestone timestamps, where present, must be non-decreasing in the
+    // dispatch order offeredAt ≤ acceptedAt ≤ arrivedPickupAt ≤ loadedAt ≤
+    // arrivedDropoffAt ≤ deliveredAt — a trip cannot be delivered before it
+    // was loaded, loaded before arrival at pickup, etc. (ADR-0047 c1/c3,
+    // progress-as-timestamps). Only present values are compared against
+    // their nearest present predecessor, so a partial sequence (e.g. only
+    // offeredAt + deliveredAt) still validates that pair. A malformed date
+    // string is the schema's job (z.iso.datetime), so a non-finite time is
+    // skipped rather than double-reported here.
+    const milestones: [string, string | Date | null | undefined][] = [
+      ["offeredAt", offeredAt],
+      ["acceptedAt", acceptedAt],
+      ["arrivedPickupAt", arrivedPickupAt],
+      ["loadedAt", loadedAt],
+      ["arrivedDropoffAt", arrivedDropoffAt],
+      ["deliveredAt", deliveredAt],
+    ];
+    let prevName: string | undefined;
+    let prevTime: number | undefined;
+    for (const [name, value] of milestones) {
+      if (value === null || value === undefined) continue;
+      const time = new Date(value).getTime();
+      if (!Number.isFinite(time)) continue;
+      if (prevTime !== undefined && prevName !== undefined && time < prevTime) {
+        errors.push(`${name} must be greater than or equal to ${prevName}.`);
+      }
+      prevName = name;
+      prevTime = time;
+    }
+  }
+
   return errors;
 }
 
@@ -405,10 +559,36 @@ export const CreateTripSchema = z
     startEngineHours: EngineHoursInt.nullable().optional(),
     endEngineHours: EngineHoursInt.nullable().optional(),
     notes: z.string().max(NOTES_MAX, `notes must be at most ${NOTES_MAX} characters.`).optional(),
+    // Dispatch order (ADR-0047 c3/c5/c6) — nullable + optional (a PLANNED
+    // create carries none; the order is required only at → OFFERED, enforced
+    // by the superRefine + the service). materialNote qualifies OTHER; the
+    // consignee/site-contact fields are Tier-2 PII (redacted in logs, never
+    // in a URL). Both Create and Update carry every one of these — a field
+    // missing from either 400s the request (the .strict() contract).
+    materialType: MaterialTypeEnum.nullable().optional(),
+    materialNote: MaterialNote.nullable().optional(),
+    pickupSiteId: SiteId.nullable().optional(),
+    dropoffSiteId: SiteId.nullable().optional(),
+    consigneeName: ConsigneeName.nullable().optional(),
+    consigneePhone: ConsigneePhone.nullable().optional(),
+    expectedLoadCount: ExpectedLoadCount.nullable().optional(),
+    specialInstructions: SpecialInstructions.nullable().optional(),
+    docketNumber: DocketNumber.nullable().optional(),
+    // Milestone timestamps (ADR-0047 c1/c3) — progress as timestamps, not
+    // statuses. offeredAt/acceptedAt are normally SERVER-stamped on the
+    // transition (the service), but accepted here too so a client can
+    // back-date or the monotonic rule can see them.
+    offeredAt: TripDateTime.nullable().optional(),
+    acceptedAt: TripDateTime.nullable().optional(),
+    arrivedPickupAt: TripDateTime.nullable().optional(),
+    loadedAt: TripDateTime.nullable().optional(),
+    arrivedDropoffAt: TripDateTime.nullable().optional(),
+    deliveredAt: TripDateTime.nullable().optional(),
   })
   .strict()
   // The superRefine runs the meter-AGNOSTIC checks on the body (timing
-  // presence + end-≥-start). It passes no meterType, so the meter-aware
+  // presence + end-≥-start, the OFFERED order-required rule, and the
+  // monotonic-milestone rule). It passes no meterType, so the meter-aware
   // required-reading rule is deferred to the service (TripsService.create /
   // .update), which looks up the vehicle's meterType — the body alone cannot
   // tell whether a missing odometer is wrong (km asset) or fine (hours asset).
@@ -442,6 +622,28 @@ export const UpdateTripSchema = z
     startEngineHours: EngineHoursInt.nullable(),
     endEngineHours: EngineHoursInt.nullable(),
     notes: z.string().max(NOTES_MAX, `notes must be at most ${NOTES_MAX} characters.`),
+    // Dispatch order + milestones (ADR-0047 W4) — the Update mirror of the
+    // Create block above. `.nullable()` here (clear a field with explicit
+    // null); `.partial()` below makes every field optional for diff-PATCH.
+    // The order fields are how the admin dispatch UI (W6) attaches the order
+    // on the PLANNED → OFFERED PATCH; the milestone timestamps are how the
+    // driver app (W7/W8) records live progress. Cross-field rules (OFFERED
+    // order-required, monotonic) run in the service against the MERGED shape.
+    materialType: MaterialTypeEnum.nullable(),
+    materialNote: MaterialNote.nullable(),
+    pickupSiteId: SiteId.nullable(),
+    dropoffSiteId: SiteId.nullable(),
+    consigneeName: ConsigneeName.nullable(),
+    consigneePhone: ConsigneePhone.nullable(),
+    expectedLoadCount: ExpectedLoadCount.nullable(),
+    specialInstructions: SpecialInstructions.nullable(),
+    docketNumber: DocketNumber.nullable(),
+    offeredAt: TripDateTime.nullable(),
+    acceptedAt: TripDateTime.nullable(),
+    arrivedPickupAt: TripDateTime.nullable(),
+    loadedAt: TripDateTime.nullable(),
+    arrivedDropoffAt: TripDateTime.nullable(),
+    deliveredAt: TripDateTime.nullable(),
   })
   .strict()
   .partial();
@@ -449,34 +651,37 @@ export const UpdateTripSchema = z
 export type UpdateTripInput = z.infer<typeof UpdateTripSchema>;
 
 // Status-transition matrix for PATCH. CANCELLED is reachable from any
-// state (an operator may abort at any lifecycle stage). Other
-// transitions follow the lifecycle: PLANNED → IN_PROGRESS → COMPLETED.
-// Jumping PLANNED → COMPLETED directly is illegal because it implies
-// the operator never recorded that the trip started, which would
-// corrupt downstream reporting on average trip duration.
+// non-terminal state (an operator may abort at any lifecycle stage).
 //
-// Self-transitions (e.g., IN_PROGRESS → IN_PROGRESS on a no-op PATCH)
-// are allowed: the service-side `update()` treats the matrix as a
-// guard on actual changes only.
+// The dispatch lifecycle (ADR-0047 c1/c2/c7):
+//   PLANNED → OFFERED → ACCEPTED → IN_PROGRESS → COMPLETED
+// with two deliberate extra edges:
+//   - PLANNED → IN_PROGRESS is KEPT (back-compat / admin-quick "just send a
+//     truck" trips that skip the dispatch handshake — ADR-0047 c7). This is
+//     why the trip-start SLI and the GPS ingest predicate are unaffected.
+//   - OFFERED → PLANNED is the REASSIGN-BACK path. There is NO in-app decline
+//     and NO `DECLINED` status (ADR-0047 c2, accept-only); a driver who cannot
+//     take a trip is handled out-of-band and the admin pulls the offer back to
+//     PLANNED (or re-offers by editing driver/vehicle on the OFFERED trip).
+// ACCEPTED does NOT reach OFFERED again (re-offering edits the OFFERED/ACCEPTED
+// trip's driver/vehicle in place, not via a status hop) and does NOT skip to
+// COMPLETED. Jumping OFFERED → IN_PROGRESS or PLANNED → ACCEPTED is illegal —
+// the driver must Accept before the trip can start. COMPLETED and CANCELLED are
+// terminal (empty outbound lists): "uncompleting" a trip is illegal (correct a
+// mis-marked trip by delete-and-recreate, preserving the audit trail).
 //
-// ADR-0047 W2 STAGING NOTE. OFFERED and ACCEPTED now exist in
-// TRIP_STATUSES, so this `Record` is REQUIRED by the type system to carry
-// a key for each. W2 is schema-only: the two new keys are PLACEHOLDERS
-// (empty outbound lists) and the pre-dispatch behavior is unchanged —
-// PLANNED still reaches IN_PROGRESS directly, so every existing transition
-// test holds. The real dispatch lifecycle (PLANNED → OFFERED → ACCEPTED →
-// IN_PROGRESS, with CANCELLED reachable from every non-terminal state) is
-// wired in W4, which rewrites the four affected rows. Do NOT rely on the
-// OFFERED/ACCEPTED rows until W4.
+// Self-transitions (e.g., IN_PROGRESS → IN_PROGRESS on a no-op PATCH) are
+// allowed: the service-side `update()` treats the matrix as a guard on actual
+// status CHANGES only (it routes through `has("status")` + `!== existing`).
 //
 // Exported so the service and its tests can share the source of truth.
 export const TRIP_STATUS_TRANSITIONS: Record<
   (typeof TRIP_STATUSES)[number],
   readonly (typeof TRIP_STATUSES)[number][]
 > = {
-  PLANNED: ["IN_PROGRESS", "CANCELLED"],
-  OFFERED: [], // W4: → ACCEPTED, CANCELLED
-  ACCEPTED: [], // W4: → IN_PROGRESS, CANCELLED
+  PLANNED: ["OFFERED", "IN_PROGRESS", "CANCELLED"],
+  OFFERED: ["ACCEPTED", "PLANNED", "CANCELLED"],
+  ACCEPTED: ["IN_PROGRESS", "CANCELLED"],
   IN_PROGRESS: ["COMPLETED", "CANCELLED"],
   COMPLETED: [],
   CANCELLED: [],
