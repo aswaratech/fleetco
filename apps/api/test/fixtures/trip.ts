@@ -4,6 +4,7 @@ import {
   type Trip,
   type Vehicle,
   type Driver,
+  type MaterialType,
   MeterType,
   TripStatus,
   type UserRole,
@@ -156,6 +157,26 @@ export interface SeedTripParams {
   startEngineHours?: number | null;
   endEngineHours?: number | null;
   notes?: string | null;
+  // Dispatch order + milestones (ADR-0047 W4). All nullable, defaulting to
+  // null so the ~200 pre-dispatch trip seeds are unchanged; the W4 dispatch
+  // tests override them to seed an OFFERED trip carrying an order, or a trip
+  // with milestone timestamps set. pickupSiteId / dropoffSiteId reference a
+  // Site the test seeds first (via seedSite).
+  materialType?: MaterialType | null;
+  materialNote?: string | null;
+  pickupSiteId?: string | null;
+  dropoffSiteId?: string | null;
+  consigneeName?: string | null;
+  consigneePhone?: string | null;
+  expectedLoadCount?: number | null;
+  specialInstructions?: string | null;
+  docketNumber?: string | null;
+  offeredAt?: Date | null;
+  acceptedAt?: Date | null;
+  arrivedPickupAt?: Date | null;
+  loadedAt?: Date | null;
+  arrivedDropoffAt?: Date | null;
+  deliveredAt?: Date | null;
 }
 
 export async function seedTrip(prisma: PrismaClient, params: SeedTripParams): Promise<Trip> {
@@ -172,6 +193,22 @@ export async function seedTrip(prisma: PrismaClient, params: SeedTripParams): Pr
       startEngineHours: params.startEngineHours ?? null,
       endEngineHours: params.endEngineHours ?? null,
       notes: params.notes ?? null,
+      // Dispatch order + milestones (ADR-0047 W4) — pass-through, null default.
+      materialType: params.materialType ?? null,
+      materialNote: params.materialNote ?? null,
+      pickupSiteId: params.pickupSiteId ?? null,
+      dropoffSiteId: params.dropoffSiteId ?? null,
+      consigneeName: params.consigneeName ?? null,
+      consigneePhone: params.consigneePhone ?? null,
+      expectedLoadCount: params.expectedLoadCount ?? null,
+      specialInstructions: params.specialInstructions ?? null,
+      docketNumber: params.docketNumber ?? null,
+      offeredAt: params.offeredAt ?? null,
+      acceptedAt: params.acceptedAt ?? null,
+      arrivedPickupAt: params.arrivedPickupAt ?? null,
+      loadedAt: params.loadedAt ?? null,
+      arrivedDropoffAt: params.arrivedDropoffAt ?? null,
+      deliveredAt: params.deliveredAt ?? null,
     },
   });
 }

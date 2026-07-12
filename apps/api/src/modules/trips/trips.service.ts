@@ -67,6 +67,27 @@ const LIST_SELECT = {
   startOdometerKm: true,
   endOdometerKm: true,
   notes: true,
+  // Dispatch order (ADR-0047 W4). The list surface (W6 dispatch board) shows
+  // material + endpoints + acceptance/progress, so the slim projection carries
+  // the order scalars + the two Site labels + the milestone timestamps. The
+  // consignee fields are Tier-2 PII, disclosed only over the wire to an
+  // authorized (trips:*) caller — never logged (pino redact) — the same
+  // posture as the driver.fullName already in this projection.
+  materialType: true,
+  materialNote: true,
+  pickupSiteId: true,
+  dropoffSiteId: true,
+  consigneeName: true,
+  consigneePhone: true,
+  expectedLoadCount: true,
+  specialInstructions: true,
+  docketNumber: true,
+  offeredAt: true,
+  acceptedAt: true,
+  arrivedPickupAt: true,
+  loadedAt: true,
+  arrivedDropoffAt: true,
+  deliveredAt: true,
   createdAt: true,
   updatedAt: true,
   createdById: true,
@@ -86,6 +107,23 @@ const LIST_SELECT = {
       fullName: true,
     },
   },
+  // Pickup / drop-off Site labels (ADR-0047 c4) — just { id, name } so the
+  // list can render "Kalimati Crusher → Pokhara Site" without a second fetch.
+  // Nullable: a pre-dispatch (PLANNED) trip has neither. The detail endpoint
+  // projects the same { id, name }; the map fetches full Site coordinates via
+  // the Sites API (W5/W6) rather than fattening every trip payload with them.
+  pickupSite: {
+    select: {
+      id: true,
+      name: true,
+    },
+  },
+  dropoffSite: {
+    select: {
+      id: true,
+      name: true,
+    },
+  },
 } satisfies Prisma.TripSelect;
 
 // The list item shape — derived from LIST_SELECT via Prisma's
@@ -96,9 +134,21 @@ export type TripListItem = Prisma.TripGetPayload<{ select: typeof LIST_SELECT }>
 // The detail shape — full Trip + full nested Vehicle + full nested
 // Driver. Both relations are required on every Trip (the schema's FK
 // is NOT NULL), so the include never produces nulls for them.
+//
+// The Trip's own scalar columns (including all the ADR-0047 order fields
+// and milestone timestamps) come back automatically with an `include`, so
+// only the two Site relations need adding. They are projected to
+// { id, name } (ADR-0047 W4) — NOT the full Site — for two reasons: the
+// detail view needs only the label here (the map fetches full Site
+// coordinates via the Sites API, W5/W6), and keeping the nested Site free
+// of its Tier-2 contactName/contactPhone means TripDetail (also returned by
+// the agent's get_trip) grows no new nested-PII surface. Nullable: a
+// pre-dispatch trip has neither pickup nor drop-off.
 const DETAIL_INCLUDE = {
   vehicle: true,
   driver: true,
+  pickupSite: { select: { id: true, name: true } },
+  dropoffSite: { select: { id: true, name: true } },
 } satisfies Prisma.TripInclude;
 
 export type TripDetail = Prisma.TripGetPayload<{ include: typeof DETAIL_INCLUDE }>;
@@ -303,19 +353,27 @@ export class TripsService {
       throw new ForbiddenException();
     }
 
-    // Meter-aware cross-field re-validation (ADR-0036 c7). Only IN_PROGRESS /
-    // COMPLETED carry readings, so only those need the vehicle's meterType; a
-    // PLANNED/CANCELLED create skips the lookup. The schema already ran the
-    // meter-agnostic subset; this adds the "right reading for this meter" rule.
+    // Cross-field re-validation. The service is the authority for direct
+    // callers (the agent tools, tests) that bypass the schema's superRefine,
+    // AND for the meter-aware rule the schema cannot run. We ALWAYS re-run
+    // validateTripCrossFields here — it covers the OFFERED order-required rule
+    // and the monotonic-milestone rule (ADR-0047 W4) plus, for IN_PROGRESS/
+    // COMPLETED, the meter-aware required readings (ADR-0036 c7) — looking up
+    // the vehicle's meterType only when a reading-bearing status needs it. A
+    // missing vehicle leaves meterType undefined (no required-reading check);
+    // the trip.create below then raises the FK P2003 → "Vehicle does not
+    // exist." that names the real problem.
+    let vehicleMeterType: MeterType | undefined;
     if (input.status === "IN_PROGRESS" || input.status === "COMPLETED") {
       const vehicleMeter = await this.prisma.vehicle.findUnique({
         where: { id: input.vehicleId },
         select: { meterType: true },
       });
-      const crossFieldErrors = validateTripCrossFields(input, vehicleMeter?.meterType);
-      if (crossFieldErrors.length > 0) {
-        throw new BadRequestException(crossFieldErrors.join(" "));
-      }
+      vehicleMeterType = vehicleMeter?.meterType;
+    }
+    const crossFieldErrors = validateTripCrossFields(input, vehicleMeterType);
+    if (crossFieldErrors.length > 0) {
+      throw new BadRequestException(crossFieldErrors.join(" "));
     }
 
     const data: Prisma.TripUncheckedCreateInput = {
@@ -331,8 +389,42 @@ export class TripsService {
       startEngineHours: input.startEngineHours ?? null,
       endEngineHours: input.endEngineHours ?? null,
       notes: input.notes ?? null,
+      // Dispatch order + milestones (ADR-0047 W4) — pass-through, null when
+      // absent (a PLANNED create carries none). pickupSiteId / dropoffSiteId
+      // are scalar FKs on the Unchecked create input; a stale id surfaces as
+      // the P2003 arm below.
+      materialType: input.materialType ?? null,
+      materialNote: input.materialNote ?? null,
+      pickupSiteId: input.pickupSiteId ?? null,
+      dropoffSiteId: input.dropoffSiteId ?? null,
+      consigneeName: input.consigneeName ?? null,
+      consigneePhone: input.consigneePhone ?? null,
+      expectedLoadCount: input.expectedLoadCount ?? null,
+      specialInstructions: input.specialInstructions ?? null,
+      docketNumber: input.docketNumber ?? null,
+      offeredAt: input.offeredAt ?? null,
+      acceptedAt: input.acceptedAt ?? null,
+      arrivedPickupAt: input.arrivedPickupAt ?? null,
+      loadedAt: input.loadedAt ?? null,
+      arrivedDropoffAt: input.arrivedDropoffAt ?? null,
+      deliveredAt: input.deliveredAt ?? null,
       createdById,
     };
+
+    // Server-stamp the transition timestamps when a trip is created directly
+    // INTO a dispatch state and the client did not supply one (ADR-0047 c4/c8:
+    // the office/driver taps an action; the server records when it happened).
+    // The common path is create-PLANNED-then-PATCH-to-OFFERED, but the W6
+    // dispatch form may create straight into OFFERED — so stamp here too,
+    // keeping create and update consistent. An explicit client value (e.g. a
+    // back-dated offeredAt) is respected.
+    const now = new Date();
+    if (data.status === "OFFERED" && data.offeredAt == null) {
+      data.offeredAt = now;
+    }
+    if (data.status === "ACCEPTED" && data.acceptedAt == null) {
+      data.acceptedAt = now;
+    }
 
     try {
       return await this.prisma.trip.create({ data, include: DETAIL_INCLUDE });
@@ -355,6 +447,20 @@ export class TripsService {
         }
         if (fieldName.toLowerCase().includes("driver")) {
           throw new BadRequestException(`Driver "${input.driverId}" does not exist.`);
+        }
+        // Dispatch order FKs (ADR-0047 W4) — same 400-naming-the-field pattern
+        // as vehicle/driver. The constraint names (Trip_pickupSiteId_fkey /
+        // Trip_dropoffSiteId_fkey) carry the disjoint "pickup" / "dropoff"
+        // substrings, so a stale Site id is attributed to the right endpoint.
+        if (fieldName.toLowerCase().includes("pickup")) {
+          throw new BadRequestException(
+            `Pickup site "${input.pickupSiteId ?? ""}" does not exist.`,
+          );
+        }
+        if (fieldName.toLowerCase().includes("dropoff")) {
+          throw new BadRequestException(
+            `Drop-off site "${input.dropoffSiteId ?? ""}" does not exist.`,
+          );
         }
         if (fieldName.toLowerCase().includes("createdby")) {
           // Defense-in-depth: the controller pulls createdById from the
@@ -435,6 +541,26 @@ export class TripsService {
       endEngineHours: has("endEngineHours")
         ? (input.endEngineHours ?? null)
         : existing.endEngineHours,
+      // Dispatch fields the cross-field rules read (ADR-0047 W4): the OFFERED
+      // order-required rule needs material + pickup + drop-off, and the
+      // monotonic-milestone rule needs the six timestamps — all against the
+      // MERGED shape, so a PATCH that flips status to OFFERED without re-sending
+      // the order is validated against what the row would look like after the
+      // write. The other order scalars (consignee, docket, …) are pass-through
+      // only and stay out of `merged`.
+      materialType: has("materialType") ? (input.materialType ?? null) : existing.materialType,
+      pickupSiteId: has("pickupSiteId") ? (input.pickupSiteId ?? null) : existing.pickupSiteId,
+      dropoffSiteId: has("dropoffSiteId") ? (input.dropoffSiteId ?? null) : existing.dropoffSiteId,
+      offeredAt: has("offeredAt") ? (input.offeredAt ?? null) : existing.offeredAt,
+      acceptedAt: has("acceptedAt") ? (input.acceptedAt ?? null) : existing.acceptedAt,
+      arrivedPickupAt: has("arrivedPickupAt")
+        ? (input.arrivedPickupAt ?? null)
+        : existing.arrivedPickupAt,
+      loadedAt: has("loadedAt") ? (input.loadedAt ?? null) : existing.loadedAt,
+      arrivedDropoffAt: has("arrivedDropoffAt")
+        ? (input.arrivedDropoffAt ?? null)
+        : existing.arrivedDropoffAt,
+      deliveredAt: has("deliveredAt") ? (input.deliveredAt ?? null) : existing.deliveredAt,
     };
 
     // Legal-status-transition guard. Only enforce when the patch
@@ -486,7 +612,56 @@ export class TripsService {
       ...(has("startEngineHours") && { startEngineHours: input.startEngineHours ?? null }),
       ...(has("endEngineHours") && { endEngineHours: input.endEngineHours ?? null }),
       ...(has("notes") && { notes: input.notes ?? null }),
+      // Dispatch order (ADR-0047 W4). Scalar columns are set directly; the two
+      // Site FKs go through the relation — connect a new id, or disconnect on an
+      // explicit null (the reassign-back / clear path) — mirroring how
+      // vehicleId/driverId reassign above.
+      ...(has("materialType") && { materialType: input.materialType ?? null }),
+      ...(has("materialNote") && { materialNote: input.materialNote ?? null }),
+      ...(has("pickupSiteId") && {
+        pickupSite: input.pickupSiteId
+          ? { connect: { id: input.pickupSiteId } }
+          : { disconnect: true },
+      }),
+      ...(has("dropoffSiteId") && {
+        dropoffSite: input.dropoffSiteId
+          ? { connect: { id: input.dropoffSiteId } }
+          : { disconnect: true },
+      }),
+      ...(has("consigneeName") && { consigneeName: input.consigneeName ?? null }),
+      ...(has("consigneePhone") && { consigneePhone: input.consigneePhone ?? null }),
+      ...(has("expectedLoadCount") && { expectedLoadCount: input.expectedLoadCount ?? null }),
+      ...(has("specialInstructions") && { specialInstructions: input.specialInstructions ?? null }),
+      ...(has("docketNumber") && { docketNumber: input.docketNumber ?? null }),
+      // Milestone timestamps (ADR-0047 W4). offeredAt/acceptedAt may be
+      // overwritten by the server stamp below when this PATCH is the → OFFERED
+      // / → ACCEPTED transition and the client did not send its own value.
+      ...(has("offeredAt") && { offeredAt: input.offeredAt ?? null }),
+      ...(has("acceptedAt") && { acceptedAt: input.acceptedAt ?? null }),
+      ...(has("arrivedPickupAt") && { arrivedPickupAt: input.arrivedPickupAt ?? null }),
+      ...(has("loadedAt") && { loadedAt: input.loadedAt ?? null }),
+      ...(has("arrivedDropoffAt") && { arrivedDropoffAt: input.arrivedDropoffAt ?? null }),
+      ...(has("deliveredAt") && { deliveredAt: input.deliveredAt ?? null }),
     };
+
+    // Server-stamp the transition timestamps (ADR-0047 c4/c8). When this PATCH
+    // moves the trip INTO OFFERED (the admin dispatch) or ACCEPTED (the
+    // driver's Accept tap) and the client did not send its own timestamp, the
+    // service records when it happened. This is why the OFFERED order-required
+    // rule does NOT require offeredAt (the service provides it) and why the
+    // driver app can Accept by PATCHing status alone. An explicit client value
+    // is respected (it was already written into `data` above, so we only stamp
+    // when the key is absent).
+    const transitionedToOffered =
+      has("status") && input.status === "OFFERED" && existing.status !== "OFFERED";
+    const transitionedToAccepted =
+      has("status") && input.status === "ACCEPTED" && existing.status !== "ACCEPTED";
+    if (transitionedToOffered && !has("offeredAt")) {
+      data.offeredAt = new Date();
+    }
+    if (transitionedToAccepted && !has("acceptedAt")) {
+      data.acceptedAt = new Date();
+    }
 
     // Iter 11: when a Trip *transitions* into COMPLETED (i.e., the
     // existing row was not already COMPLETED and the patch flips it
@@ -605,8 +780,20 @@ export class TripsService {
         if (fieldName.toLowerCase().includes("driver")) {
           throw new BadRequestException(`Driver "${input.driverId ?? ""}" does not exist.`);
         }
+        // Dispatch order FKs (ADR-0047 W4) — reachable when a PATCH connects a
+        // stale pickup/drop-off Site id. Same 400-naming-the-field contract.
+        if (fieldName.toLowerCase().includes("pickup")) {
+          throw new BadRequestException(
+            `Pickup site "${input.pickupSiteId ?? ""}" does not exist.`,
+          );
+        }
+        if (fieldName.toLowerCase().includes("dropoff")) {
+          throw new BadRequestException(
+            `Drop-off site "${input.dropoffSiteId ?? ""}" does not exist.`,
+          );
+        }
         throw new BadRequestException(
-          `One of vehicleId or driverId references a record that does not exist.`,
+          `One of vehicleId, driverId, pickupSiteId or dropoffSiteId references a record that does not exist.`,
         );
       }
       throw error;
