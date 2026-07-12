@@ -6,8 +6,11 @@ import {
   isStoppable,
   meterIncludesHours,
   meterIncludesOdometer,
+  navigateUrl,
   tripStartPayload,
   tripStopPayload,
+  TRIP_STATUS_LABELS,
+  TRIP_STATUSES,
   type DriverTrip,
   type MeterType,
 } from "./trips";
@@ -94,11 +97,34 @@ describe("isStartable / isStoppable", () => {
     id: "t1",
     status,
     vehicle: { id: "v1", registrationNumber: "BA 1 KA 1234", meterType: "ODOMETER_KM" },
+    materialType: null,
+    materialNote: null,
+    pickupSite: null,
+    dropoffSite: null,
+    consigneeName: null,
+    consigneePhone: null,
+    expectedLoadCount: null,
+    specialInstructions: null,
+    docketNumber: null,
   });
 
-  it("a PLANNED trip is startable, not stoppable", () => {
-    expect(isStartable(trip("PLANNED"))).toBe(true);
+  // ADR-0047 c7/c8: isStartable moved PLANNED → ACCEPTED (the one real code
+  // break). The driver flow is OFFERED → ACCEPTED → start, so Start appears
+  // for an ACCEPTED trip, not a PLANNED one; isStoppable (IN_PROGRESS) is
+  // unaffected.
+  it("an ACCEPTED trip is startable, not stoppable", () => {
+    expect(isStartable(trip("ACCEPTED"))).toBe(true);
+    expect(isStoppable(trip("ACCEPTED"))).toBe(false);
+  });
+
+  it("a PLANNED trip is neither startable nor stoppable (start now waits on ACCEPTED)", () => {
+    expect(isStartable(trip("PLANNED"))).toBe(false);
     expect(isStoppable(trip("PLANNED"))).toBe(false);
+  });
+
+  it("an OFFERED trip is neither startable nor stoppable (it is Accepted first)", () => {
+    expect(isStartable(trip("OFFERED"))).toBe(false);
+    expect(isStoppable(trip("OFFERED"))).toBe(false);
   });
 
   it("an IN_PROGRESS trip is stoppable, not startable", () => {
@@ -109,5 +135,43 @@ describe("isStartable / isStoppable", () => {
   it("a COMPLETED trip is neither startable nor stoppable", () => {
     expect(isStartable(trip("COMPLETED"))).toBe(false);
     expect(isStoppable(trip("COMPLETED"))).toBe(false);
+  });
+
+  it("a CANCELLED trip is neither startable nor stoppable", () => {
+    expect(isStartable(trip("CANCELLED"))).toBe(false);
+    expect(isStoppable(trip("CANCELLED"))).toBe(false);
+  });
+});
+
+describe("navigateUrl", () => {
+  it("builds a Google Maps directions deep-link to the lat,lng pin, latitude first", () => {
+    // Kalimati Crusher (Kathmandu): lat 27.7031, lon 85.2925. Latitude leads
+    // Google's destination= param (the X=lon/Y=lat foot-gun).
+    expect(navigateUrl(27.7031, 85.2925)).toBe(
+      "https://www.google.com/maps/dir/?api=1&destination=27.7031,85.2925&travelmode=driving",
+    );
+  });
+
+  it("keeps latitude first / longitude second for a distinct drop-off pin", () => {
+    // Pokhara: lat 28.2096, lon 83.9856 — swapping would send the driver to the
+    // wrong hemisphere-ish, so the order is pinned here.
+    expect(navigateUrl(28.2096, 83.9856)).toContain("destination=28.2096,83.9856");
+  });
+});
+
+describe("TripStatus mirror consistency (ADR-0047 c1, five mirrors)", () => {
+  it("TRIP_STATUSES carries exactly the six lifecycle states incl. OFFERED/ACCEPTED", () => {
+    expect([...TRIP_STATUSES]).toEqual([
+      "PLANNED",
+      "OFFERED",
+      "ACCEPTED",
+      "IN_PROGRESS",
+      "COMPLETED",
+      "CANCELLED",
+    ]);
+  });
+
+  it("TRIP_STATUS_LABELS labels every status (no drift between the type and the map)", () => {
+    expect(Object.keys(TRIP_STATUS_LABELS).sort()).toEqual([...TRIP_STATUSES].sort());
   });
 });

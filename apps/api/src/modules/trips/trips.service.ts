@@ -107,21 +107,29 @@ const LIST_SELECT = {
       fullName: true,
     },
   },
-  // Pickup / drop-off Site labels (ADR-0047 c4) — just { id, name } so the
-  // list can render "Kalimati Crusher → Pokhara Site" without a second fetch.
-  // Nullable: a pre-dispatch (PLANNED) trip has neither. The detail endpoint
-  // projects the same { id, name }; the map fetches full Site coordinates via
-  // the Sites API (W5/W6) rather than fattening every trip payload with them.
+  // Pickup / drop-off Site labels + pin coordinates (ADR-0047 c4 + c9/W7). The
+  // list renders "Kalimati Crusher → Pokhara Site" from { id, name }, and the
+  // driver app's "Navigate" deep-link (ADR-0047 c9) routes to the pins from the
+  // latitude/longitude here — the driver reads them off their OWN trip because
+  // they hold trips:* but NOT sites:* (the sites:*-gated GET /sites/:id is
+  // unreachable to a DRIVER; permissions.ts). Coordinates are the Tier-3 Site
+  // pin (a fixed business location), NOT the Tier-5 GpsPing movement trail, so
+  // they ride the payload; the Tier-2 site contactName/contactPhone stay
+  // excluded. Nullable: a pre-dispatch (PLANNED) trip has neither Site.
   pickupSite: {
     select: {
       id: true,
       name: true,
+      latitude: true,
+      longitude: true,
     },
   },
   dropoffSite: {
     select: {
       id: true,
       name: true,
+      latitude: true,
+      longitude: true,
     },
   },
 } satisfies Prisma.TripSelect;
@@ -138,17 +146,21 @@ export type TripListItem = Prisma.TripGetPayload<{ select: typeof LIST_SELECT }>
 // The Trip's own scalar columns (including all the ADR-0047 order fields
 // and milestone timestamps) come back automatically with an `include`, so
 // only the two Site relations need adding. They are projected to
-// { id, name } (ADR-0047 W4) — NOT the full Site — for two reasons: the
-// detail view needs only the label here (the map fetches full Site
-// coordinates via the Sites API, W5/W6), and keeping the nested Site free
-// of its Tier-2 contactName/contactPhone means TripDetail (also returned by
-// the agent's get_trip) grows no new nested-PII surface. Nullable: a
-// pre-dispatch trip has neither pickup nor drop-off.
+// { id, name, latitude, longitude } (ADR-0047 W4 + c9/W7) — NOT the full
+// Site — for two reasons: the detail view needs the label AND the pin
+// coordinates (the driver app's "Navigate" deep-link, c9, routes to those
+// coordinates read off the driver's OWN trip — a DRIVER holds trips:* but
+// NOT sites:*, so the sites:*-gated GET /sites/:id is unreachable to them),
+// and keeping the nested Site free of its Tier-2 contactName/contactPhone
+// means TripDetail (also returned by the agent's get_trip) grows no new
+// nested-PII surface. The coordinates are the Tier-3 Site pin (a fixed
+// business location), explicitly not redacted the way the Tier-5 GpsPing
+// trail is. Nullable: a pre-dispatch trip has neither pickup nor drop-off.
 const DETAIL_INCLUDE = {
   vehicle: true,
   driver: true,
-  pickupSite: { select: { id: true, name: true } },
-  dropoffSite: { select: { id: true, name: true } },
+  pickupSite: { select: { id: true, name: true, latitude: true, longitude: true } },
+  dropoffSite: { select: { id: true, name: true, latitude: true, longitude: true } },
 } satisfies Prisma.TripInclude;
 
 export type TripDetail = Prisma.TripGetPayload<{ include: typeof DETAIL_INCLUDE }>;

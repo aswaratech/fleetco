@@ -4,6 +4,7 @@ import {
   ActivityIndicator,
   Button,
   FlatList,
+  Linking,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -12,7 +13,7 @@ import {
   View,
 } from "react-native";
 
-import { createFuelLog, listMyTrips, patchTrip } from "./src/api";
+import { acceptTrip, ApiError, createFuelLog, listMyTrips, patchTrip } from "./src/api";
 import { authClient } from "./src/auth";
 import { fuelLogPayload, previewTotalCostPaisa } from "./src/fuel";
 import { reconcileTripGps, startTripGps, stopTripGps } from "./src/gps-task";
@@ -20,19 +21,24 @@ import { consumeSessionExpired } from "./src/session-expired";
 import {
   isStartable,
   isStoppable,
+  MATERIAL_TYPE_LABELS,
   meterIncludesHours,
   meterIncludesOdometer,
+  navigateUrl,
   tripStartPayload,
   tripStopPayload,
+  TRIP_STATUS_LABELS,
+  type DriverSite,
   type DriverTrip,
   type TripReadings,
 } from "./src/trips";
 
-// D3 (ADR-0034): a signed-in driver works across two screens — start/stop their
-// OWN trips (D2) and log a fuel fill + odometer reading against one of those trips
-// (D3). A lightweight in-app toggle switches between them (no navigation library
-// yet — the app stays a single conditional tree). When unauthenticated, show the
-// login form (D1). Fuel/odometer entry lands here; GPS arrives in D4+.
+// A signed-in driver works across three tabs — accept dispatched trips
+// (Requests, ADR-0047 W7), start/stop their OWN trips (Trips, D2), and log a
+// fuel fill + odometer reading against one of those trips (Log fuel, D3). A
+// lightweight in-app toggle switches between them (no navigation library yet —
+// the app stays a single conditional tree). When unauthenticated, show the
+// login form (D1). GPS capture runs while a trip is IN_PROGRESS (D4+).
 export default function App() {
   const { data: session, isPending } = authClient.useSession();
 
@@ -53,11 +59,32 @@ export default function App() {
   );
 }
 
-// The signed-in shell: a shared header, a Trips / Log fuel toggle, the active
-// screen, and sign-out. The toggle is a two-button segmented control; there is no
-// navigation library yet, so the app stays a single conditional tree.
+// One segmented-control tab. Extracted so the three-tab row (ADR-0047 W7 added
+// Requests beside Trips / Log fuel) stays a single source of styling rather than
+// three copies. Same Pressable + [base, active && activeStyle] idiom as before.
+function TabButton({
+  label,
+  active,
+  onPress,
+}: {
+  label: string;
+  active: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable style={[styles.tab, active && styles.tabActive]} onPress={onPress}>
+      <Text style={[styles.tabText, active && styles.tabTextActive]}>{label}</Text>
+    </Pressable>
+  );
+}
+
+// The signed-in shell: a shared header, a Requests / Trips / Log fuel toggle, the
+// active screen, and sign-out. The toggle is a segmented control (three buttons
+// since ADR-0047 W7); there is no navigation library yet, so the app stays a
+// single conditional tree. Requests is the leftmost tab (the dispatch inbox); the
+// default landing stays Trips so a driver's active work is unchanged on open.
 function HomeScreen({ email, role }: { email: string; role?: string | null }) {
-  const [screen, setScreen] = useState<"trips" | "fuel">("trips");
+  const [screen, setScreen] = useState<"requests" | "trips" | "fuel">("trips");
 
   return (
     <View style={styles.screen}>
@@ -66,21 +93,22 @@ function HomeScreen({ email, role }: { email: string; role?: string | null }) {
       <Text style={styles.role}>{role ?? "—"}</Text>
 
       <View style={styles.tabs}>
-        <Pressable
-          style={[styles.tab, screen === "trips" && styles.tabActive]}
-          onPress={() => setScreen("trips")}
-        >
-          <Text style={[styles.tabText, screen === "trips" && styles.tabTextActive]}>Trips</Text>
-        </Pressable>
-        <Pressable
-          style={[styles.tab, screen === "fuel" && styles.tabActive]}
-          onPress={() => setScreen("fuel")}
-        >
-          <Text style={[styles.tabText, screen === "fuel" && styles.tabTextActive]}>Log fuel</Text>
-        </Pressable>
+        <TabButton
+          label="Requests"
+          active={screen === "requests"}
+          onPress={() => setScreen("requests")}
+        />
+        <TabButton label="Trips" active={screen === "trips"} onPress={() => setScreen("trips")} />
+        <TabButton label="Log fuel" active={screen === "fuel"} onPress={() => setScreen("fuel")} />
       </View>
 
-      {screen === "trips" ? <TripScreen /> : <FuelScreen />}
+      {screen === "requests" ? (
+        <RequestScreen />
+      ) : screen === "trips" ? (
+        <TripScreen />
+      ) : (
+        <FuelScreen />
+      )}
 
       <Button title="Sign out" onPress={() => void authClient.signOut()} />
     </View>
@@ -92,6 +120,9 @@ function TripScreen() {
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [gpsNote, setGpsNote] = useState<string | null>(null);
+  // Which trip's order-detail view is open (ADR-0047 W7) — null = the list. A
+  // driver opens an accepted/active trip's detail to Navigate to the pins.
+  const [detailId, setDetailId] = useState<string | null>(null);
 
   // Initial load on mount: the fetch + setState live in the promise continuation
   // (never synchronously in the effect body), and the `active` flag drops a late
@@ -167,6 +198,14 @@ function TripScreen() {
     [],
   );
 
+  // An open order-detail view replaces the list (no nav library — a local
+  // conditional, same idiom as the tab shell). Refetches on start/stop keep the
+  // same trip id, so the detail view stays in sync with the row.
+  const detailTrip = trips?.find((trip) => trip.id === detailId) ?? null;
+  if (detailTrip) {
+    return <OrderDetail trip={detailTrip} onBack={() => setDetailId(null)} />;
+  }
+
   return (
     <View style={styles.subScreen}>
       {error ? <Text style={styles.error}>{error}</Text> : null}
@@ -187,6 +226,7 @@ function TripScreen() {
               busy={busyId === item.id}
               onStart={(readings) => void transition(item, readings, "start")}
               onStop={(readings) => void transition(item, readings, "stop")}
+              onOpenDetail={() => setDetailId(item.id)}
             />
           )}
         />
@@ -200,16 +240,23 @@ function TripRow({
   busy,
   onStart,
   onStop,
+  onOpenDetail,
 }: {
   trip: DriverTrip;
   busy: boolean;
   onStart: (readings: TripReadings) => void;
   onStop: (readings: TripReadings) => void;
+  onOpenDetail: () => void;
 }) {
   const [odometer, setOdometer] = useState("");
   const [hours, setHours] = useState("");
   const startable = isStartable(trip);
   const stoppable = isStoppable(trip);
+  // A dispatched trip (ADR-0047) carries an order — surface a link into its
+  // order-detail view (material, pins, Navigate, consignee). A legacy/PLANNED
+  // trip with no order shows no link.
+  const hasOrder =
+    trip.materialType !== null || trip.pickupSite !== null || trip.dropoffSite !== null;
 
   // Meter-aware capture (ADR-0036 c7): prompt for the reading(s) the vehicle's
   // meter calls for — km for ODOMETER_KM, engine-hours for ENGINE_HOURS, both
@@ -236,6 +283,11 @@ function TripRow({
         <Text style={styles.tripReg}>{trip.vehicle.registrationNumber}</Text>
         <Text style={styles.tripStatus}>{trip.status}</Text>
       </View>
+      {hasOrder ? (
+        <Pressable onPress={onOpenDetail} accessibilityRole="button">
+          <Text style={styles.viewOrderLink}>View order →</Text>
+        </Pressable>
+      ) : null}
       {startable || stoppable ? (
         <View style={styles.tripActions}>
           {showOdometer ? (
@@ -266,6 +318,243 @@ function TripRow({
         </View>
       ) : null}
     </View>
+  );
+}
+
+// ── Dispatch: the Requests tab + order-detail view (ADR-0047 W7) ──────────────
+
+// Card + detail display helpers. materialLabel renders the enum label (with the
+// free-text note appended when the material is OTHER); routeLabel renders
+// "Pickup → Drop-off" from the Site names, an em-dash where an endpoint is unset.
+function materialLabel(trip: DriverTrip): string {
+  if (!trip.materialType) return "—";
+  const label = MATERIAL_TYPE_LABELS[trip.materialType];
+  return trip.materialType === "OTHER" && trip.materialNote
+    ? `${label} · ${trip.materialNote}`
+    : label;
+}
+
+function siteName(site: DriverSite | null): string {
+  return site?.name ?? "—";
+}
+
+function routeLabel(trip: DriverTrip): string {
+  return `${siteName(trip.pickupSite)} → ${siteName(trip.dropoffSite)}`;
+}
+
+// Hand a pin's coordinates to the device's Google Maps for turn-by-turn
+// (ADR-0047 c9). No-ops on a missing pin (defensive — an OFFERED trip always
+// carries both). Linking.openURL is fire-and-forget: a device with no maps app
+// is a non-fatal no-op, not worth interrupting the primary flow with a banner.
+function openNavigate(site: DriverSite | null): void {
+  if (!site) return;
+  void Linking.openURL(navigateUrl(site.latitude, site.longitude));
+}
+
+// The Requests tab (ADR-0047 c8): the driver's OFFERED trips as cards, each with
+// an Accept action and a tap into the order-detail view. Accepting
+// (OFFERED → ACCEPTED) moves the trip to the Trips tab as startable; there is no
+// in-app decline (c2). The mount fetch keeps setState in the promise
+// continuation guarded by `active` (the expo-SDK56 set-state-in-effect rule);
+// the Accept handler is event-driven, so its setState calls are unconstrained.
+function RequestScreen() {
+  const [requests, setRequests] = useState<DriverTrip[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [detailId, setDetailId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    listMyTrips({ status: "OFFERED" })
+      .then((items) => {
+        if (active) setRequests(items);
+      })
+      .catch(() => {
+        if (active) {
+          setRequests([]);
+          setError("Could not load your requests.");
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const refresh = useCallback(async () => {
+    try {
+      setRequests(await listMyTrips({ status: "OFFERED" }));
+    } catch {
+      setRequests([]);
+      setError("Could not load your requests.");
+    }
+  }, []);
+
+  const accept = useCallback(
+    async (id: string) => {
+      setBusyId(id);
+      setError(null);
+      setNotice(null);
+      try {
+        await acceptTrip(id);
+        setDetailId(null); // the accepted trip is no longer OFFERED — drop the detail
+        setNotice("Trip accepted.");
+        await refresh();
+      } catch (e) {
+        // Surface the API's OWN reason (a reassigned/withdrawn trip 400/403/404s).
+        setError(e instanceof ApiError ? e.message : "Could not accept the trip.");
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [refresh],
+  );
+
+  const detailTrip = requests?.find((trip) => trip.id === detailId) ?? null;
+  if (detailTrip) {
+    return (
+      <OrderDetail
+        trip={detailTrip}
+        onBack={() => setDetailId(null)}
+        onAccept={(id) => void accept(id)}
+        accepting={busyId === detailTrip.id}
+        actionError={error}
+      />
+    );
+  }
+
+  return (
+    <View style={styles.subScreen}>
+      {error ? <Text style={styles.error}>{error}</Text> : null}
+      {notice ? <Text style={styles.success}>{notice}</Text> : null}
+
+      {requests === null ? (
+        <ActivityIndicator accessibilityLabel="Loading requests" style={styles.loading} />
+      ) : requests.length === 0 ? (
+        <Text style={styles.empty}>No new requests.</Text>
+      ) : (
+        <FlatList
+          style={styles.list}
+          data={requests}
+          keyExtractor={(trip) => trip.id}
+          renderItem={({ item }) => (
+            <RequestCard
+              trip={item}
+              busy={busyId === item.id}
+              onOpen={() => setDetailId(item.id)}
+              onAccept={() => void accept(item.id)}
+            />
+          )}
+        />
+      )}
+    </View>
+  );
+}
+
+// One OFFERED trip in the Requests list: registration · material · route
+// (ADR-0047 c8 / DESIGN §"Trip dispatch"). Tapping the card opens the order-
+// detail view; the Accept button acts inline. A Button nested in the Pressable
+// captures its own touch, so Accept accepts and the card body opens the detail.
+function RequestCard({
+  trip,
+  busy,
+  onOpen,
+  onAccept,
+}: {
+  trip: DriverTrip;
+  busy: boolean;
+  onOpen: () => void;
+  onAccept: () => void;
+}) {
+  return (
+    <Pressable style={styles.tripRow} onPress={onOpen}>
+      <View style={styles.tripHeader}>
+        <Text style={styles.tripReg}>{trip.vehicle.registrationNumber}</Text>
+        <Text style={styles.tripStatus}>{materialLabel(trip)}</Text>
+      </View>
+      <Text style={styles.orderRoute}>{routeLabel(trip)}</Text>
+      <Button title={busy ? "…" : "Accept"} onPress={onAccept} disabled={busy} />
+    </Pressable>
+  );
+}
+
+// The order-detail view (ADR-0047 c8/c9/c10). Reached from a request card or an
+// accepted/active trip row. Renders the haulage order in the DESIGN.md field
+// order — material, pickup/drop-off, a prominent Navigate button (Google Maps
+// deep-link, c9), the consignee as a tap-to-call row (tel:; Tier-2 PII, never a
+// log line or URL param — c6), load count, instructions, docket. The inline map
+// + live progress taps are W8. onAccept is supplied only for an OFFERED trip
+// (the Requests flow); an accepted/active trip's detail is read-only here.
+function OrderDetail({
+  trip,
+  onBack,
+  onAccept,
+  accepting,
+  actionError,
+}: {
+  trip: DriverTrip;
+  onBack: () => void;
+  onAccept?: (id: string) => void;
+  accepting?: boolean;
+  actionError?: string | null;
+}) {
+  // A narrowed const so the tap-to-call closure captures a non-null phone (a
+  // bare property access would not narrow into the closure — and must never
+  // build "tel:null").
+  const phone = trip.consigneePhone;
+  return (
+    <ScrollView style={styles.subScreen} contentContainerStyle={styles.fuelContent}>
+      <Pressable onPress={onBack} style={styles.backLink}>
+        <Text style={styles.backLinkText}>‹ Back</Text>
+      </Pressable>
+
+      <View style={styles.tripHeader}>
+        <Text style={styles.tripReg}>{trip.vehicle.registrationNumber}</Text>
+        <Text style={styles.tripStatus}>{TRIP_STATUS_LABELS[trip.status]}</Text>
+      </View>
+
+      {actionError ? <Text style={styles.error}>{actionError}</Text> : null}
+
+      <Text style={styles.label}>Material</Text>
+      <Text style={styles.detailValue}>{materialLabel(trip)}</Text>
+
+      <Text style={styles.label}>Pickup</Text>
+      <Text style={styles.detailValue}>{siteName(trip.pickupSite)}</Text>
+      <Text style={styles.label}>Drop-off</Text>
+      <Text style={styles.detailValue}>{siteName(trip.dropoffSite)}</Text>
+
+      {trip.pickupSite ? (
+        <Button title="Navigate to pickup" onPress={() => openNavigate(trip.pickupSite)} />
+      ) : null}
+      {trip.dropoffSite ? (
+        <Button title="Navigate to drop-off" onPress={() => openNavigate(trip.dropoffSite)} />
+      ) : null}
+
+      <Text style={styles.label}>Consignee</Text>
+      <Text style={styles.detailValue}>{trip.consigneeName ?? "—"}</Text>
+      {phone ? (
+        <Pressable onPress={() => void Linking.openURL(`tel:${phone}`)}>
+          <Text style={styles.callLink}>Call {phone}</Text>
+        </Pressable>
+      ) : null}
+
+      <Text style={styles.label}>Expected load count</Text>
+      <Text style={styles.detailValue}>{trip.expectedLoadCount ?? "—"}</Text>
+
+      <Text style={styles.label}>Special instructions</Text>
+      <Text style={styles.detailValue}>{trip.specialInstructions ?? "—"}</Text>
+
+      <Text style={styles.label}>Docket</Text>
+      <Text style={styles.detailValue}>{trip.docketNumber ?? "—"}</Text>
+
+      {onAccept && trip.status === "OFFERED" ? (
+        <Button
+          title={accepting ? "…" : "Accept"}
+          onPress={() => onAccept(trip.id)}
+          disabled={accepting}
+        />
+      ) : null}
+    </ScrollView>
   );
 }
 
@@ -612,6 +901,32 @@ const styles = StyleSheet.create({
   tripStatus: {
     fontSize: 12,
     color: "#666",
+  },
+  // Dispatch: the request-card route line + the order-detail rows (ADR-0047 W7).
+  orderRoute: {
+    fontSize: 14,
+    color: "#333",
+  },
+  detailValue: {
+    fontSize: 16,
+    marginBottom: 2,
+  },
+  callLink: {
+    fontSize: 16,
+    color: "#1f6feb",
+    paddingVertical: 4,
+  },
+  viewOrderLink: {
+    fontSize: 14,
+    color: "#1f6feb",
+  },
+  backLink: {
+    alignSelf: "flex-start",
+    paddingVertical: 4,
+  },
+  backLinkText: {
+    fontSize: 15,
+    color: "#1f6feb",
   },
   tripActions: {
     // Column so an hour-metered (or BOTH) vehicle can stack its reading

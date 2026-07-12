@@ -1,7 +1,13 @@
 import { authClient } from "./auth";
 import type { FuelLogPayload } from "./fuel";
 import { markSessionExpired } from "./session-expired";
-import type { DriverTrip, TripStartPayload, TripStopPayload } from "./trips";
+import type {
+  DriverTrip,
+  TripAcceptPayload,
+  TripStartPayload,
+  TripStatus,
+  TripStopPayload,
+} from "./trips";
 
 // The FleetCo API base URL — the same env the auth client reads (auth.ts), so a
 // real phone points both at the operator's LAN IP / tunnel via EXPO_PUBLIC_API_URL.
@@ -14,6 +20,29 @@ export class ApiError extends Error {
   ) {
     super(message);
     this.name = "ApiError";
+  }
+}
+
+// Pull a human-readable message out of a NestJS error body so the caller can
+// surface the API's OWN reason (ADR-0047 W7: a reassigned/withdrawn trip 400s /
+// 403s / 404s on Accept, and the driver should see why — "Illegal status
+// transition: …", "Trip … not found.", etc. — not a bare status code). Nest
+// shapes errors as { statusCode, message, error } where `message` is a string
+// (HttpException) or a string[] (class-validator). Returns null when the body is
+// absent or not JSON, so the caller falls back to a generic message.
+async function readApiErrorMessage(response: Response): Promise<string | null> {
+  try {
+    const body: unknown = await response.json();
+    if (typeof body !== "object" || body === null) return null;
+    const message = (body as { message?: unknown }).message;
+    if (typeof message === "string" && message.trim() !== "") return message;
+    if (Array.isArray(message) && message.length > 0) {
+      return message.map((m) => String(m)).join(" ");
+    }
+    return null;
+  } catch {
+    // Non-JSON body (an HTML 502 from a proxy, an empty body, …) — fall back.
+    return null;
   }
 }
 
@@ -53,7 +82,8 @@ async function apiFetch<T>(
     throw new ApiError(401, "Your session has expired. Please sign in again.");
   }
   if (!response.ok) {
-    throw new ApiError(response.status, `Request failed (${response.status}).`);
+    const serverMessage = await readApiErrorMessage(response);
+    throw new ApiError(response.status, serverMessage ?? `Request failed (${response.status}).`);
   }
   if (response.status === 204) {
     return undefined as T;
@@ -67,12 +97,26 @@ interface TripsListResponse {
 }
 
 // The driver's own trips. The API auto-scopes a DRIVER session to their own rows
-// (ADR-0034 D2), so no driverId filter is needed — newest first.
-export async function listMyTrips(): Promise<DriverTrip[]> {
+// (ADR-0034 D2), so no driverId filter is needed — newest first. An optional
+// status narrows the set: the Requests tab passes "OFFERED" (ADR-0047 W7), the
+// Trips/Fuel screens pass nothing (all statuses). The status is a bare enum
+// value (no special chars), so it interpolates safely into the query string.
+export async function listMyTrips(opts: { status?: TripStatus } = {}): Promise<DriverTrip[]> {
+  const statusQuery = opts.status ? `&status=${opts.status}` : "";
   const data = await apiFetch<TripsListResponse>(
-    "/api/v1/trips?sortBy=createdAt&sortDir=desc&take=50",
+    `/api/v1/trips?sortBy=createdAt&sortDir=desc&take=50${statusQuery}`,
   );
   return data.items;
+}
+
+// Accept an offered trip: PATCH OFFERED → ACCEPTED (ADR-0047 c8). The server
+// stamps acceptedAt and runs the own-record predicate — a foreign/unknown trip
+// 404s, and a trip no longer OFFERED (reassigned/withdrawn) 400s with a message
+// apiFetch now surfaces. A driver still cannot create or delete trips. The
+// response is the accepted trip's detail shape.
+export async function acceptTrip(id: string): Promise<DriverTrip> {
+  const body: TripAcceptPayload = { status: "ACCEPTED" };
+  return apiFetch<DriverTrip>(`/api/v1/trips/${id}`, { method: "PATCH", body });
 }
 
 // Start / stop a trip via the reused PATCH /trips/:id (ADR-0034 c7). The own-
