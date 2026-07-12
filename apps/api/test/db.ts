@@ -64,6 +64,10 @@ const TABLES = [
   "invoice",
   "job",
   "trip",
+  // ADR-0047 W2: the Site aggregate (reusable pickup/drop-off pins). Trip FKs
+  // into it (pickupSiteId/dropoffSiteId, Restrict) so it follows trip; site
+  // itself FKs into user (createdById). CASCADE makes order cosmetic.
+  "site",
   "driver",
   "vehicle",
   "customer",

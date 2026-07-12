@@ -58,6 +58,7 @@ model User {
   expenseLogsCreated      ExpenseLog[]        @relation("ExpenseLogCreatedBy")
   gpsPingsCreated         GpsPing[]           @relation("GpsPingCreatedBy")
   geofencesCreated        Geofence[]          @relation("GeofenceCreatedBy")
+  sitesCreated            Site[]              @relation("SiteCreatedBy")
   serviceSchedulesCreated ServiceSchedule[]   @relation("ServiceScheduleCreatedBy")
   serviceRecordsCreated   ServiceRecord[]     @relation("ServiceRecordCreatedBy")
   invoicesCreated         Invoice[]           @relation("InvoiceCreatedBy")
@@ -445,8 +446,23 @@ model Driver {
 // when Trips reference them" tracks adding the P2003 → 409 mapping
 // service-layer translation per the api-error-mapping runbook.
 
+// Trip lifecycle (ADR-0003; extended by ADR-0047 c1). The dispatch →
+// acceptance states OFFERED and ACCEPTED sit between PLANNED and
+// IN_PROGRESS: OFFERED = dispatched to a specific driver + vehicle,
+// awaiting the driver; ACCEPTED = the driver acknowledged, not yet
+// started. Intra-trip progress (arrived-at-pickup, loaded, …) is
+// nullable milestone TIMESTAMPS on Trip, NOT more statuses (ADR-0047 c1,
+// the anti-status-explosion decision). This enum lives in FIVE lock-step
+// mirrors that must move together (ADR-0047 c1): this Prisma enum,
+// TRIP_STATUSES + TRIP_STATUS_TRANSITIONS (trips.schemas.ts), the
+// driver-app union (apps-mobile/driver/src/trips.ts), and the web
+// TRIP_STATUS_OPTIONS/LABELS (trips/types.ts). W2 moves this enum and the
+// TRIP_STATUSES array; the transition matrix + web/mobile UI mirrors move
+// in W4/W6.
 enum TripStatus {
   PLANNED
+  OFFERED
+  ACCEPTED
   IN_PROGRESS
   COMPLETED
   CANCELLED
@@ -508,13 +524,82 @@ model Trip {
   /// future write-path UI's helper text will direct operators not to
   /// enter PII here. Nullable; the empty case is null rather than "".
   notes            String?
-  createdAt        DateTime   @default(now())
-  updatedAt        DateTime   @updatedAt
+
+  // ── Dispatch order (ADR-0047 c3) ────────────────────────────────────
+  // The haulage order the trip executes, attached as nullable columns on
+  // Trip because dispatch:trip is cardinality-1 — the ADR-0036 columns-on-
+  // Trip precedent, chosen over a separate Dispatch child aggregate
+  // (ADR-0047 Alternatives). A pre-dispatch (PLANNED) trip carries none;
+  // the order is REQUIRED at the → OFFERED transition (material + pickup +
+  // drop-off), a service/schema cross-field rule landing in W4, NOT a DB
+  // constraint here (mirroring how meter readings are required only at
+  // IN_PROGRESS/COMPLETED). One trip = one load (ADR-0047 c1). W2 stages
+  // the columns; W4 wires the validation, the .strict() Create/Update
+  // schemas, and the LIST_SELECT/DETAIL_INCLUDE projections.
+  /// Tier 3 per ADR-0013 — what is hauled (ADR-0047 c5): a curated
+  /// MaterialType enum with an OTHER escape hatch paired with
+  /// materialNote. Nullable until dispatched.
+  materialType        MaterialType?
+  /// Tier 3 per ADR-0013 — free-text material detail, used when
+  /// materialType is OTHER (or to qualify a listed material). Nullable.
+  materialNote        String?
+  /// FK to the pickup Site (crusher/pit) — ADR-0047 c4. Nullable until
+  /// dispatched. onDelete: Restrict — a Site referenced by a trip cannot
+  /// be silently deleted (P2003 → 409, the house delete-blocker; the
+  /// mapping lands with the Sites module in W3). Indexed for the
+  /// "trips using this site" query.
+  pickupSiteId        String?
+  pickupSite          Site?         @relation("TripPickupSite", fields: [pickupSiteId], references: [id], onDelete: Restrict)
+  /// FK to the drop-off Site (delivery site) — ADR-0047 c4. Same
+  /// nullability, onDelete: Restrict, and indexing rationale as
+  /// pickupSiteId.
+  dropoffSiteId       String?
+  dropoffSite         Site?         @relation("TripDropoffSite", fields: [dropoffSiteId], references: [id], onDelete: Restrict)
+  /// Tier 2 PII per ADR-0013 (ADR-0047 c6 amendment) — the drop-off
+  /// receiver's name (generally NOT the billing Customer, so not
+  /// shoehorned into Customer). Redacted via the pino `*.consigneeName`
+  /// path added in W2. Nullable.
+  consigneeName       String?
+  /// Tier 2 PII per ADR-0013 (ADR-0047 c6) — the consignee's phone.
+  /// Redacted via the existing pino `*.phone` path. Never in a URL query
+  /// string, never in logs. Nullable.
+  consigneePhone      String?
+  /// Tier 3 per ADR-0013 — how many loads the operator expects for this
+  /// dispatch (a plain count; one trip is still one load per ADR-0047 c1).
+  /// Nullable.
+  expectedLoadCount   Int?
+  /// Tier 3 per ADR-0013 — free-text dispatch instructions for the
+  /// driver. Not PII; nullable.
+  specialInstructions String?
+  /// Tier 3 per ADR-0013 — free-text weigh-ticket / bill-of-lading key
+  /// (ADR-0047 c3). No weighbridge integration; a plain string. Nullable.
+  docketNumber        String?
+
+  // ── Dispatch milestone timestamps (ADR-0047 c1/c3) ──────────────────
+  // Intra-trip progress recorded as nullable timestamps, NOT as new
+  // statuses (ADR-0047 c1, the anti-status-explosion decision). Monotonic
+  // / non-decreasing — a W4 service rule, not a DB constraint. All
+  // ISO/UTC per CLAUDE.md; all Tier 3 (operational timing, not PII).
+  /// Tier 3 per ADR-0013 — when the trip was dispatched (→ OFFERED).
+  offeredAt        DateTime?
+  /// Tier 3 per ADR-0013 — when the driver accepted (→ ACCEPTED).
+  acceptedAt       DateTime?
+  /// Tier 3 per ADR-0013 — when the driver arrived at the pickup Site.
+  arrivedPickupAt  DateTime?
+  /// Tier 3 per ADR-0013 — when the load was loaded at pickup.
+  loadedAt         DateTime?
+  /// Tier 3 per ADR-0013 — when the driver arrived at the drop-off Site.
+  arrivedDropoffAt DateTime?
+  /// Tier 3 per ADR-0013 — when the load was delivered at drop-off.
+  deliveredAt      DateTime?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
   /// References the User who created the trip record (ADR-0021 admin
   /// user). Audit field; Restrict because the trip's audit chain
   /// should remain intact for the trip's lifetime.
-  createdById      String
-  createdBy        User       @relation("TripCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  createdById String
+  createdBy   User     @relation("TripCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
 
   fuelLogs    FuelLog[]
   expenseLogs ExpenseLog[]
@@ -529,6 +614,8 @@ model Trip {
   @@index([status])
   @@index([vehicleId])
   @@index([driverId])
+  @@index([pickupSiteId])
+  @@index([dropoffSiteId])
   @@index([createdById])
   @@map("trip")
 }
@@ -1274,6 +1361,144 @@ model Geofence {
   @@index([customerId])
   @@index([createdById])
   @@map("geofence")
+}
+
+// Sites module. Owned by apps/api/src/modules/sites/ per ADR-0001 (the
+// feature module — service, controller, RBAC, and the web pin-editor —
+// lands in W3/W5; W2 ships ONLY this schema, its hand-authored migration,
+// the test/db.ts truncate entry, and the round-trip schema test — the
+// G1/M3 read-path staging pattern). The reusable pinned-location aggregate
+// of ADR-0047 c4: the crushers, pits, and delivery sites a single company
+// hauls between over and over. A dispatch picks a saved Site (or drops a
+// new pin that is saved as one) for a trip's pickup/drop-off. Master data
+// of the same family as Customer and Geofence — NOT an operational log.
+//
+// Reuses the ADR-0029 GpsPing HYBRID POINT pattern: native Float
+// latitude/longitude are the canonical, Prisma-native coordinate columns;
+// alongside them sits a Postgres
+//   GENERATED ALWAYS AS (ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)) STORED
+// geometry(Point, 4326) column with a GIST index, both HAND-AUTHORED in
+// the migration (Prisma expresses neither generated columns nor geometry
+// types). NOTE the ST_MakePoint(longitude, latitude) argument order: X =
+// lon, Y = lat (the classic PostGIS foot-gun); the round-trip test
+// (apps/api/test/site.schema.test.ts) asserts ST_X returns the longitude
+// and ST_Y the latitude. The column is declared
+// Unsupported("geometry(Point, 4326)")? so Prisma tracks it for
+// migrate-diff but never selects/inserts it (the database derives it from
+// the floats, so it cannot drift). The point geometry sets up map
+// rendering, distance, and a LATER optional Site.geofenceId? link
+// (ADR-0030) for automatic arrival detection — explicitly deferred
+// (ADR-0047 c4/c11), not added here.
+//
+// CAUTION for future migrations (same as GpsPing/Geofence): because
+// geometry is a plain Unsupported type, prisma migrate dev may emit a
+// SPURIOUS step that DROPs site_geometry_idx or alters the generated
+// default — that step MUST be removed. Migrations here are hand-authored,
+// so the SQL is never clobbered; `prisma migrate diff` intentionally shows
+// the generated default + GIST index as the accepted ADR-0047 hybrid cost.
+//
+// Tier annotations per ADR-0013 + ADR-0047 c4/c6: a Site is Tier-3
+// operational CONFIGURATION (a fixed business location, like a Geofence
+// per ADR-0030 c7 — NOT the Tier-5 vehicle location TRAIL a GpsPing is),
+// so name/kind/coordinates/geometry/address carry Tier-3 marks and add NO
+// pino-redact or span-scrub entry. The two EXCEPTIONS are contactName /
+// contactPhone (the site-level human contact) — individual-person
+// identifiers → Tier 2 (ADR-0047 c6): contactName is redacted via the new
+// pino `*.contactName` path (W2) and contactPhone via the existing
+// `*.phone` path.
+//
+// FK delete policy (ADR-0047 c4):
+//   - Trip.pickupSiteId / Trip.dropoffSiteId reference Site with
+//     onDelete: Restrict (declared on Trip), so a Site referenced by any
+//     trip cannot be silently deleted — surfaces as P2003 → 409 in the W3
+//     SitesService.delete (the house delete-blocker).
+//   - createdById — required, onDelete: Restrict to User, filled from the
+//     authenticated principal (ADR-0021); the audit anchor for who created
+//     the site.
+
+/// The kind of pinned location (ADR-0047 c4). CRUSHER / PIT are the
+/// aggregate SOURCES; DELIVERY_SITE is the destination; DEPOT is the
+/// company yard; OTHER is the escape hatch. An enum (not a managed lookup)
+/// keeps v1 lean; widening is a one-line migration.
+enum SiteKind {
+  CRUSHER
+  PIT
+  DELIVERY_SITE
+  DEPOT
+  OTHER
+
+  @@map("site_kind")
+}
+
+/// What a trip hauls (ADR-0047 c5). The common Nepal aggregate-haulage
+/// materials as a curated Prisma enum; OTHER pairs with Trip.materialNote
+/// free text. An enum (not a managed lookup aggregate) keeps v1 lean and is
+/// trivially extendable by a later migration; if the list starts needing
+/// per-row attributes (density, default rate) it graduates to its own
+/// aggregate — a named revisit, not a v1 concern (ADR-0047 c5).
+enum MaterialType {
+  SAND
+  AGGREGATE
+  GRAVEL
+  STONE
+  BOULDER
+  SOIL
+  BRICKS
+  OTHER
+
+  @@map("material_type")
+}
+
+model Site {
+  id           String                                @id @default(cuid())
+  /// Tier 3 per ADR-0013 — human-readable site name (e.g. "Kalimati
+  /// Crusher"). The dispatcher picks it from a list.
+  name         String
+  /// Tier 3 per ADR-0013 — CRUSHER / PIT / DELIVERY_SITE / DEPOT / OTHER.
+  kind         SiteKind
+  /// Tier 3 per ADR-0013 — the pin's latitude (WGS84, decimal degrees).
+  /// Canonical coordinate column (Prisma-native Float; the geometry is
+  /// derived from it). A fixed business location, NOT a Tier-5 movement
+  /// trail — so it is NOT redacted the way GpsPing coordinates are.
+  latitude     Float
+  /// Tier 3 per ADR-0013 — the pin's longitude (WGS84, decimal degrees).
+  /// Canonical coordinate column. NOTE the geometry derives as
+  /// ST_MakePoint(longitude, latitude) — longitude is X, latitude is Y.
+  longitude    Float
+  /// Tier 3 per ADR-0013 — PostGIS geometry(Point, 4326), GENERATED ALWAYS
+  /// AS (ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)) STORED with a
+  /// GIST index, both HAND-AUTHORED in the migration (Prisma expresses
+  /// neither). Declared Unsupported so Prisma tracks it for migrate-diff
+  /// but never selects/inserts it; derives from latitude/longitude so it
+  /// cannot drift. Sets up map rendering, distance, and the deferred
+  /// Site.geofenceId arrival-detection link (ADR-0047 c4).
+  geometry     Unsupported("geometry(Point, 4326)")?
+  /// Tier 3 per ADR-0013 — optional free-text street / landmark address.
+  address      String?
+  /// Tier 2 PII per ADR-0013 (ADR-0047 c6) — optional site-level contact
+  /// person's name. Redacted via the new pino `*.contactName` path (W2).
+  contactName  String?
+  /// Tier 2 PII per ADR-0013 (ADR-0047 c6) — optional site contact phone.
+  /// Redacted via the existing pino `*.phone` path. Never in a URL query
+  /// string, never in logs.
+  contactPhone String?
+  createdAt    DateTime                              @default(now())
+  updatedAt    DateTime                              @updatedAt
+  /// References the User who created the site (ADR-0021 authenticated
+  /// principal). Audit field; Restrict because the site's audit chain
+  /// should remain intact for the row's lifetime.
+  createdById  String
+  createdBy    User                                  @relation("SiteCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  /// Trips using this Site as pickup / drop-off (ADR-0047 c4). The
+  /// onDelete: Restrict lives on Trip's FK, so these back-relations are
+  /// what make a referenced Site undeletable (P2003 → 409, W3).
+  pickupTrips  Trip[] @relation("TripPickupSite")
+  dropoffTrips Trip[] @relation("TripDropoffSite")
+
+  @@index([kind])
+  @@index([createdById])
+  @@map("site")
 }
 
 // Tracker devices. Owned by apps/api/src/modules/telematics/ per ADR-0001
