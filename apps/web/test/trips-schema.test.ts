@@ -225,6 +225,19 @@ describe("CreateTripFormSchema OFFERED-order cross-field (ADR-0047 c3)", () => {
     expect(result.success).toBe(true);
   });
 
+  test("a PLANNED draft with material OTHER but no note is valid (the note is required only at OFFERED)", () => {
+    // Guards the fix for the over-constraint the note rule once had: it must not
+    // block a pre-dispatch draft (or an externally-created OFFERED-Other trip's
+    // later edit), only require the note at the OFFERED dispatch gate.
+    const result = CreateTripFormSchema.safeParse({
+      ...BASE,
+      status: "PLANNED",
+      meterType: "ODOMETER_KM",
+      materialType: "OTHER",
+    });
+    expect(result.success).toBe(true);
+  });
+
   test("an unknown material value is rejected (the MaterialType enum guard)", () => {
     const result = CreateTripFormSchema.safeParse({
       ...OFFERED_BASE,

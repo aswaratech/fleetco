@@ -250,9 +250,11 @@ function checkCompletedShape(
 }
 
 // OFFERED requires the order (material + pickup + drop-off), mirroring the API's
-// authoritative rule (ADR-0047 c3). A chosen material must be a known type, and an
-// "Other" material needs its free-text note. The order is unconstrained before
-// OFFERED — a PLANNED draft carries whatever the operator has filled so far.
+// authoritative rule (ADR-0047 c3); at OFFERED an "Other" material also needs its
+// free-text note. A chosen material must ALWAYS be a known type. The order is
+// unconstrained before OFFERED — a PLANNED draft carries whatever the operator
+// has filled so far, and an externally-created OFFERED-Other trip with no note
+// (which the API accepts) stays editable rather than being locked behind the note.
 function checkOfferedOrderShape(
   data: TripFormRefineInput,
 ): { ok: true } | { ok: false; path: string; message: string } {
@@ -276,9 +278,17 @@ function checkOfferedOrderShape(
         message: "An offered trip needs a drop-off site.",
       };
     }
-  }
-  if (data.materialType === "OTHER" && !isPresent(data.materialNote)) {
-    return { ok: false, path: "materialNote", message: "Describe the material when it is Other." };
+    // A dispatched "Other" material needs its free-text note to say what it is.
+    // Gated on OFFERED (not every status) so a PLANNED draft stays unconstrained
+    // and an externally-created OFFERED-Other trip without a note is still
+    // editable — the API never requires this note, it is a dispatch-time nicety.
+    if (data.materialType === "OTHER" && !isPresent(data.materialNote)) {
+      return {
+        ok: false,
+        path: "materialNote",
+        message: "Describe the material when it is Other.",
+      };
+    }
   }
   return { ok: true };
 }

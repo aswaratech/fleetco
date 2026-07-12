@@ -242,10 +242,11 @@ const envSchema = z.object({
   // The LIVE routing provider's API key (ADR-0047 c9 — a Google Directions/Routes
   // billing key, or a self-hosted router's token). Tier-1 secret per ADR-0013: it
   // lives ONLY in the production secret store (ADR-0014), is NEVER committed to
-  // any file, and is NEVER logged (the `*.key` pino redact path is the backstop;
-  // the primary defense is that no routing code logs it). OPTIONAL and UNUSED
-  // until the operator activates a live ROUTING_PROVIDER at M1 — the Mock needs
-  // no key and makes zero egress. Empty-string -> undefined, like DEEPSEEK_API_KEY.
+  // any file, and is NEVER logged — the routing module makes no logger calls, so
+  // the key never enters a log line and never rides a log object as a field.
+  // OPTIONAL and UNUSED until the operator activates a live ROUTING_PROVIDER at M1
+  // — the Mock needs no key and makes zero egress. Empty-string -> undefined, like
+  // DEEPSEEK_API_KEY.
   ROUTING_API_KEY: z.preprocess(emptyStringAsUndefined, z.string().optional()),
 });
 
