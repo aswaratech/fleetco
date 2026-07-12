@@ -97,6 +97,18 @@ export interface DriverTrip {
   expectedLoadCount: number | null;
   specialInstructions: string | null;
   docketNumber: string | null;
+  // Milestone timestamps (ADR-0047 c1/c8) — nullable ISO strings; progress is
+  // TIMESTAMPS, not statuses. offeredAt/acceptedAt are server-stamped on the
+  // OFFERED/ACCEPTED transitions (the driver never taps those); the four
+  // progress fields below are the driver's live taps (W8). All six are projected
+  // on both the list (LIST_SELECT) and detail (DETAIL_INCLUDE) shapes, so the
+  // API always returns these keys (null until reached).
+  offeredAt: string | null;
+  acceptedAt: string | null;
+  arrivedPickupAt: string | null;
+  loadedAt: string | null;
+  arrivedDropoffAt: string | null;
+  deliveredAt: string | null;
 }
 
 export interface TripStartPayload {
@@ -195,4 +207,70 @@ export function isStoppable(trip: DriverTrip): boolean {
 // are separate scalars, so the pin's latitude is placed first, longitude second.
 export function navigateUrl(latitude: number, longitude: number): string {
   return `https://www.google.com/maps/dir/?api=1&destination=${latitude},${longitude}&travelmode=driving`;
+}
+
+// ── Live progress taps (ADR-0047 c8, W8) ──────────────────────────────────────
+
+// The four driver-tappable progress milestones, in dispatch order. offeredAt and
+// acceptedAt are SERVER-stamped on the OFFERED/ACCEPTED transitions (the driver
+// never taps those), so the live progress taps cover exactly these four. Each
+// maps to a nullable Trip timestamp column (already projected in
+// LIST_SELECT/DETAIL_INCLUDE). `action` is the tap label (DESIGN §"Trip dispatch"
+// — "Mark arrived at pickup"); `done` is how the row reads once stamped ("a
+// timestamp, not a toggle"). Derived-union idiom: MilestoneField comes from the
+// tuple so the field list and the type cannot drift.
+export const PROGRESS_MILESTONES = [
+  { field: "arrivedPickupAt", action: "Mark arrived at pickup", done: "Arrived at pickup" },
+  { field: "loadedAt", action: "Mark loaded", done: "Loaded" },
+  { field: "arrivedDropoffAt", action: "Mark arrived at drop-off", done: "Arrived at drop-off" },
+  { field: "deliveredAt", action: "Mark delivered", done: "Delivered" },
+] as const;
+
+export type MilestoneField = (typeof PROGRESS_MILESTONES)[number]["field"];
+
+// The PATCH body for one progress tap: EXACTLY one milestone timestamp, stamped
+// with nowIso. No status change (progress is timestamps, not statuses — ADR-0047
+// c1). The API's UpdateTripSchema accepts these nullable + optional; the
+// monotonic-milestone rule (validateTripCrossFields) is SERVER-enforced, so an
+// out-of-order tap 400s with a message apiFetch surfaces. Pure — the screen
+// supplies new Date().toISOString() as nowIso (deterministic in tests).
+export interface MilestonePayload {
+  arrivedPickupAt?: string;
+  loadedAt?: string;
+  arrivedDropoffAt?: string;
+  deliveredAt?: string;
+}
+
+export function milestonePayload(field: MilestoneField, nowIso: string): MilestonePayload {
+  const payload: MilestonePayload = {};
+  payload[field] = nowIso;
+  return payload;
+}
+
+// One rendered progress row. `at` is the stamped ISO time when done (else null);
+// `isDone` reads as a timestamp; `actionable` marks the single NEXT un-done
+// milestone — only it shows a tap button, so the driver advances in order and
+// never fires an out-of-order PATCH the server would reject.
+export interface MilestoneStep {
+  field: MilestoneField;
+  action: string;
+  done: string;
+  at: string | null;
+  isDone: boolean;
+  actionable: boolean;
+}
+
+// Derive the ordered progress rows for a trip: each milestone with its stamped
+// time (or null), whether it is done, and whether it is the next actionable tap
+// (the FIRST un-done milestone, in dispatch order — every earlier one is done,
+// every later one waits). Pure; the screen renders straight from this.
+export function milestoneSteps(trip: DriverTrip): MilestoneStep[] {
+  let nextPending = true;
+  return PROGRESS_MILESTONES.map((m) => {
+    const at = trip[m.field];
+    const isDone = at !== null;
+    const actionable = !isDone && nextPending;
+    if (!isDone) nextPending = false;
+    return { field: m.field, action: m.action, done: m.done, at, isDone, actionable };
+  });
 }

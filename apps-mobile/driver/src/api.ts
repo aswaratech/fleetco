@@ -1,8 +1,10 @@
 import { authClient } from "./auth";
 import type { FuelLogPayload } from "./fuel";
+import type { MapPoint, RoutePreviewResult } from "./routing";
 import { markSessionExpired } from "./session-expired";
 import type {
   DriverTrip,
+  MilestonePayload,
   TripAcceptPayload,
   TripStartPayload,
   TripStatus,
@@ -126,6 +128,36 @@ export async function patchTrip(
   body: TripStartPayload | TripStopPayload,
 ): Promise<DriverTrip> {
   return apiFetch<DriverTrip>(`/api/v1/trips/${id}`, { method: "PATCH", body });
+}
+
+// Stamp one live-progress milestone on the driver's own IN_PROGRESS trip
+// (ADR-0047 c8, W8) via the SAME own-record PATCH path (DriverScopeService). The
+// body carries exactly one milestone timestamp and NO status change. The server
+// enforces the monotonic-milestone rule, so an out-of-order tap 400s with a
+// message apiFetch surfaces (e.g. "loadedAt must be greater than or equal to
+// arrivedPickupAt."); the response is the trip's refreshed detail shape.
+export async function patchTripMilestone(id: string, body: MilestonePayload): Promise<DriverTrip> {
+  return apiFetch<DriverTrip>(`/api/v1/trips/${id}`, { method: "PATCH", body });
+}
+
+// Preview the pickup → drop-off route for the order-detail map (ADR-0047 c9, W8).
+// POSTs the two coordinates to the W6 route-preview endpoint, which is gated on
+// `trips:*` — a capability the DRIVER holds — so the driver's own cookie session
+// reaches it. Returns the polyline ([lat, lng] pairs) + estimated distance /
+// duration. The endpoint reads coordinates from the POST BODY, never a URL query
+// string (Tier-5 location discipline). The caller degrades gracefully on any
+// failure (the pins still render, no route line) — see OrderDetail.
+export async function routePreview(
+  origin: MapPoint,
+  destination: MapPoint,
+): Promise<RoutePreviewResult> {
+  return apiFetch<RoutePreviewResult>("/api/v1/routing/route-preview", {
+    method: "POST",
+    body: {
+      origin: { lat: origin.latitude, lng: origin.longitude },
+      destination: { lat: destination.latitude, lng: destination.longitude },
+    },
+  });
 }
 
 // Log a fuel fill against one of the driver's own trips (ADR-0034 D2 own-record
