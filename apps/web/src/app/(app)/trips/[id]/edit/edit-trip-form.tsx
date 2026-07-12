@@ -21,6 +21,7 @@ import { meterIncludesHours, meterIncludesOdometer } from "@/lib/vehicles-schema
 
 import type { TripDetail, VehicleMeterType } from "../../types";
 import { TRIP_STATUS_OPTIONS } from "../../types";
+import { TripOrderFields, type SiteOption } from "../../trip-order-fields";
 import { updateTripAction } from "../../actions";
 
 interface EditTripFormProps {
@@ -33,6 +34,7 @@ interface EditTripFormProps {
     meterType: VehicleMeterType;
   }[];
   drivers: { id: string; fullName: string; licenseNumber: string }[];
+  sites: SiteOption[];
 }
 
 // Convert an API ISO timestamp to a `YYYY-MM-DDTHH:MM` string the
@@ -73,7 +75,12 @@ function hoursOrEmpty(tenths: number | null): string {
 // form sends the MERGED values to the action for validation while
 // only sending the DIFF over the wire — the action re-validates the
 // merged shape server-side before issuing the PATCH.
-export function EditTripForm({ trip, vehicles, drivers }: EditTripFormProps): React.ReactElement {
+export function EditTripForm({
+  trip,
+  vehicles,
+  drivers,
+  sites,
+}: EditTripFormProps): React.ReactElement {
   const [submitError, setSubmitError] = useState<string | null>(null);
 
   const initialValues: UpdateTripFormValues = useMemo(
@@ -92,6 +99,17 @@ export function EditTripForm({ trip, vehicles, drivers }: EditTripFormProps): Re
       endEngineHours: hoursOrEmpty(trip.endEngineHours),
       meterType: trip.vehicle.meterType,
       notes: trip.notes ?? "",
+      // Haulage order (ADR-0047 c3). Pre-filled from the trip; "" for unset so
+      // the diff omits an untouched field and a cleared field sends null.
+      materialType: trip.materialType ?? "",
+      materialNote: trip.materialNote ?? "",
+      pickupSiteId: trip.pickupSiteId ?? "",
+      dropoffSiteId: trip.dropoffSiteId ?? "",
+      consigneeName: trip.consigneeName ?? "",
+      consigneePhone: trip.consigneePhone ?? "",
+      expectedLoadCount: numberOrEmpty(trip.expectedLoadCount),
+      specialInstructions: trip.specialInstructions ?? "",
+      docketNumber: trip.docketNumber ?? "",
     }),
     [trip],
   );
@@ -346,6 +364,8 @@ export function EditTripForm({ trip, vehicles, drivers }: EditTripFormProps): Re
             />
           </div>
         ) : null}
+
+        <TripOrderFields sites={sites} />
 
         <FormField
           control={form.control}

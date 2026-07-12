@@ -2,13 +2,20 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
 import { NepaliDate } from "@/components/nepali-date";
+import { Badge } from "@/components/ui/badge";
 import { Breadcrumb } from "@/components/ui/breadcrumb";
 import { Button } from "@/components/ui/button";
 import { DetailRow } from "@/components/ui/detail-row";
 import { apiFetch, ApiError } from "@/lib/api";
 
-import { TRIP_STATUS_LABELS, type TripDetail } from "../types";
+import {
+  MATERIAL_TYPE_LABELS,
+  TRIP_STATUS_BADGE,
+  TRIP_STATUS_LABELS,
+  type TripDetail,
+} from "../types";
 import { DeleteTripDialog } from "./delete-trip-dialog";
+import { TripMapView } from "./trip-map-loader";
 
 // Trip detail — iter 8 of the Trips slice. Server-rendered shell
 // (the (app) layout provides the auth gate);
@@ -70,6 +77,114 @@ function formatDistance(start: number | null, end: number | null): string {
   return `${delta.toLocaleString("en-US")} km`;
 }
 
+// Time-of-day (UTC) for a milestone row, paired with <NepaliDate> for the date.
+function formatTimeUTC(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  const hh = String(date.getUTCHours()).padStart(2, "0");
+  const mm = String(date.getUTCMinutes()).padStart(2, "0");
+  return `${hh}:${mm} UTC`;
+}
+
+// The dispatch → delivery milestones, in monotonic order (ADR-0047 c1/c3). Each
+// is a nullable timestamp on the Trip; a reached milestone shows its BS date +
+// time, an unreached one a muted em-dash — "where is this load" without a status
+// explosion.
+const MILESTONES: {
+  key:
+    | "offeredAt"
+    | "acceptedAt"
+    | "arrivedPickupAt"
+    | "loadedAt"
+    | "arrivedDropoffAt"
+    | "deliveredAt";
+  label: string;
+}[] = [
+  { key: "offeredAt", label: "Offered" },
+  { key: "acceptedAt", label: "Accepted" },
+  { key: "arrivedPickupAt", label: "Arrived at pickup" },
+  { key: "loadedAt", label: "Loaded" },
+  { key: "arrivedDropoffAt", label: "Arrived at drop-off" },
+  { key: "deliveredAt", label: "Delivered" },
+];
+
+// Live-tracking map data (ADR-0047 c9). All three fetches are best-effort: any
+// failure (no fix, a deleted site, an unconfigured route provider) degrades to a
+// graceful absence — the map renders whatever it has, never an error.
+interface SiteCoord {
+  latitude: number;
+  longitude: number;
+  name: string;
+}
+
+interface RoutePreview {
+  geometryLatLng: [number, number][];
+  distanceMeters: number;
+  durationSeconds: number;
+}
+
+async function fetchSiteCoord(id: string): Promise<SiteCoord | null> {
+  try {
+    // Project to coordinates + name only — the Site row also carries the Tier-2
+    // site contact, which must not reach the client map island (ADR-0047 c6).
+    const s = await apiFetch<{ latitude: number; longitude: number; name: string }>(
+      `/api/v1/sites/${id}`,
+    );
+    return { latitude: s.latitude, longitude: s.longitude, name: s.name };
+  } catch {
+    return null;
+  }
+}
+
+async function fetchLatestFix(
+  vehicleId: string,
+): Promise<{ latitude: number; longitude: number; fixAgeSeconds: number } | null> {
+  try {
+    const res = await apiFetch<{
+      fix: { latitude: number; longitude: number; timestamp: string } | null;
+    }>(`/api/v1/telematics/vehicles/${vehicleId}/location`);
+    if (!res.fix) return null;
+    // fixAgeSeconds is computed on THIS server (not the browser) so the map's
+    // staleness treatment never trusts a client clock (the /map honesty rule).
+    const fixAgeSeconds = Math.max(
+      0,
+      Math.floor((Date.now() - new Date(res.fix.timestamp).getTime()) / 1000),
+    );
+    return { latitude: res.fix.latitude, longitude: res.fix.longitude, fixAgeSeconds };
+  } catch {
+    return null;
+  }
+}
+
+async function fetchRoutePreview(
+  origin: { lat: number; lng: number },
+  destination: { lat: number; lng: number },
+): Promise<RoutePreview | null> {
+  try {
+    return await apiFetch<RoutePreview>(`/api/v1/routing/route-preview`, {
+      method: "POST",
+      json: { origin, destination },
+    });
+  } catch {
+    return null;
+  }
+}
+
+// "≈ 45 min · 32 km" estimate formatting (the preview label; the driver's
+// authoritative turn-by-turn is the Navigate deep-link, W7).
+function formatDuration(seconds: number): string {
+  const mins = Math.round(seconds / 60);
+  if (mins < 60) return `${mins} min`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m > 0 ? `${h} h ${m} min` : `${h} h`;
+}
+
+function formatDistanceKm(meters: number): string {
+  const km = meters / 1000;
+  return `${km >= 10 ? Math.round(km) : km.toFixed(1)} km`;
+}
+
 export default async function TripDetailPage({
   params,
 }: DetailPageProps): Promise<React.ReactElement> {
@@ -91,6 +206,32 @@ export default async function TripDetailPage({
   }
 
   const statusLabel = TRIP_STATUS_LABELS[trip.status] ?? trip.status;
+  const hasOrder =
+    trip.materialType !== null ||
+    trip.pickupSiteId !== null ||
+    trip.dropoffSiteId !== null ||
+    trip.offeredAt !== null;
+  const materialValue =
+    trip.materialType !== null
+      ? `${MATERIAL_TYPE_LABELS[trip.materialType] ?? trip.materialType}${
+          trip.materialNote ? ` — ${trip.materialNote}` : ""
+        }`
+      : "—";
+
+  // Live-tracking data (best-effort; graceful absence on any failure).
+  const [pickupCoord, dropoffCoord, latestFix] = await Promise.all([
+    trip.pickupSiteId ? fetchSiteCoord(trip.pickupSiteId) : Promise.resolve(null),
+    trip.dropoffSiteId ? fetchSiteCoord(trip.dropoffSiteId) : Promise.resolve(null),
+    fetchLatestFix(trip.vehicleId),
+  ]);
+  const route =
+    pickupCoord && dropoffCoord
+      ? await fetchRoutePreview(
+          { lat: pickupCoord.latitude, lng: pickupCoord.longitude },
+          { lat: dropoffCoord.latitude, lng: dropoffCoord.longitude },
+        )
+      : null;
+  const showMap = pickupCoord !== null || dropoffCoord !== null || latestFix !== null;
 
   return (
     <main className="bg-surface-canvas min-h-svh">
@@ -110,11 +251,14 @@ export default async function TripDetailPage({
                 },
               ]}
             />
-            <h1 className="text-text-primary text-2xl font-semibold">
-              Trip · {trip.vehicle.registrationNumber}
-            </h1>
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="text-text-primary text-2xl font-semibold">
+                Trip · {trip.vehicle.registrationNumber}
+              </h1>
+              <Badge variant={TRIP_STATUS_BADGE[trip.status] ?? "neutral"}>{statusLabel}</Badge>
+            </div>
             <p className="text-text-muted text-sm">
-              {statusLabel} · {trip.startedAt ? formatDateTime(trip.startedAt) : "Not yet started"}
+              {trip.startedAt ? formatDateTime(trip.startedAt) : "Not yet started"}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -171,6 +315,136 @@ export default async function TripDetailPage({
             <DetailRow label="Phone" value={trip.driver.phone} mono />
           </dl>
         </section>
+
+        <section className="border-border-subtle bg-surface-raised rounded border p-6 shadow-sm">
+          <h2 className="text-text-primary mb-4 text-sm font-semibold uppercase tracking-wide">
+            Order
+          </h2>
+          {hasOrder ? (
+            <dl className="grid grid-cols-1 gap-x-8 gap-y-4 sm:grid-cols-2">
+              <DetailRow label="Material" value={materialValue} className="sm:col-span-2" />
+              <DetailRow
+                label="Pickup site"
+                value={
+                  trip.pickupSite ? (
+                    <Link
+                      href={`/sites/${trip.pickupSite.id}`}
+                      className="text-text-primary hover:text-text-secondary underline-offset-2 hover:underline"
+                    >
+                      {trip.pickupSite.name}
+                    </Link>
+                  ) : (
+                    "—"
+                  )
+                }
+              />
+              <DetailRow
+                label="Drop-off site"
+                value={
+                  trip.dropoffSite ? (
+                    <Link
+                      href={`/sites/${trip.dropoffSite.id}`}
+                      className="text-text-primary hover:text-text-secondary underline-offset-2 hover:underline"
+                    >
+                      {trip.dropoffSite.name}
+                    </Link>
+                  ) : (
+                    "—"
+                  )
+                }
+              />
+              <DetailRow label="Consignee" value={trip.consigneeName ?? "—"} />
+              <DetailRow
+                label="Consignee phone"
+                value={
+                  trip.consigneePhone ? (
+                    <a
+                      href={`tel:${trip.consigneePhone}`}
+                      className="text-text-primary hover:text-text-secondary underline-offset-2 hover:underline"
+                    >
+                      {trip.consigneePhone}
+                    </a>
+                  ) : (
+                    "—"
+                  )
+                }
+              />
+              <DetailRow
+                label="Expected load count"
+                value={trip.expectedLoadCount !== null ? String(trip.expectedLoadCount) : "—"}
+                numeric
+              />
+              <DetailRow label="Docket" value={trip.docketNumber ?? "—"} mono />
+              <DetailRow
+                label="Special instructions"
+                value={trip.specialInstructions ?? "—"}
+                className="sm:col-span-2"
+              />
+            </dl>
+          ) : (
+            <p className="text-text-muted text-sm">Not yet dispatched.</p>
+          )}
+        </section>
+
+        {hasOrder ? (
+          <section className="border-border-subtle bg-surface-raised rounded border p-6 shadow-sm">
+            <h2 className="text-text-primary mb-4 text-sm font-semibold uppercase tracking-wide">
+              Progress
+            </h2>
+            {trip.status === "OFFERED" && !trip.acceptedAt ? (
+              <p className="text-text-muted mb-4 text-sm">Awaiting driver acceptance.</p>
+            ) : null}
+            <ol className="space-y-3">
+              {MILESTONES.map((m) => {
+                const iso = trip[m.key];
+                return (
+                  <li key={m.key} className="flex items-baseline justify-between gap-4 text-sm">
+                    <span className="text-text-secondary">{m.label}</span>
+                    {iso ? (
+                      <span className="text-text-primary tabular-nums">
+                        <NepaliDate iso={iso} /> · {formatTimeUTC(iso)}
+                      </span>
+                    ) : (
+                      <span className="text-text-muted">—</span>
+                    )}
+                  </li>
+                );
+              })}
+            </ol>
+          </section>
+        ) : null}
+
+        {showMap ? (
+          <section className="border-border-subtle bg-surface-raised rounded border p-6 shadow-sm">
+            <div className="mb-4 flex items-center justify-between gap-2">
+              <h2 className="text-text-primary text-sm font-semibold uppercase tracking-wide">
+                Live tracking
+              </h2>
+              <Link
+                href="/map"
+                className="text-text-secondary hover:text-text-primary text-sm underline-offset-2 hover:underline"
+              >
+                Full map →
+              </Link>
+            </div>
+            {route ? (
+              <p className="text-text-muted mb-3 text-sm">
+                ≈ {formatDuration(route.durationSeconds)} · {formatDistanceKm(route.distanceMeters)}{" "}
+                (estimated)
+              </p>
+            ) : null}
+            <TripMapView
+              vehicleFix={
+                latestFix
+                  ? { ...latestFix, registrationNumber: trip.vehicle.registrationNumber }
+                  : null
+              }
+              pickup={pickupCoord}
+              dropoff={dropoffCoord}
+              routeGeometry={route ? route.geometryLatLng : null}
+            />
+          </section>
+        ) : null}
 
         <section className="border-border-subtle bg-surface-raised rounded border p-6 shadow-sm">
           <h2 className="text-text-primary mb-4 text-sm font-semibold uppercase tracking-wide">
