@@ -36,6 +36,13 @@ interface ActiveDriver {
   licenseNumber: string;
 }
 
+// Only { id, name } is projected — the Sites row also carries the Tier-2 site
+// contact, which must not reach the client (ADR-0047 c6).
+interface SiteListRow {
+  id: string;
+  name: string;
+}
+
 interface EditPageProps {
   params: Promise<{ id: string }>;
 }
@@ -64,17 +71,25 @@ async function fetchActiveDrivers(): Promise<ActiveDriver[]> {
   return response.items;
 }
 
+async function fetchSites(): Promise<SiteListRow[]> {
+  const query = new URLSearchParams({ sortBy: "name", sortDir: "asc", take: "200" });
+  const response = await apiFetch<{ items: SiteListRow[] }>(`/api/v1/sites?${query.toString()}`);
+  return response.items.map((s) => ({ id: s.id, name: s.name }));
+}
+
 export default async function EditTripPage({ params }: EditPageProps): Promise<React.ReactElement> {
   const { id } = await params;
 
   let trip: TripDetail;
   let activeVehicles: ActiveVehicle[];
   let activeDrivers: ActiveDriver[];
+  let activeSites: SiteListRow[];
   try {
-    [trip, activeVehicles, activeDrivers] = await Promise.all([
+    [trip, activeVehicles, activeDrivers, activeSites] = await Promise.all([
       apiFetch<TripDetail>(`/api/v1/trips/${id}`),
       fetchActiveVehicles(),
       fetchActiveDrivers(),
+      fetchSites(),
     ]);
   } catch (error) {
     if (error instanceof ApiError) {
@@ -105,6 +120,11 @@ export default async function EditTripPage({ params }: EditPageProps): Promise<R
     fullName: trip.driver.fullName,
     licenseNumber: trip.driver.licenseNumber,
   });
+  // Ensure the trip's current pickup/drop-off sites stay pickable even if the
+  // Sites list is paginated past them (a referenced site can't be deleted).
+  let sites = activeSites;
+  if (trip.pickupSite) sites = mergeUnique(sites, trip.pickupSite);
+  if (trip.dropoffSite) sites = mergeUnique(sites, trip.dropoffSite);
 
   return (
     <main className="bg-surface-canvas min-h-svh">
@@ -133,7 +153,7 @@ export default async function EditTripPage({ params }: EditPageProps): Promise<R
         </header>
 
         <section className="border-border-subtle bg-surface-raised rounded border p-6 shadow-sm">
-          <EditTripForm trip={trip} vehicles={vehicles} drivers={drivers} />
+          <EditTripForm trip={trip} vehicles={vehicles} drivers={drivers} sites={sites} />
         </section>
       </div>
     </main>

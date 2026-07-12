@@ -85,6 +85,37 @@ function buildCreateWireBody(values: CreateTripFormValues): Record<string, unkno
   if (values.notes && values.notes.length > 0) {
     body.notes = values.notes;
   }
+  // Haulage order (ADR-0047 c3/c5). Omit empty optionals so the API sees
+  // `undefined` (its "not set" branch). expectedLoadCount is an int; the rest
+  // are strings passed through (the API validates the MaterialType enum + the
+  // OFFERED-order requirement authoritatively).
+  if (values.materialType && values.materialType.length > 0) {
+    body.materialType = values.materialType;
+  }
+  if (values.materialNote && values.materialNote.length > 0) {
+    body.materialNote = values.materialNote;
+  }
+  if (values.pickupSiteId && values.pickupSiteId.length > 0) {
+    body.pickupSiteId = values.pickupSiteId;
+  }
+  if (values.dropoffSiteId && values.dropoffSiteId.length > 0) {
+    body.dropoffSiteId = values.dropoffSiteId;
+  }
+  if (values.consigneeName && values.consigneeName.length > 0) {
+    body.consigneeName = values.consigneeName;
+  }
+  if (values.consigneePhone && values.consigneePhone.length > 0) {
+    body.consigneePhone = values.consigneePhone;
+  }
+  if (values.expectedLoadCount && values.expectedLoadCount.length > 0) {
+    body.expectedLoadCount = Number(values.expectedLoadCount);
+  }
+  if (values.specialInstructions && values.specialInstructions.length > 0) {
+    body.specialInstructions = values.specialInstructions;
+  }
+  if (values.docketNumber && values.docketNumber.length > 0) {
+    body.docketNumber = values.docketNumber;
+  }
   return body;
 }
 
@@ -131,6 +162,49 @@ function buildUpdateWireBody(diff: Partial<UpdateTripFormValues>): Record<string
   }
   if ("notes" in diff) {
     body.notes = diff.notes ?? "";
+  }
+  // Haulage order (ADR-0047 c3/c5). A cleared field ("") clears the column
+  // (null); a non-empty value is sent as-is (expectedLoadCount as an int). The
+  // API's UpdateTripSchema makes each order field .nullable().
+  if ("materialType" in diff) {
+    body.materialType =
+      diff.materialType && diff.materialType.length > 0 ? diff.materialType : null;
+  }
+  if ("materialNote" in diff) {
+    body.materialNote =
+      diff.materialNote && diff.materialNote.length > 0 ? diff.materialNote : null;
+  }
+  if ("pickupSiteId" in diff) {
+    body.pickupSiteId =
+      diff.pickupSiteId && diff.pickupSiteId.length > 0 ? diff.pickupSiteId : null;
+  }
+  if ("dropoffSiteId" in diff) {
+    body.dropoffSiteId =
+      diff.dropoffSiteId && diff.dropoffSiteId.length > 0 ? diff.dropoffSiteId : null;
+  }
+  if ("consigneeName" in diff) {
+    body.consigneeName =
+      diff.consigneeName && diff.consigneeName.length > 0 ? diff.consigneeName : null;
+  }
+  if ("consigneePhone" in diff) {
+    body.consigneePhone =
+      diff.consigneePhone && diff.consigneePhone.length > 0 ? diff.consigneePhone : null;
+  }
+  if ("expectedLoadCount" in diff) {
+    body.expectedLoadCount =
+      diff.expectedLoadCount && diff.expectedLoadCount.length > 0
+        ? Number(diff.expectedLoadCount)
+        : null;
+  }
+  if ("specialInstructions" in diff) {
+    body.specialInstructions =
+      diff.specialInstructions && diff.specialInstructions.length > 0
+        ? diff.specialInstructions
+        : null;
+  }
+  if ("docketNumber" in diff) {
+    body.docketNumber =
+      diff.docketNumber && diff.docketNumber.length > 0 ? diff.docketNumber : null;
   }
   return body;
 }
