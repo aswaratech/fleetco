@@ -1,5 +1,6 @@
 import { getQueueToken } from "@nestjs/bullmq";
-import { BadRequestException, type INestApplication } from "@nestjs/common";
+import { BadRequestException } from "@nestjs/common";
+import type { NestExpressApplication } from "@nestjs/platform-express";
 import { Test } from "@nestjs/testing";
 import { TripStatus, UserRole } from "@prisma/client";
 import { Logger } from "nestjs-pino";
@@ -192,7 +193,7 @@ const AUTH_STUB = {
 };
 
 describe("Telematics ingest HTTP boundary (real AuthGuard + RolesGuard chain)", () => {
-  let app: INestApplication;
+  let app: NestExpressApplication;
   let baseUrl: string;
 
   beforeAll(async () => {
@@ -221,7 +222,11 @@ describe("Telematics ingest HTTP boundary (real AuthGuard + RolesGuard chain)", 
       ],
     }).compile();
 
-    app = moduleRef.createNestApplication({ logger: false });
+    app = moduleRef.createNestApplication<NestExpressApplication>({ logger: false });
+    // Mirror main.ts's json body limit (bound to the 1000-ping BATCH_MAX —
+    // the D5 parser-vs-cap consistency fix) so the full-cap batch test below
+    // exercises the same parser configuration production runs.
+    app.useBodyParser("json", { limit: "1mb" });
     await app.listen(0);
 
     const address: AddressInfo | string | null = app.getHttpServer().address();
@@ -466,6 +471,145 @@ describe("Telematics ingest HTTP boundary (real AuthGuard + RolesGuard chain)", 
       );
       expect(status).toBe(202);
       expect(lastJob?.data.createdById).toBe(adminId);
+    });
+
+    // ----- D5: the offline-outbox late-drain window (ADR-0035 c5) ------------
+    // A trip stopped offline legitimately drains its tail AFTER the stop, so a
+    // COMPLETED trip accepts pings whose device-fix timestamp falls inside its
+    // [startedAt − slack, endedAt + slack] window — and nothing outside it.
+    describe("D5 late-delivery window (COMPLETED trips)", () => {
+      const startedAt = new Date("2026-02-15T08:00:00Z");
+      const endedAt = new Date("2026-02-15T10:00:00Z");
+      let completedTripId: string;
+
+      beforeEach(async () => {
+        const driver = await prisma.driver.findFirstOrThrow({
+          where: { userId: driverUserId },
+        });
+        const trip = await seedTrip(prisma, {
+          vehicleId,
+          driverId: driver.id,
+          createdById: adminId,
+          status: TripStatus.COMPLETED,
+          startedAt,
+          endedAt,
+        });
+        completedTripId = trip.id;
+      });
+
+      test("a fix captured INSIDE the window → 202 (c5: late-delivered on-trip pings are kept)", async () => {
+        const { status } = await post(
+          {
+            pings: [
+              makeGpsPingInput({
+                vehicleId,
+                tripId: completedTripId,
+                timestamp: "2026-02-15T09:00:00Z",
+              }),
+            ],
+          },
+          UserRole.DRIVER,
+          driverUserId,
+        );
+        expect(status).toBe(202);
+        expect(lastJob?.data.pings[0].tripId).toBe(completedTripId);
+      });
+
+      test("a fix AFTER endedAt + slack → 403 whole batch, nothing enqueued", async () => {
+        const { status } = await post(
+          {
+            pings: [
+              makeGpsPingInput({
+                vehicleId,
+                tripId: completedTripId,
+                timestamp: "2026-02-15T10:06:00Z",
+              }),
+            ],
+          },
+          UserRole.DRIVER,
+          driverUserId,
+        );
+        expect(status).toBe(403);
+        expect(lastJob).toBeNull();
+      });
+
+      test("a fix BEFORE startedAt − slack → 403", async () => {
+        const { status } = await post(
+          {
+            pings: [
+              makeGpsPingInput({
+                vehicleId,
+                tripId: completedTripId,
+                timestamp: "2026-02-15T07:54:00Z",
+              }),
+            ],
+          },
+          UserRole.DRIVER,
+          driverUserId,
+        );
+        expect(status).toBe(403);
+        expect(lastJob).toBeNull();
+      });
+
+      test("boundary: exactly endedAt + slack is accepted (inclusive window)", async () => {
+        const { status } = await post(
+          {
+            pings: [
+              makeGpsPingInput({
+                vehicleId,
+                tripId: completedTripId,
+                timestamp: "2026-02-15T10:05:00Z",
+              }),
+            ],
+          },
+          UserRole.DRIVER,
+          driverUserId,
+        );
+        expect(status).toBe(202);
+      });
+
+      test("a CANCELLED trip → 403 even for a plausible fix (no bounded window — the recorded judgment call)", async () => {
+        const driver = await prisma.driver.findFirstOrThrow({
+          where: { userId: driverUserId },
+        });
+        const cancelled = await seedTrip(prisma, {
+          vehicleId,
+          driverId: driver.id,
+          createdById: adminId,
+          status: TripStatus.CANCELLED,
+          startedAt,
+        });
+        const { status } = await post(
+          {
+            pings: [
+              makeGpsPingInput({
+                vehicleId,
+                tripId: cancelled.id,
+                timestamp: "2026-02-15T09:00:00Z",
+              }),
+            ],
+          },
+          UserRole.DRIVER,
+          driverUserId,
+        );
+        expect(status).toBe(403);
+        expect(lastJob).toBeNull();
+      });
+    });
+
+    test("a full-cap 1000-ping batch parses and is accepted → 202 (parser limit bound to BATCH_MAX)", async () => {
+      // ~150–230 KB of JSON — over body-parser's ~100 KB default. Passing here
+      // pins the parser-vs-batch-cap consistency fix (main.ts json limit 1mb).
+      const pings = Array.from({ length: 1000 }, (_, i) =>
+        makeGpsPingInput({
+          vehicleId,
+          tripId,
+          timestamp: new Date(Date.parse("2026-02-15T08:00:00Z") + i * 1000).toISOString(),
+        }),
+      );
+      const { status, json } = await post({ pings }, UserRole.DRIVER, driverUserId);
+      expect(status).toBe(202);
+      expect(json).toEqual({ accepted: 1000, jobId: "job_fake_1" });
     });
   });
 });

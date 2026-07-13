@@ -24,9 +24,16 @@ import {
 } from "./src/api";
 import { authClient } from "./src/auth";
 import { fuelLogPayload, previewTotalCostPaisa } from "./src/fuel";
+import {
+  dismissBackgroundGpsOffer,
+  openBatterySettings,
+  requestBackgroundGps,
+  shouldOfferBackgroundGps,
+} from "./src/gps-onboarding";
 import { reconcileTripGps, startTripGps, stopTripGps } from "./src/gps-task";
 import { formatEtaLabel, type RoutePreviewResult } from "./src/routing";
 import { consumeSessionExpired } from "./src/session-expired";
+import { startSync } from "./src/sync-runtime";
 import { TripMap } from "./src/trip-map";
 import {
   isStartable,
@@ -100,6 +107,13 @@ function TabButton({
 function HomeScreen({ email, role }: { email: string; role?: string | null }) {
   const [screen, setScreen] = useState<"requests" | "trips" | "fuel">("trips");
 
+  // Wire the SyncManager when the signed-in shell mounts (idempotent — D5,
+  // ADR-0035 c2/c3): NetInfo + AppState + tick triggers, plus an immediate
+  // sweep of anything buffered from before this session. No setState here.
+  useEffect(() => {
+    startSync();
+  }, []);
+
   return (
     <View style={styles.screen}>
       <Text style={styles.title}>FleetCo Driver</Text>
@@ -134,9 +148,48 @@ function TripScreen() {
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [gpsNote, setGpsNote] = useState<string | null>(null);
+  // The D5 background-GPS onboarding card (ADR-0035 c1): "offer" asks for
+  // "Allow all the time", "battery" points at battery optimization after a
+  // grant. null = nothing to show (granted, dismissed, or still checking).
+  const [onboarding, setOnboarding] = useState<"offer" | "battery" | null>(null);
   // Which trip's order-detail view is open (ADR-0047 W7) — null = the list. A
   // driver opens an accepted/active trip's detail to Navigate to the pins.
   const [detailId, setDetailId] = useState<string | null>(null);
+
+  // Same promise-continuation pattern as the trips load below (the expo-SDK56
+  // react-hooks rules ban setState-in-effect-body).
+  useEffect(() => {
+    let active = true;
+    shouldOfferBackgroundGps()
+      .then((offer) => {
+        if (active && offer) setOnboarding("offer");
+      })
+      .catch(() => {
+        // no card is always a safe outcome
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // The ladder: foreground → background ("Allow all the time") → the battery
+  // pointer. Any outcome short of a background grant sets the dismissed flag
+  // (asking again would nag — the OS routes repeat asks to settings anyway)
+  // and leaves an honest note about what capture will do instead.
+  const runOnboarding = useCallback(async () => {
+    const result = await requestBackgroundGps();
+    if (result === "background") {
+      setOnboarding("battery");
+    } else {
+      await dismissBackgroundGpsOffer();
+      setOnboarding(null);
+      setGpsNote(
+        result === "denied"
+          ? "GPS capture is off — location access was not allowed."
+          : "GPS will record only while the app is open on screen.",
+      );
+    }
+  }, []);
 
   // Initial load on mount: the fetch + setState live in the promise continuation
   // (never synchronously in the effect body), and the `active` flag drops a late
@@ -198,9 +251,14 @@ function TripScreen() {
             setGpsNote(
               "Trip started. GPS capture needs the dev build (not Expo Go) — see dev-setup.md.",
             );
+          } else if (gps === "started-foreground") {
+            setGpsNote(
+              "Trip started. GPS records only while the app is open — allow “all the time” location for background recording.",
+            );
           }
-          // "started" is the silent happy path — the app is visibly open and
-          // capturing (ADR-0035 c8's foreground-only D4 window).
+          // "started-background" is the silent happy path — the foreground-
+          // service notification is the honest signal capture is running
+          // (ADR-0035 c1/c8, the D5 background window).
         }
         setTrips(await listMyTrips());
       } catch {
@@ -251,6 +309,43 @@ function TripScreen() {
     <View style={styles.subScreen}>
       {error ? <Text style={styles.error}>{error}</Text> : null}
       {gpsNote ? <Text style={styles.empty}>{gpsNote}</Text> : null}
+
+      {onboarding === "offer" ? (
+        <View style={styles.onboardingCard}>
+          <Text style={styles.onboardingTitle}>Record trips in the background?</Text>
+          <Text style={styles.onboardingBody}>
+            Allow location {"“"}all the time{"”"} so the route keeps recording while
+            the phone is in your pocket or the screen is off. The office then sees the truck
+            move even when the app is closed.
+          </Text>
+          <View style={styles.onboardingActions}>
+            <Button title="Allow background GPS" onPress={() => void runOnboarding()} />
+            <Button
+              title="Not now"
+              onPress={() => {
+                void dismissBackgroundGpsOffer();
+                setOnboarding(null);
+              }}
+            />
+          </View>
+        </View>
+      ) : null}
+
+      {onboarding === "battery" ? (
+        <View style={styles.onboardingCard}>
+          <Text style={styles.onboardingTitle}>One more step: battery settings</Text>
+          <Text style={styles.onboardingBody}>
+            Many phones (Xiaomi, Oppo, Vivo and similar) stop background GPS to save
+            battery. In the app{"’"}s settings, set Battery to {"“"}Unrestricted
+            {"”"} (or turn off battery optimization) so recording is not killed
+            mid-trip.
+          </Text>
+          <View style={styles.onboardingActions}>
+            <Button title="Open settings" onPress={() => void openBatterySettings()} />
+            <Button title="Done" onPress={() => setOnboarding(null)} />
+          </View>
+        </View>
+      ) : null}
 
       {trips === null ? (
         <ActivityIndicator accessibilityLabel="Loading trips" style={styles.loading} />
@@ -1151,6 +1246,26 @@ const styles = StyleSheet.create({
   totalValue: {
     fontSize: 18,
     fontWeight: "600",
+  },
+  onboardingCard: {
+    borderWidth: 1,
+    borderColor: "#1f6feb",
+    backgroundColor: "#eef4ff",
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 10,
+    gap: 8,
+  },
+  onboardingTitle: {
+    fontSize: 15,
+    fontWeight: "600",
+  },
+  onboardingBody: {
+    fontSize: 13,
+    color: "#444",
+  },
+  onboardingActions: {
+    gap: 4,
   },
   success: {
     color: "#0a7d33",

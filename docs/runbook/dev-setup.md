@@ -260,6 +260,39 @@ EXPO_PUBLIC_API_URL=http://10.0.2.2:3001 pnpm start
 (`npx expo run:android` wraps prebuild + Gradle + install + Metro in one command once
 the toolchain exists — the daily-driver shortcut for the explicit steps above.)
 
+**Background-GPS (D5) testing notes — executed truth from the 2026-07-11 E2E:**
+
+- Grant the runtime permissions headlessly when the onboarding ladder is not what
+  you are testing: `adb shell pm grant com.fleetco.driver
+  android.permission.ACCESS_BACKGROUND_LOCATION` works on API 35 (verify with
+  `dumpsys package com.fleetco.driver | grep BACKGROUND`), and
+  `POST_NOTIFICATIONS` is a runtime permission on API 33+ — without it the
+  foreground-service notification is silently suppressed while the service runs.
+- The FGS is verified with `adb shell dumpsys activity services com.fleetco.driver
+  | grep isForeground` (expect `isForeground=true` with the
+  `fleetco-gps-capture` notification channel), not by eyeballing the shade.
+- `adb emu geo fix <lon> <lat>` silently stops taking effect while the emulator
+  screen is OFF (the fused provider then repeats the last position, and
+  `distanceInterval` rightly suppresses stationary captures). Keep the screen on
+  and background the app with HOME for background-capture tests; re-probe with
+  `dumpsys location | grep 'last location'` when in doubt.
+- Offline scenarios (svc wifi/data disable) CANNOT run against a Metro-served
+  dev APK — killing the emulated NIC also severs Metro and destabilizes the dev
+  runtime (reconnect churn, process replacement). Build a self-contained APK
+  first: set `debuggableVariants = []` in the `react {}` block of the GENERATED
+  `android/app/build.gradle` (gitignored; re-apply after any `prebuild --clean`)
+  and rebuild `assembleDebug` with `EXPO_PUBLIC_API_URL` exported — the debug
+  variant then embeds the bundle while keeping cleartext-HTTP and the debug
+  signature. A plain `assembleRelease` is self-contained too but BLOCKS the
+  cleartext `http://10.0.2.2:3001` API (release manifests drop
+  `usesCleartextTraffic`), so its trips/API calls fail — use the bundled-debug
+  recipe instead.
+- Before E2E-ing a server-side change, confirm the dev API actually runs it: a
+  long-lived `node dist/main.js` serves the LAST BUILD, not the working tree
+  (`ps -o lstart -p $(lsof -tnP -iTCP:3001 -sTCP:LISTEN)` vs the commit time;
+  rebuild with `pnpm build` and restart when stale). The D5 E2E lost a cycle to
+  a 12-hour-stale dist serving the pre-D5 ingest predicate.
+
 **Release builds / signing:** a release keystore is a Tier-1 operator secret
 (ADR-0013) — generated and held by the operator (`keytool -genkeypair …`), never
 created by an agent, never committed. Wire it in only when a real driver-device

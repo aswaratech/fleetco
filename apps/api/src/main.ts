@@ -83,7 +83,14 @@ async function bootstrap(): Promise<void> {
   // Re-enable body parsing for non-/auth routes. Nest's request pipeline
   // (DTOs, ValidationPipe, controllers reading req.body) expects parsed
   // bodies. Order matters: this MUST come after the better-auth mount.
-  app.useBodyParser("json");
+  //
+  // The json limit is BOUND to the telematics batch contract: IngestBatchSchema
+  // caps a batch at 1000 pings (BATCH_MAX, ADR-0029), which serializes to
+  // ~150–230 KB — over body-parser's ~100 KB default, so an offline-outbox
+  // drain at the ratified cap would 413 before validation ever ran (caught by
+  // the D5 recon, 2026-07-11). 1mb covers the cap with margin; if BATCH_MAX
+  // ever grows, grow this with it.
+  app.useBodyParser("json", { limit: "1mb" });
   app.useBodyParser("urlencoded", { extended: true });
 
   await app.listen(env.PORT);

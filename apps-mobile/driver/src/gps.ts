@@ -1,8 +1,10 @@
-// D4 foreground GPS capture — the PURE half (ADR-0035 c1; resumed 2026-07-10).
-// Everything jest touches lives here: wire-ping construction from a location
-// fix, batch chunking, and the flush decision. The native shell (task
-// definition, start/stop, POST glue) is src/gps-task.ts, which tests never
-// import — the ADR-0033 c4 binary-free gate stays native-free.
+// GPS capture — the PURE half (ADR-0035 c1, D4; reshaped by D5). Wire-ping
+// construction from a location fix and the capture-cadence constants. The
+// native shell (task definition, start/stop, outbox writes) is
+// src/gps-task.ts, which tests never import — the ADR-0033 c4 binary-free
+// gate stays native-free. D4's in-JS buffer + flush-decision helpers lived
+// here too; D5 removed them — every captured fix now goes straight to the
+// encrypted outbox and the SyncManager (src/sync.ts) owns all delivery.
 
 // Hand-mirrored wire shape of the API's PingSchema (the ADR-0033 c3 recorded
 // hand-mirror cost — apps/api/src/modules/telematics/telematics.schemas.ts is
@@ -41,22 +43,19 @@ export interface FixLike {
   timestamp: number; // milliseconds since epoch
 }
 
-// PROVISIONAL capture/flush numbers. ADR-0035 ratifies the MECHANICS and
+// PROVISIONAL capture numbers. ADR-0035 ratifies the MECHANICS and
 // deliberately pins no numbers — these are the implementing slice's
 // documented provisionals (the owner-level-number pattern: the GPS-retention
-// window, the due-soon windows), tuned with pilot data later:
-//   - a fix at most every CAPTURE_INTERVAL_MS, or every CAPTURE_DISTANCE_M of
-//     travel, whichever the OS honors first;
-//   - flush at FLUSH_MAX_PINGS buffered fixes or FLUSH_MAX_INTERVAL_MS since
-//     the last flush, whichever comes first. The 60s interval cap keeps an
-//     on-trip producer comfortably inside the server's 120s freshness-SLI
-//     bound (TELEMATICS_FRESH_SECONDS, apps/api/src/common/sli.ts).
+// window, the due-soon windows), tuned with pilot data later: a fix at most
+// every CAPTURE_INTERVAL_MS, or every CAPTURE_DISTANCE_M of travel, whichever
+// the OS honors first. Delivery cadence is the SyncManager's (src/sync.ts:
+// SYNC_TICK_MS bounds latency inside the server's 120s freshness-SLI window).
 export const CAPTURE_INTERVAL_MS = 15_000;
 export const CAPTURE_DISTANCE_M = 25;
-export const FLUSH_MAX_PINGS = 4;
-export const FLUSH_MAX_INTERVAL_MS = 60_000;
 
-// The server's IngestBatchSchema cap (batch max 1000) — mirrored, not imported.
+// The server's IngestBatchSchema cap (batch max 1000) — mirrored, not
+// imported. The drain chunk (src/sync.ts DRAIN_BATCH) must stay under it;
+// a cross-constant test pins that.
 export const BATCH_MAX = 1000;
 
 // Map a device fix onto the wire shape. Out-of-range rider values become null
@@ -81,22 +80,3 @@ export function pingFromFix(fix: FixLike, ref: ActiveTripRef): WirePing {
   };
 }
 
-// Split a drained buffer into server-acceptable batches (≤ BATCH_MAX each).
-// In practice a D4 flush is a handful of fixes; the chunking exists so a
-// pathological backlog can never 400 on the batch cap.
-export function chunkPings(pings: readonly WirePing[], max: number = BATCH_MAX): WirePing[][] {
-  const chunks: WirePing[][] = [];
-  for (let i = 0; i < pings.length; i += max) {
-    chunks.push(pings.slice(i, i + max));
-  }
-  return chunks;
-}
-
-// The flush decision: nothing buffered → never; otherwise on the count
-// threshold or the interval cap, whichever trips first.
-export function shouldFlush(bufferedCount: number, msSinceLastFlush: number): boolean {
-  if (bufferedCount <= 0) {
-    return false;
-  }
-  return bufferedCount >= FLUSH_MAX_PINGS || msSinceLastFlush >= FLUSH_MAX_INTERVAL_MS;
-}
