@@ -1,7 +1,7 @@
 import { getQueueToken } from "@nestjs/bullmq";
 import { BadRequestException, type INestApplication } from "@nestjs/common";
 import { Test } from "@nestjs/testing";
-import { UserRole } from "@prisma/client";
+import { TripStatus, UserRole } from "@prisma/client";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
@@ -22,7 +22,7 @@ import { GPS_INGEST_QUEUE, TelematicsService } from "../src/modules/telematics/t
 import { resetDb } from "./db";
 import { seedGeofence } from "./fixtures/geofence";
 import { seedGpsPing } from "./fixtures/gps-ping";
-import { seedUser, seedVehicle } from "./fixtures/trip";
+import { seedDriver, seedTrip, seedUser, seedVehicle } from "./fixtures/trip";
 
 // ───────────────────────────────────────────────────────────────────────────
 // Part 1 — schema / pipe layer (no server). Pins the read-query contracts the
@@ -184,8 +184,13 @@ describe("GeofenceStatusQuerySchema (geofence check, pipe layer)", () => {
 // per-route @RequirePermission decorations enforce the split end-to-end:
 //
 //   • gps:read-raw   (…/pings)           → ADMIN only      (403 for OFFICE_STAFF)
-//   • gps:read-derived (…/location,       → ADMIN + OFFICE_STAFF
-//                       …/geofence-status)
+//   • gps:read-derived (…/location,       → ADMIN + OFFICE_STAFF; a DRIVER (D6)
+//     …/geofence-status, …/positions/latest)  reads ONLY their own vehicle's
+//                                            per-vehicle status and is 403 on
+//                                            the fleet-wide positions route.
+//                                            Part 2 pins the UNLINKED-driver
+//                                            fail-closed 403s; Part 4 pins the
+//                                            LINKED-driver own-vehicle matrix.
 //   • anonymous → 401 from AuthGuard on every route (the 401 ≠ 403 contract)
 //
 // A REAL PrismaService serves the read handlers; the 200 cases use a
@@ -203,14 +208,19 @@ const AUTH_STUB = {
     getSession: async ({ headers }: { headers: Headers }) => {
       const role = headers.get("x-test-role");
       if (role === null) return null;
+      // `x-test-user` drives the session's user id (the rbac.matrix idiom) so a
+      // D6 own-vehicle test (Part 4) can point the session at a real seeded
+      // Driver login; it defaults to `user_test` (no Driver row) for the
+      // unlinked fail-closed cases in Part 2.
+      const userId = headers.get("x-test-user") ?? "user_test";
       return {
         session: {
           id: "sess_test",
           token: "tok_test",
-          userId: "user_test",
+          userId,
           expiresAt: new Date(Date.now() + 60_000),
         },
-        user: { id: "user_test", email: "user@fleetco.test", name: "Test", role },
+        user: { id: userId, email: "user@fleetco.test", name: "Test", role },
       };
     },
   },
@@ -311,6 +321,10 @@ describe("Telematics read RBAC (gps:read-raw / gps:read-derived, ADR-0029 T5)", 
     expect(await status(LOCATION)).toBe(401);
   });
 
+  test("derived location: DRIVER with no linked Driver row → 403 fail-closed (D6 own-vehicle predicate)", async () => {
+    expect(await status(LOCATION, UserRole.DRIVER)).toBe(403);
+  });
+
   // ── gps:read-derived — fleet-wide latest positions (ADR-0042 M7) ──
 
   test("latest positions: ADMIN → 200 with a { positions: [...] } body", async () => {
@@ -326,7 +340,10 @@ describe("Telematics read RBAC (gps:read-raw / gps:read-derived, ADR-0029 T5)", 
     expect(await status(POSITIONS, UserRole.OFFICE_STAFF)).toBe(200);
   });
 
-  test("latest positions: DRIVER → 403 (gps:read-derived stays deferred until D6)", async () => {
+  test("latest positions: DRIVER → 403 (D6: a driver never reads the fleet, assertCanReadFleetPositions)", async () => {
+    // The cap gate now PASSES (DRIVER holds gps:read-derived as of D6), but the
+    // fleet-wide route is ADMIN + OFFICE_STAFF only — a driver reads their own
+    // vehicle's status, not the whole fleet's live positions.
     expect(await status(POSITIONS, UserRole.DRIVER)).toBe(403);
   });
 
@@ -344,7 +361,10 @@ describe("Telematics read RBAC (gps:read-raw / gps:read-derived, ADR-0029 T5)", 
     expect(await status(GEOFENCE, UserRole.OFFICE_STAFF)).toBe(200);
   });
 
-  test("derived geofence-status: DRIVER (reserved, inert) → 403", async () => {
+  test("derived geofence-status: DRIVER with no linked Driver row → 403 fail-closed (D6 own-vehicle predicate)", async () => {
+    // Post-D6 the cap gate passes; the own-vehicle predicate then fails closed
+    // in resolveOwnDriverId because `user_test` has no Driver row (the D2
+    // posture). Part 4 pins a LINKED driver reaching 200 for their own vehicle.
     expect(await status(GEOFENCE, UserRole.DRIVER)).toBe(403);
   });
 
@@ -367,7 +387,10 @@ describe("Telematics read RBAC (gps:read-raw / gps:read-derived, ADR-0029 T5)", 
     expect(await status(GEOFENCE_BY_ID, UserRole.OFFICE_STAFF)).toBe(404);
   });
 
-  test("geofence-status by geofenceId: DRIVER (reserved, inert) → 403 (gate denies before the handler)", async () => {
+  test("geofence-status by geofenceId: DRIVER with no linked Driver row → 403 (own-vehicle predicate, before the query is parsed)", async () => {
+    // The own-vehicle predicate runs BEFORE toGeofenceQuery, so an unlinked
+    // driver 403s regardless of the (stored/circle/polygon) mode — the derived
+    // read is scoped by vehicle, not by fence-query shape.
     expect(await status(GEOFENCE_BY_ID, UserRole.DRIVER)).toBe(403);
   });
 
@@ -461,5 +484,144 @@ describe("Telematics geofence-status by stored fence (integration, ADR-0030 G5)"
       { headers: { "x-test-role": UserRole.ADMIN } },
     );
     expect(res.status).toBe(404);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// Part 4 — the D6 own-vehicle derived-read predicate (DRIVER, real Postgres
+// rows). gps:read-derived is now held by DRIVER, so these pin the SERVICE
+// predicate that makes the grant safe — the read twin of the Part-3 D4 ingest
+// matrix (telematics.controller.test.ts): a driver reads the derived status of
+// ONLY the vehicle on their own IN_PROGRESS trip
+// (TelematicsService.assertDriverCanReadVehicle), the fleet-wide
+// /positions/latest is 403 for a driver, and any other vehicle is 403. The
+// session's user id rides x-test-user so it points at the seeded driver login.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe("Telematics D6 own-vehicle derived read (DRIVER, real rows)", () => {
+  let app: INestApplication;
+  let prisma: PrismaService;
+  let baseUrl: string;
+  let driverUserId: string;
+  let ownVehicleId: string;
+  let completedVehicleId: string;
+  let otherVehicleId: string;
+
+  beforeAll(async () => {
+    const moduleRef = await Test.createTestingModule({
+      controllers: [TelematicsController],
+      providers: [
+        TelematicsService,
+        GeofencesService,
+        DriverScopeService,
+        PrismaService,
+        { provide: getQueueToken(GPS_INGEST_QUEUE), useValue: fakeQueue },
+        AuthGuard,
+        RolesGuard,
+        { provide: AUTH, useValue: AUTH_STUB },
+        { provide: Logger, useValue: { log: () => undefined } },
+      ],
+    }).compile();
+
+    app = moduleRef.createNestApplication({ logger: false });
+    await app.listen(0);
+    prisma = moduleRef.get(PrismaService);
+
+    const address: AddressInfo | string | null = app.getHttpServer().address();
+    if (typeof address !== "object" || address === null) {
+      throw new Error("expected the test server to bind a TCP port");
+    }
+    baseUrl = `http://127.0.0.1:${address.port}`;
+
+    // A linked driver with an IN_PROGRESS trip on ownVehicle (and a fix INSIDE
+    // the Kathmandu circle used below); a COMPLETED trip on completedVehicle (to
+    // prove the on-trip-only rule closes for a non-IN_PROGRESS trip); and
+    // otherVehicle the driver has no trip on at all.
+    await resetDb(prisma);
+    const adminId = await seedUser(prisma, UserRole.ADMIN);
+    driverUserId = await seedUser(prisma, UserRole.DRIVER);
+    const driver = await seedDriver(prisma, adminId, { userId: driverUserId });
+    ownVehicleId = (await seedVehicle(prisma, adminId)).id;
+    completedVehicleId = (
+      await seedVehicle(prisma, adminId, { registrationNumber: "BA-8-PA-8888" })
+    ).id;
+    otherVehicleId = (await seedVehicle(prisma, adminId, { registrationNumber: "BA-9-PA-9999" }))
+      .id;
+    await seedTrip(prisma, {
+      vehicleId: ownVehicleId,
+      driverId: driver.id,
+      createdById: adminId,
+      status: TripStatus.IN_PROGRESS,
+      startedAt: new Date(),
+    });
+    await seedTrip(prisma, {
+      vehicleId: completedVehicleId,
+      driverId: driver.id,
+      createdById: adminId,
+      status: TripStatus.COMPLETED,
+      startedAt: new Date(Date.now() - 3_600_000),
+      endedAt: new Date(),
+    });
+    await seedGpsPing(prisma, {
+      vehicleId: ownVehicleId,
+      createdById: adminId,
+      latitude: KTM_LAT,
+      longitude: KTM_LON,
+    });
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  // A circle centred on the seeded fix, so an in-circle vehicle reads inside:true.
+  const CIRCLE = `centerLatitude=${KTM_LAT}&centerLongitude=${KTM_LON}&radiusMeters=100`;
+
+  // GET `path` as the LINKED driver session (role + the seeded user id).
+  async function driverGet(path: string): Promise<Response> {
+    return fetch(`${baseUrl}${path}`, {
+      headers: { "x-test-role": UserRole.DRIVER, "x-test-user": driverUserId },
+    });
+  }
+
+  test("own vehicle (its IN_PROGRESS trip) geofence-status → 200, inside:true for a fix in the circle", async () => {
+    const res = await driverGet(
+      `/api/v1/telematics/vehicles/${ownVehicleId}/geofence-status?${CIRCLE}`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { inside: boolean | null; latestFixAt: string | null };
+    expect(body.inside).toBe(true);
+    expect(body.latestFixAt).not.toBeNull();
+  });
+
+  test("own vehicle location → 200 with the latest fix", async () => {
+    const res = await driverGet(`/api/v1/telematics/vehicles/${ownVehicleId}/location`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { fix: unknown };
+    expect(body.fix).not.toBeNull();
+  });
+
+  test("a DIFFERENT vehicle (no own active trip) geofence-status → 403 (existence-hiding)", async () => {
+    const res = await driverGet(
+      `/api/v1/telematics/vehicles/${otherVehicleId}/geofence-status?${CIRCLE}`,
+    );
+    expect(res.status).toBe(403);
+  });
+
+  test("a DIFFERENT vehicle location → 403", async () => {
+    const res = await driverGet(`/api/v1/telematics/vehicles/${otherVehicleId}/location`);
+    expect(res.status).toBe(403);
+  });
+
+  test("a vehicle whose own trip is COMPLETED (not IN_PROGRESS) → 403 (derived read is on-trip-only, mirroring ingest)", async () => {
+    const res = await driverGet(
+      `/api/v1/telematics/vehicles/${completedVehicleId}/geofence-status?${CIRCLE}`,
+    );
+    expect(res.status).toBe(403);
+  });
+
+  test("the fleet-wide /positions/latest → 403 for a linked driver (never the fleet map)", async () => {
+    const res = await driverGet("/api/v1/telematics/positions/latest");
+    expect(res.status).toBe(403);
   });
 });

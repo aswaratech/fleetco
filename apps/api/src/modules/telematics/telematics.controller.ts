@@ -265,20 +265,27 @@ export class TelematicsController {
 
   /**
    * DERIVED live location (ADR-0027 c7) — `gps:read-derived`, ADMIN +
-   * OFFICE_STAFF. The single latest fix for the live-location map (NOT the
-   * trail). `fix` is null when the vehicle has no ping.
+   * OFFICE_STAFF, and (D6) a DRIVER for their OWN vehicle only
+   * (`assertDriverCanReadVehicle`). The single latest fix for the live-location
+   * map (NOT the trail). `fix` is null when the vehicle has no ping.
    */
   @Get("vehicles/:vehicleId/location")
   @RequirePermission("gps:read-derived")
-  async latestLocation(@Param("vehicleId") vehicleId: string): Promise<VehicleLocationResponse> {
+  async latestLocation(
+    @Param("vehicleId") vehicleId: string,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<VehicleLocationResponse> {
+    await this.telematics.assertDriverCanReadVehicle(this.actorOf(request), vehicleId);
     const fix = await this.telematics.latestLocation(vehicleId);
     return { vehicleId, fix };
   }
 
   /**
    * DERIVED fleet-wide latest positions (ADR-0042 c10, M7) — the live map's
-   * ~20 s poll target. `gps:read-derived`, ADMIN + OFFICE_STAFF: the same
-   * derived tier as the per-vehicle `/location` above, widened to one latest
+   * ~20 s poll target. `gps:read-derived`, ADMIN + OFFICE_STAFF ONLY — a DRIVER
+   * holds the cap for their own vehicle's status, NOT the fleet, so this route
+   * is 403 for a DRIVER (`assertCanReadFleetPositions`, D6). The same derived
+   * tier as the per-vehicle `/location` above, widened to one latest
    * fix per non-retired vehicle — still never a trail (ADR-0027 c6). Vehicles
    * without a fix appear with `fix: null` so the map's untracked list can
    * render them; `fixAgeSeconds` is server-computed so staleness rendering
@@ -290,13 +297,18 @@ export class TelematicsController {
    */
   @Get("positions/latest")
   @RequirePermission("gps:read-derived")
-  async latestPositions(): Promise<{ positions: LatestPosition[] }> {
+  async latestPositions(
+    @Req() request: AuthenticatedRequest,
+  ): Promise<{ positions: LatestPosition[] }> {
+    this.telematics.assertCanReadFleetPositions(this.actorOf(request));
     return { positions: await this.telematics.latestPositions() };
   }
 
   /**
    * DERIVED geofence status (ADR-0027 c6 / ADR-0029 c13 / ADR-0030 G5) —
-   * `gps:read-derived`, ADMIN + OFFICE_STAFF. The FIRST PostGIS geofencing:
+   * `gps:read-derived`, ADMIN + OFFICE_STAFF, and (D6) a DRIVER for their OWN
+   * vehicle only (`assertDriverCanReadVehicle`) — the driver arrival-status
+   * read. The FIRST PostGIS geofencing:
    * classify the vehicle's latest fix as inside/outside a geofence supplied as
    * a circle (ST_DWithin), a polygon (ST_Contains), or a STORED fence by
    * `geofenceId` (the service loads it and 404s a missing id) — see
@@ -313,7 +325,9 @@ export class TelematicsController {
   async geofenceStatus(
     @Param("vehicleId") vehicleId: string,
     @Query(new ZodValidationPipe(GeofenceStatusQuerySchema)) query: GeofenceStatusQuery,
+    @Req() request: AuthenticatedRequest,
   ): Promise<GeofenceStatusResponse> {
+    await this.telematics.assertDriverCanReadVehicle(this.actorOf(request), vehicleId);
     const geofence = toGeofenceQuery(query);
     const { inside, latestFixAt, resolvedGeofence } = await this.telematics.geofenceStatus(
       vehicleId,

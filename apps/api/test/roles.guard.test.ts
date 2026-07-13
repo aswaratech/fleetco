@@ -160,12 +160,13 @@ describe("RolesGuard (unit: stubbed Reflector + mock ExecutionContext)", () => {
     );
   });
 
-  test("DRIVER lacks the derived-GPS capability (deferred to D4–D6) → ForbiddenException", () => {
-    // DRIVER is live as of D2 but holds only trips:*/fuel-logs:* — the GPS caps
-    // are deferred until their row-scopes land (ADR-0034 c5).
-    expect(() => evaluate({ permission: "gps:read-derived" }, { role: UserRole.DRIVER })).toThrow(
-      ForbiddenException,
-    );
+  test("DRIVER holds the derived-GPS capability as of D6 (own-vehicle scope at the service layer) → true", () => {
+    // DRIVER holds gps:read-derived as of D6 (ADR-0035): the capability-level
+    // guard PASSES; the OWN-vehicle row-scope is enforced in TelematicsService
+    // (assertDriverCanReadVehicle — the vehicle on the driver's IN_PROGRESS
+    // trip, else 403), not here. gps:read-raw stays off the driver (checked
+    // elsewhere), so the raw trace is still ADMIN-only.
+    expect(evaluate({ permission: "gps:read-derived" }, { role: UserRole.DRIVER })).toBe(true);
   });
 
   test("an unexpected session role fails closed — denied a sensitive capability", () => {

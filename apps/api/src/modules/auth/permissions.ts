@@ -224,10 +224,19 @@ export const ROLE_CAPABILITY_MAP: Record<UserRole, ReadonlySet<Capability>> = {
   //      (DriverScopeService) with status IN_PROGRESS, and each ping's
   //      `vehicleId` must equal that trip's vehicle; ANY violation rejects the
   //      WHOLE batch 403, fail-closed, before anything is enqueued.
-  //      `gps:read-derived` — the last cap of ADR-0034 c6's lean set — stays
-  //      DEFERRED to D6: unscoped it would expose every vehicle's derived
-  //      status; its own-vehicle scope is the geofence-context work.
-  [UserRole.DRIVER]: new Set<Capability>(["trips:*", "fuel-logs:*", "gps:ingest"]),
+  //      `gps:read-derived` — the last cap of ADR-0034 c6's lean set — is
+  //      GRANTED as of D6, honoring the same ADR-0034 c5 grant-with-scope rule:
+  //      `TelematicsService.assertDriverCanReadVehicle` scopes a DRIVER to
+  //      their OWN vehicle's derived status (the vehicle on their IN_PROGRESS
+  //      trip), while the fleet-wide `/positions/latest` stays 403 for a DRIVER
+  //      (`assertCanReadFleetPositions`) — so the cap reads a driver's own
+  //      geofence context (D6 arrival status), never the fleet's live map.
+  [UserRole.DRIVER]: new Set<Capability>([
+    "trips:*",
+    "fuel-logs:*",
+    "gps:ingest",
+    "gps:read-derived",
+  ]),
 };
 
 // Does `role` hold `capability`? Exact set-membership against the coarse map

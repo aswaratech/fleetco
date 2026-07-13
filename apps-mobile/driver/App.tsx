@@ -16,12 +16,14 @@ import {
 import {
   acceptTrip,
   ApiError,
+  arrivalStatus,
   createFuelLog,
   listMyTrips,
   patchTrip,
   patchTripMilestone,
   routePreview,
 } from "./src/api";
+import { arrivalState, arrivalStateText, type ArrivalStatus } from "./src/arrival";
 import { authClient } from "./src/auth";
 import { fuelLogPayload, previewTotalCostPaisa } from "./src/fuel";
 import {
@@ -680,6 +682,49 @@ function OrderDetail({
     };
   }, [pickup, dropoff]);
 
+  // D6 arrival status (ADR-0035 D6): while the trip is IN_PROGRESS, poll the
+  // driver's OWN vehicle's derived geofence status against each Site pin so the
+  // view shows "Arrived / Not yet / Location unknown" as the vehicle nears the
+  // site — a GPS-derived hint alongside the manual progress taps. Best-effort:
+  // any failure leaves the state null (renders "Location unknown"), never an
+  // error. IN_PROGRESS-only because the server serves an own-vehicle derived read
+  // only for the driver's active trip (and no fix exists before Start). setState
+  // stays in the promise continuation guarded by `active` (the expo-SDK56 rule).
+  const [pickupArrival, setPickupArrival] = useState<ArrivalStatus | null>(null);
+  const [dropoffArrival, setDropoffArrival] = useState<ArrivalStatus | null>(null);
+  const vehicleId = trip.vehicle.id;
+  const running = trip.status === "IN_PROGRESS";
+  useEffect(() => {
+    if (!running) return;
+    let active = true;
+    const load = () => {
+      if (pickup) {
+        arrivalStatus(vehicleId, pickup)
+          .then((s) => {
+            if (active) setPickupArrival(s);
+          })
+          .catch(() => {
+            if (active) setPickupArrival(null);
+          });
+      }
+      if (dropoff) {
+        arrivalStatus(vehicleId, dropoff)
+          .then((s) => {
+            if (active) setDropoffArrival(s);
+          })
+          .catch(() => {
+            if (active) setDropoffArrival(null);
+          });
+      }
+    };
+    load();
+    const timer = setInterval(load, 30_000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [running, vehicleId, pickup, dropoff]);
+
   // The live progress checklist shows only while the trip is running (ADR-0047
   // c8). offeredAt/acceptedAt were server-stamped earlier; these four are the
   // driver's taps.
@@ -724,6 +769,40 @@ function OrderDetail({
       {pickup ? <Button title="Navigate to pickup" onPress={() => openNavigate(pickup)} /> : null}
       {dropoff ? (
         <Button title="Navigate to drop-off" onPress={() => openNavigate(dropoff)} />
+      ) : null}
+
+      {running && (pickup || dropoff) ? (
+        <View style={styles.progress}>
+          <Text style={styles.progressTitle}>Arrival (from GPS)</Text>
+          {pickup ? (
+            <View style={styles.progressRow}>
+              <Text style={styles.progressPending}>Pickup</Text>
+              <Text
+                style={
+                  arrivalState(pickupArrival) === "arrived"
+                    ? styles.progressDone
+                    : styles.progressPending
+                }
+              >
+                {arrivalStateText(arrivalState(pickupArrival))}
+              </Text>
+            </View>
+          ) : null}
+          {dropoff ? (
+            <View style={styles.progressRow}>
+              <Text style={styles.progressPending}>Drop-off</Text>
+              <Text
+                style={
+                  arrivalState(dropoffArrival) === "arrived"
+                    ? styles.progressDone
+                    : styles.progressPending
+                }
+              >
+                {arrivalStateText(arrivalState(dropoffArrival))}
+              </Text>
+            </View>
+          ) : null}
+        </View>
       ) : null}
 
       <Text style={styles.label}>Consignee</Text>
