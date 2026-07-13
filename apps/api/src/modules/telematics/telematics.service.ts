@@ -2,6 +2,7 @@ import { InjectQueue } from "@nestjs/bullmq";
 import { ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import {
   TripStatus,
+  UserRole,
   type GeofenceType,
   type Prisma,
   type VehicleKind,
@@ -322,6 +323,55 @@ export class TelematicsService {
           continue;
         }
       }
+      throw new ForbiddenException();
+    }
+  }
+
+  /**
+   * The read-side own-vehicle predicate (ADR-0034 c4/c6, D6) — the read twin of
+   * `assertDriverCanIngest`. `gps:read-derived` is held by DRIVER as of D6, and
+   * the two per-vehicle derived reads (`/vehicles/:id/location`,
+   * `/vehicles/:id/geofence-status`) must scope a DRIVER to their OWN vehicle,
+   * else the capability would expose every vehicle's derived status. "Own
+   * vehicle" = the vehicle on one of the driver's own IN_PROGRESS trips: there
+   * is no direct Driver→Vehicle link (the pairing is per-trip), so the check is
+   * a scoped Trip lookup. IN_PROGRESS-only mirrors the ingest predicate's live
+   * path AND is forced by the data — derived status reads the vehicle's latest
+   * GPS fix, and pings exist only for an IN_PROGRESS (or COMPLETED-window) trip,
+   * so before the driver Starts there is nothing to read.
+   *
+   * A non-DRIVER actor returns immediately with no query (ADMIN / OFFICE_STAFF
+   * read any vehicle's derived status, unchanged). An unlinked DRIVER session
+   * throws 403 inside `resolveOwnDriverId` (the D2 fail-closed posture). A
+   * DRIVER whose active trip is not on this vehicle gets a bare 403 — the same
+   * existence-hiding posture `assertDriverCanIngest` uses.
+   */
+  async assertDriverCanReadVehicle(actor: Actor, vehicleId: string): Promise<void> {
+    const ownDriverId = await this.driverScope.resolveOwnDriverId(actor);
+    if (ownDriverId === null) {
+      return;
+    }
+    const ownTrip = await this.prisma.trip.findFirst({
+      where: { driverId: ownDriverId, vehicleId, status: TripStatus.IN_PROGRESS },
+      select: { id: true },
+    });
+    if (!ownTrip) {
+      throw new ForbiddenException();
+    }
+  }
+
+  /**
+   * The fleet-wide derived read (`/positions/latest`, the live-map poll target)
+   * is ADMIN + OFFICE_STAFF only. A DRIVER holds `gps:read-derived` for their
+   * OWN vehicle's status (D6), NOT the whole fleet's live positions — so this
+   * route is 403 for a DRIVER, fail-closed, even though the route-level
+   * capability gate passed (`gps:read-derived` opens all three derived routes at
+   * once; this is the per-route narrowing the parameterized routes get from
+   * `assertDriverCanReadVehicle`). Synchronous — the role alone decides, no DB.
+   * Non-DRIVER actors are a no-op.
+   */
+  assertCanReadFleetPositions(actor: Actor): void {
+    if (actor.role === UserRole.DRIVER) {
       throw new ForbiddenException();
     }
   }

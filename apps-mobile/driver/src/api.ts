@@ -1,3 +1,4 @@
+import { arrivalQuery, type ArrivalStatus, type SitePoint } from "./arrival";
 import { authClient } from "./auth";
 import type { FuelLogPayload } from "./fuel";
 import type { MapPoint, RoutePreviewResult } from "./routing";
@@ -158,6 +159,21 @@ export async function routePreview(
       destination: { lat: destination.latitude, lng: destination.longitude },
     },
   });
+}
+
+// Read the DERIVED geofence "arrival status" of the driver's OWN vehicle against
+// a proximity circle around a Site pin (ADR-0035 D6). GETs the gps:read-derived
+// geofence-status endpoint, which the server scopes to the driver's own vehicle
+// (assertDriverCanReadVehicle: the vehicle on their IN_PROGRESS trip, else 403),
+// so a driver reads only their own arrival status, never the fleet's. Returns
+// { inside, latestFixAt } — `inside` is null when the vehicle has no fix yet. The
+// circle in the URL is the SITE pin (dispatch data the driver already holds), NOT
+// the vehicle's Tier-5 coordinates (the response is a boolean + fix time). The
+// caller (OrderDetail) degrades gracefully on any error (the indicator hides).
+export async function arrivalStatus(vehicleId: string, site: SitePoint): Promise<ArrivalStatus> {
+  const q = arrivalQuery(site);
+  const query = `centerLatitude=${q.centerLatitude}&centerLongitude=${q.centerLongitude}&radiusMeters=${q.radiusMeters}`;
+  return apiFetch<ArrivalStatus>(`/api/v1/telematics/vehicles/${vehicleId}/geofence-status?${query}`);
 }
 
 // Log a fuel fill against one of the driver's own trips (ADR-0034 D2 own-record

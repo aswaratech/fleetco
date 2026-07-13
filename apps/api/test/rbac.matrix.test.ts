@@ -95,7 +95,7 @@ describe("agent capability token (ADR-0043 c1, ticket A5)", () => {
   });
 });
 
-describe("gps:ingest grant (ADR-0035 D4 — granted WITH its own-trip scope)", () => {
+describe("driver GPS grants (ADR-0035 D4 ingest + D6 read-derived, each WITH its scope)", () => {
   test("gps:ingest is ADMIN + DRIVER — not OFFICE_STAFF", () => {
     expect(roleHasCapability(UserRole.ADMIN, "gps:ingest")).toBe(true);
     // The D4 grant (ADR-0034 c5's hard rule): DRIVER holds this ONLY because
@@ -109,10 +109,20 @@ describe("gps:ingest grant (ADR-0035 D4 — granted WITH its own-trip scope)", (
     expect(roleHasCapability(UserRole.OFFICE_STAFF, "gps:ingest")).toBe(false);
   });
 
-  test("gps:read-derived stays OFF DRIVER — the D6 deferral holds", () => {
-    // Unscoped it would expose every vehicle's derived status; its
-    // own-vehicle scope is the geofence-context work (D6, ADR-0033 c8).
-    expect(roleHasCapability(UserRole.DRIVER, "gps:read-derived")).toBe(false);
+  test("gps:read-derived is granted to DRIVER as of D6 — WITH its own-vehicle scope", () => {
+    // The D6 grant (ADR-0034 c5's hard rule, again): DRIVER holds this ONLY
+    // because the same change landed TelematicsService.assertDriverCanReadVehicle
+    // — the own-IN_PROGRESS-trip vehicle predicate (telematics.read.controller
+    // .test.ts pins its 200/403 matrix over real rows) — while the fleet-wide
+    // /positions/latest stays 403 for a DRIVER (assertCanReadFleetPositions).
+    // Route token = "may read derived status"; service predicate = "only your
+    // own vehicle". Both required.
+    expect(roleHasCapability(UserRole.DRIVER, "gps:read-derived")).toBe(true);
+    // The raw trace stays ADMIN-only — D6 does not widen it (ADR-0027 c7).
+    expect(roleHasCapability(UserRole.DRIVER, "gps:read-raw")).toBe(false);
+    // ADMIN + OFFICE_STAFF still hold it on the operational floor, unchanged.
+    expect(roleHasCapability(UserRole.OFFICE_STAFF, "gps:read-derived")).toBe(true);
+    expect(roleHasCapability(UserRole.ADMIN, "gps:read-derived")).toBe(true);
   });
 });
 
