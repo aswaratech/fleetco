@@ -49,6 +49,7 @@ import { JobsController } from "../src/modules/jobs/jobs.controller";
 import { ServiceRecordsController } from "../src/modules/maintenance/service-records.controller";
 import { ServiceSchedulesController } from "../src/modules/maintenance/service-schedules.controller";
 import { ReportsController } from "../src/modules/reports/reports.controller";
+import { RoutingController } from "../src/modules/routing/routing.controller";
 import { TrackersController } from "../src/modules/telematics/trackers.controller";
 import { TripsController } from "../src/modules/trips/trips.controller";
 import { TripsService } from "../src/modules/trips/trips.service";
@@ -169,6 +170,11 @@ const CLASS_TOKEN_TABLE: readonly [string, object, Capability][] = [
   ["CustomersController", CustomersController, "customers:*"],
   ["JobsController", JobsController, "jobs:*"],
   ["TripsController", TripsController, "trips:*"],
+  // ADR-0047 W6: the route-preview endpoint (the dispatch map's polyline + ETA)
+  // rides the dispatch read capability — trips:* — via the composed chain. All
+  // three live roles hold trips:* (dispatch continuity), so the gate's live wall
+  // is authentication; roles.guard.test.ts pins the capability-absent denial.
+  ["RoutingController", RoutingController, "trips:*"],
   ["FuelLogsController", FuelLogsController, "fuel-logs:*"],
   ["ExpenseLogsController", ExpenseLogsController, "expense-logs:*"],
   ["ReportsController", ReportsController, "reports:read"],

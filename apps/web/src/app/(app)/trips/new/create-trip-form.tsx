@@ -19,6 +19,7 @@ import { CreateTripFormSchema, type CreateTripFormValues } from "@/lib/trips-sch
 import { meterIncludesHours, meterIncludesOdometer } from "@/lib/vehicles-schema";
 
 import { TRIP_STATUS_OPTIONS, type VehicleMeterType } from "../types";
+import { TripOrderFields, type SiteOption } from "../trip-order-fields";
 import { createTripAction } from "../actions";
 
 interface CreateTripFormProps {
@@ -30,6 +31,7 @@ interface CreateTripFormProps {
     meterType: VehicleMeterType;
   }[];
   drivers: { id: string; fullName: string; licenseNumber: string }[];
+  sites: SiteOption[];
 }
 
 // Create-trip form (iter 9). The shell at ../new/page.tsx fetches the
@@ -54,7 +56,11 @@ interface CreateTripFormProps {
 // generic submit-error banner. The cross-field rules also run
 // client-side via the schema's superRefine; the banner is the
 // fallback for the API-only error paths.
-export function CreateTripForm({ vehicles, drivers }: CreateTripFormProps): React.ReactElement {
+export function CreateTripForm({
+  vehicles,
+  drivers,
+  sites,
+}: CreateTripFormProps): React.ReactElement {
   const [submitError, setSubmitError] = useState<string | null>(null);
 
   const form = useForm<CreateTripFormValues>({
@@ -74,6 +80,16 @@ export function CreateTripForm({ vehicles, drivers }: CreateTripFormProps): Reac
       endEngineHours: "",
       meterType: "ODOMETER_KM",
       notes: "",
+      // Haulage order (ADR-0047 c3). Empty by default; required at OFFERED.
+      materialType: "",
+      materialNote: "",
+      pickupSiteId: "",
+      dropoffSiteId: "",
+      consigneeName: "",
+      consigneePhone: "",
+      expectedLoadCount: "",
+      specialInstructions: "",
+      docketNumber: "",
     },
   });
 
@@ -306,6 +322,8 @@ export function CreateTripForm({ vehicles, drivers }: CreateTripFormProps): Reac
             />
           </div>
         ) : null}
+
+        <TripOrderFields sites={sites} />
 
         <FormField
           control={form.control}

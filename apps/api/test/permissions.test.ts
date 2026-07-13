@@ -36,3 +36,20 @@ describe("DRIVER capability set (ADR-0034 c5/c6)", () => {
     }
   });
 });
+
+// ADR-0047 c4/c10: the Sites aggregate (reusable pickup/drop-off pins) is gated
+// by a COARSE `sites:*` capability on the shared operational floor — dispatch
+// data entry both live roles do. It is deliberately NOT granted to DRIVER
+// (orders come only from the admin app; a driver never manages sites) and NOT a
+// read/write split (a Site is operational master data, not users:manage-tier
+// configuration the way a geofence boundary is).
+describe("sites:* capability (ADR-0047 c4/c10)", () => {
+  test("ADMIN and OFFICE_STAFF hold sites:* (the shared operational floor)", () => {
+    expect(roleHasCapability(UserRole.ADMIN, "sites:*")).toBe(true);
+    expect(roleHasCapability(UserRole.OFFICE_STAFF, "sites:*")).toBe(true);
+  });
+
+  test("DRIVER does NOT hold sites:* (orders come only from the admin app)", () => {
+    expect(roleHasCapability(UserRole.DRIVER, "sites:*")).toBe(false);
+  });
+});

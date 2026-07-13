@@ -7,7 +7,8 @@ import { HOME, NAV, navForRole, navItemsForRole } from "../src/lib/nav";
  * the §Navigation sidebar (T3), the home quick-links strip, and the ⌘K palette
  * (T7) will all read from. The load-bearing assertions are (a) the flattened
  * groups equal EXACTLY the canonical destination set below (the 15 quick-links
- * destinations + Trackers and Live map from ADR-0042 M4/M9), so no screen
+ * destinations + Trackers and Live map from ADR-0042 M4/M9 + Sites from
+ * ADR-0047 W5), so no screen
  * strands and none sneaks in unpinned, and
  * (b) the role filter is fail-closed for DRIVER (web is admin-facing; DRIVER
  * uses the Expo app). RBAC here is a UI affordance only — the API's
@@ -28,6 +29,7 @@ const QUICK_LINKS_TODAY: readonly { href: string; label: string }[] = [
   { href: "/drivers", label: "Drivers" },
   { href: "/trips", label: "Trips" },
   { href: "/customers", label: "Customers" },
+  { href: "/sites", label: "Sites" },
   { href: "/jobs", label: "Jobs" },
   { href: "/invoices", label: "Invoices" },
   { href: "/fuel-logs", label: "Fuel logs" },
@@ -80,7 +82,7 @@ describe("NAV structure", () => {
 });
 
 describe("navForRole", () => {
-  test("ADMIN sees all five groups and all nineteen items", () => {
+  test("ADMIN sees all five groups and all twenty items", () => {
     const groups = navForRole("ADMIN");
     expect(groups.map((g) => g.id)).toEqual([
       "operations",
@@ -89,16 +91,16 @@ describe("navForRole", () => {
       "reports",
       "logs",
     ]);
-    expect(groups.flatMap((g) => g.items)).toHaveLength(19);
+    expect(groups.flatMap((g) => g.items)).toHaveLength(20);
   });
 
-  test("OFFICE_STAFF sees seventeen items — everything but the two ADMIN-only agent surfaces", () => {
+  test("OFFICE_STAFF sees eighteen items — everything but the two ADMIN-only agent surfaces", () => {
     // The role divergence on the web (ADR-0043 c1/c5: agent:use is
     // ADMIN-only in v1, and the activity ledger rides the same gate). The
     // API is the security boundary; this pins the UI affordance matching it.
     const groups = navForRole("OFFICE_STAFF");
     const items = groups.flatMap((g) => g.items);
-    expect(items).toHaveLength(17);
+    expect(items).toHaveLength(18);
     expect(items.map((i) => i.href)).not.toContain("/chat");
     expect(items.map((i) => i.href)).not.toContain("/agent/activity");
     const adminHrefs = navForRole("ADMIN").flatMap((g) => g.items.map((i) => i.href));
@@ -120,11 +122,11 @@ describe("navForRole", () => {
 });
 
 describe("navItemsForRole", () => {
-  test("prepends HOME for the web roles (ADMIN: 20 = HOME + 19)", () => {
+  test("prepends HOME for the web roles (ADMIN: 21 = HOME + 20)", () => {
     const items = navItemsForRole("ADMIN");
     expect(items[0]).toBe(HOME);
-    expect(items).toHaveLength(20);
-    expect(navItemsForRole("OFFICE_STAFF")).toHaveLength(18);
+    expect(items).toHaveLength(21);
+    expect(navItemsForRole("OFFICE_STAFF")).toHaveLength(19);
   });
 
   test("is empty for DRIVER (HOME is ADMIN/OFFICE only)", () => {

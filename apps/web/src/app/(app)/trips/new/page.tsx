@@ -48,6 +48,18 @@ interface DriversListResponse {
   items: ActiveDriver[];
 }
 
+// Only { id, name } is projected to the client — the Sites list row also carries
+// the Tier-2 site contact (name/phone), which must NOT be serialized into the
+// dispatch form's client props (ADR-0047 c6). fetchSites strips it below.
+interface SiteListRow {
+  id: string;
+  name: string;
+}
+
+interface SitesListResponse {
+  items: SiteListRow[];
+}
+
 async function fetchActiveVehicles(): Promise<ActiveVehicle[]> {
   // Sort by registration so the picker is alphabetically scannable.
   const query = new URLSearchParams({
@@ -71,11 +83,25 @@ async function fetchActiveDrivers(): Promise<ActiveDriver[]> {
   return response.items;
 }
 
+async function fetchSites(): Promise<SiteListRow[]> {
+  // Sites are company master data (no status filter); sort by name for a
+  // scannable picker. Project to { id, name } so no Tier-2 contact reaches the
+  // client (ADR-0047 c6).
+  const query = new URLSearchParams({ sortBy: "name", sortDir: "asc", take: "200" });
+  const response = await apiFetch<SitesListResponse>(`/api/v1/sites?${query.toString()}`);
+  return response.items.map((s) => ({ id: s.id, name: s.name }));
+}
+
 export default async function NewTripPage(): Promise<React.ReactElement> {
   let vehicles: ActiveVehicle[];
   let drivers: ActiveDriver[];
+  let sites: SiteListRow[];
   try {
-    [vehicles, drivers] = await Promise.all([fetchActiveVehicles(), fetchActiveDrivers()]);
+    [vehicles, drivers, sites] = await Promise.all([
+      fetchActiveVehicles(),
+      fetchActiveDrivers(),
+      fetchSites(),
+    ]);
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) {
       redirect("/login");
@@ -132,7 +158,7 @@ export default async function NewTripPage(): Promise<React.ReactElement> {
               ) : null}
             </div>
           ) : (
-            <CreateTripForm vehicles={vehicles} drivers={drivers} />
+            <CreateTripForm vehicles={vehicles} drivers={drivers} sites={sites} />
           )}
         </section>
       </div>

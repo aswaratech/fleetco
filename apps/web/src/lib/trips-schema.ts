@@ -19,7 +19,27 @@ import { z } from "zod";
 // .regex(...)` keeps validation honest. Empty string means "not set"
 // for the optional / nullable fields.
 
-const TRIP_STATUSES = ["PLANNED", "IN_PROGRESS", "COMPLETED", "CANCELLED"] as const;
+const TRIP_STATUSES = [
+  "PLANNED",
+  "OFFERED",
+  "ACCEPTED",
+  "IN_PROGRESS",
+  "COMPLETED",
+  "CANCELLED",
+] as const;
+
+// Haulage material (ADR-0047 c5). Mirrors the API's MaterialType Prisma enum and
+// the web MATERIAL_TYPE_OPTIONS in trips/types.ts — all three move together.
+const MATERIAL_TYPES = [
+  "SAND",
+  "AGGREGATE",
+  "GRAVEL",
+  "STONE",
+  "BOULDER",
+  "SOIL",
+  "BRICKS",
+  "OTHER",
+] as const;
 // Meter type (ADR-0036) — mirrors the API's MeterType. A derived form field,
 // synced from the selected vehicle, that drives which reading(s) the cross-field
 // rule requires. Never sent on the wire (the trip body has no meterType).
@@ -51,6 +71,13 @@ const HoursString = z.string().regex(/^$|^\d+(\.\d)?$/, {
   message: "Enter hours as a number with at most one decimal (e.g. 1234.5).",
 });
 
+// Expected load count: a whole number of loads, entered in an HTML number input
+// (returns a string). Empty means "not set". The action layer converts a
+// non-empty value to an integer; the API enforces the 1..100_000 bound.
+const LoadCountString = z.string().regex(/^\d{0,6}$|^$/, {
+  message: "Enter a whole number of loads.",
+});
+
 // Shared field shape for the create and update forms. The cross-field
 // rules around status × timing × odometer are encoded as `.refine`s on
 // each derived schema so the same constraint set runs at the schema
@@ -78,6 +105,22 @@ function buildTripFormShape() {
     // vehicle (TripsService cross-field re-validation).
     meterType: z.enum(METER_TYPES),
     notes: z.string().max(1000, "Notes cap is 1000 characters.").optional(),
+    // Haulage order (ADR-0047 c3/c5). All optional at the form layer; the
+    // OFFERED-order cross-field rule below requires material + pickup + drop-off
+    // when status is OFFERED (mirroring the API's authoritative rule). The action
+    // layer omits empty strings and converts expectedLoadCount to an integer.
+    materialType: z.string().optional(),
+    materialNote: z.string().max(500, "Material note cap is 500 characters.").optional(),
+    pickupSiteId: z.string().optional(),
+    dropoffSiteId: z.string().optional(),
+    consigneeName: z.string().max(200, "Consignee name cap is 200 characters.").optional(),
+    consigneePhone: z.string().max(40, "Consignee phone cap is 40 characters.").optional(),
+    expectedLoadCount: LoadCountString.optional(),
+    specialInstructions: z
+      .string()
+      .max(1000, "Special instructions cap is 1000 characters.")
+      .optional(),
+    docketNumber: z.string().max(100, "Docket number cap is 100 characters.").optional(),
   };
 }
 
@@ -95,6 +138,11 @@ interface TripFormRefineInput {
   startEngineHours?: string;
   endEngineHours?: string;
   meterType?: (typeof METER_TYPES)[number];
+  // Order fields the OFFERED-order rule reads (ADR-0047 c3).
+  materialType?: string;
+  materialNote?: string;
+  pickupSiteId?: string;
+  dropoffSiteId?: string;
 }
 
 function isPresent(value: string | undefined): boolean {
@@ -201,8 +249,52 @@ function checkCompletedShape(
   return { ok: true };
 }
 
-// Superrefine that applies the IN_PROGRESS and COMPLETED cross-field
-// rules. Shared between the create and update schemas via direct
+// OFFERED requires the order (material + pickup + drop-off), mirroring the API's
+// authoritative rule (ADR-0047 c3); at OFFERED an "Other" material also needs its
+// free-text note. A chosen material must ALWAYS be a known type. The order is
+// unconstrained before OFFERED — a PLANNED draft carries whatever the operator
+// has filled so far, and an externally-created OFFERED-Other trip with no note
+// (which the API accepts) stays editable rather than being locked behind the note.
+function checkOfferedOrderShape(
+  data: TripFormRefineInput,
+): { ok: true } | { ok: false; path: string; message: string } {
+  if (
+    isPresent(data.materialType) &&
+    !(MATERIAL_TYPES as readonly string[]).includes(data.materialType as string)
+  ) {
+    return { ok: false, path: "materialType", message: "Pick a valid material." };
+  }
+  if (data.status === "OFFERED") {
+    if (!isPresent(data.materialType)) {
+      return { ok: false, path: "materialType", message: "An offered trip needs a material." };
+    }
+    if (!isPresent(data.pickupSiteId)) {
+      return { ok: false, path: "pickupSiteId", message: "An offered trip needs a pickup site." };
+    }
+    if (!isPresent(data.dropoffSiteId)) {
+      return {
+        ok: false,
+        path: "dropoffSiteId",
+        message: "An offered trip needs a drop-off site.",
+      };
+    }
+    // A dispatched "Other" material needs its free-text note to say what it is.
+    // Gated on OFFERED (not every status) so a PLANNED draft stays unconstrained
+    // and an externally-created OFFERED-Other trip without a note is still
+    // editable — the API never requires this note, it is a dispatch-time nicety.
+    if (data.materialType === "OTHER" && !isPresent(data.materialNote)) {
+      return {
+        ok: false,
+        path: "materialNote",
+        message: "Describe the material when it is Other.",
+      };
+    }
+  }
+  return { ok: true };
+}
+
+// Superrefine that applies the IN_PROGRESS, COMPLETED, and OFFERED-order
+// cross-field rules. Shared between the create and update schemas via direct
 // invocation (no wrapper helper) because zod 4 typing makes a generic
 // helper awkward — `.superRefine` returns the original schema's type,
 // and the inferred return is what we want for `z.infer`.
@@ -222,6 +314,14 @@ function tripCrossFieldRules(data: unknown, ctx: z.RefinementCtx): void {
       code: z.ZodIssueCode.custom,
       path: [completedCheck.path],
       message: completedCheck.message,
+    });
+  }
+  const offeredCheck = checkOfferedOrderShape(input);
+  if (!offeredCheck.ok) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: [offeredCheck.path],
+      message: offeredCheck.message,
     });
   }
 }

@@ -31,3 +31,7 @@ The risk of this decision is that we will be tempted to force-fit non-trip event
 ## Revisit when
 
 The signal that would prompt revisiting this decision is the emergence of a business unit that does not naturally model as Trips, such as a workshop business that services outside customers' vehicles. If FleetCo grows beyond fleet operation into adjacent businesses, the Trip-as-central-aggregate decision may need to be reexamined for those parts of the business. For the operations FleetCo serves in v1 through Phase 5, the decision is stable.
+
+---
+
+**Annotation (2026-07-12, append-only):** **ADR-0047 extends this decision** by exercising the reshape it reserved here (*"the Trip is… the first place we will ADR-revise if it turns out our model of trips is wrong"*). ADR-0047 gives the central Trip a dispatch → acceptance lifecycle (`OFFERED`/`ACCEPTED` before `IN_PROGRESS`) and the **structured haulage order** — material, pinned pickup/drop-off `Site`s, consignee, and intra-load milestone timestamps — that this ADR always intended a Trip to carry as *"the execution of a Job's contract,"* but which had only ever existed as free text in `Job.description`. The Trip stays the central aggregate and the executor of a Job's work; the model is **completed, not replaced**. ADR-0047 deliberately does **not** build the `Trip → Job` link (still a deferred, ADR-0003-touching `docs/tech-debt.md` item) — the order attaches per-dispatch on the Trip — nor the distinct standing vehicle↔driver assignment. See **ADR-0047**.

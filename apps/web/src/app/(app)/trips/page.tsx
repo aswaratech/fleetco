@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
+import { Badge } from "@/components/ui/badge";
 import { Breadcrumb } from "@/components/ui/breadcrumb";
 import { Button } from "@/components/ui/button";
 import { Pagination } from "@/components/ui/pagination";
@@ -16,7 +17,7 @@ import {
 import { apiFetch, ApiError } from "@/lib/api";
 
 import { TripsFilters } from "./trips-filters";
-import { TRIP_STATUS_LABELS, type TripListItem, type TripStatus } from "./types";
+import { TRIP_STATUS_BADGE, TRIP_STATUS_LABELS, type TripListItem, type TripStatus } from "./types";
 
 // Trips list — Phase 1 vertical slice, iter 8. Server-rendered; reads
 // the session cookie, redirects to /login if absent, and fetches the
@@ -233,8 +234,10 @@ export default async function TripsPage({
                         </Link>
                       </TableCell>
                       <TableCell className="text-text-secondary">{t.driver.fullName}</TableCell>
-                      <TableCell className="text-text-secondary">
-                        {TRIP_STATUS_LABELS[t.status as TripStatus] ?? t.status}
+                      <TableCell>
+                        <Badge variant={TRIP_STATUS_BADGE[t.status as TripStatus] ?? "neutral"}>
+                          {TRIP_STATUS_LABELS[t.status as TripStatus] ?? t.status}
+                        </Badge>
                       </TableCell>
                       <TableCell className="text-text-secondary text-right tabular-nums">
                         {formatDateTime(t.startedAt)}
