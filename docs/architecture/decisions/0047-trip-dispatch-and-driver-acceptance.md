@@ -1,6 +1,6 @@
 # ADR-0047: Trip dispatch + driver acceptance — the haulage order on the Trip aggregate
 
-- **Status:** Proposed (decisions taken interactively by the PO in the 2026-07-12 planning session with the deploy-first recommendation surfaced and declined; the PO merging this PR is the durable ratification — see §Phase mismatch. An agent must never self-accept this ADR, add an `## Acceptance` block, or flip the status — the PO ratifies separately, per the ADR-0038 rule.)
+- **Status:** Accepted (ratified by the PO — the W1 governance PR #231 and the full W1–W9 dispatch program were merged 2026-07-12/13, with the deploy-first recommendation surfaced and declined per §Phase mismatch. This status line was flipped from Proposed under explicit PO authorization on 2026-07-13, reflecting the ratification the #231 merge already effected — per the ADR-0038 rule that the PO ratifies separately.)
 - **Date:** 2026-07-12
 - **Decider:** Product owner (CEO)
 
