@@ -8,6 +8,30 @@ Each entry has a short title, a brief description of what is owed, the slice or 
 
 This section lists active debt entries.
 
+### ADR-0048 live-map trips layer: no DB uniqueness for "one active trip per vehicle" — the map disambiguates deterministically
+
+- **What is owed:** Nothing in the schema prevents one vehicle from carrying two-plus concurrent `OFFERED`/`ACCEPTED`/`IN_PROGRESS` trips. The ADR-0048 map layer handles it honestly (a deterministic pure rule picks the marker's trip — `IN_PROGRESS` > `ACCEPTED` > `OFFERED`, then recency — while the sidebar lists all), but the underlying ambiguity is a data-model gap: a candidate **partial unique index** on `Trip(vehicleId) WHERE status IN ('OFFERED','ACCEPTED','IN_PROGRESS')` would make the invariant structural.
+- **Where surfaced:** ADR-0048 c1 (2026-07-19), during the active-trips-on-map design.
+- **Why accepted now:** Whether double-dispatch is genuinely invalid is an operations question the PO should answer against real dispatch data — which does not exist pre-deploy. Guessing the constraint now risks blocking a legitimate workflow (e.g. queueing tomorrow's load while today's runs); the map's deterministic attribution keeps the surface honest either way.
+- **Estimate to discharge:** ~half a day once decided: the partial-index migration, the service-layer 409 mapping on dispatch, and tests.
+- **Revisit when:** real dispatch data exists post-M1 and the PO can say whether a vehicle legitimately carries two active trips; or the map's "winner" attribution confuses the operator in practice.
+
+### ADR-0048 live-map trips layer: the take=200 trips fetch truncates silently past 200 concurrent active trips
+
+- **What is owed:** The layer fetches active trips with the list endpoint's `take=200` ceiling (the Home-dashboard caveat, repeated). Past 200 concurrent active trips the layer silently under-renders. The named scaling path (ADR-0048 §Alternatives) is the telematics-owned joined endpoint (`positions/latest?include=activeTrip`, importing `TripsService` through its public interface per the G5 precedent).
+- **Where surfaced:** ADR-0048 c2/§Alternatives (2026-07-19).
+- **Why accepted now:** The fleet is nowhere near 200 concurrent dispatched trips; building a joined endpoint for a theoretical cap would be speculative backend surface.
+- **Estimate to discharge:** ~1 day for the joined endpoint + RBAC/service tests + the web swap to one fetch.
+- **Revisit when:** concurrent active trips approach the cap, or an atomic trips+positions snapshot is ever required.
+
+### ADR-0042 c8's ping-level trip-correlation stays owed (register repair) — and is NOT discharged by ADR-0048's read-time join
+
+- **What is owed:** Auto-linking hardware-tracker pings to Trips (`GpsPing.tripId` is null on every Traccar-ingested ping; only the driver-phone producer stamps it). ADR-0042 c8 and its Revisit-when named this "a later derived feature, named tech-debt … its own design" — but no register entry was ever written (a memory-drift gap this entry repairs). ADR-0048's map layer joins trips to positions at **read time by `Trip.vehicleId`** and deliberately does not build ping correlation.
+- **Where surfaced:** ADR-0042 c8 (2026-07-02); the missing entry noticed and repaired during the ADR-0048 design (2026-07-19).
+- **Why accepted now:** No consumer needs per-ping trip attribution yet — the map needs only "which trip is this vehicle on now," which the read-time join answers; per-ping correlation matters for trip-trail replay and per-trip distance-from-GPS, both future surfaces.
+- **Estimate to discharge:** its own design (ADR territory per ADR-0042's Revisit-when): correlation rule (time-window vs status-window), backfill posture, and the Tier-5 read surface it would feed.
+- **Revisit when:** a trip-trail replay or GPS-derived per-trip distance/route-adherence feature is wanted.
+
 ### ADR-0047 dispatch: the cross-slice pickup/drop-off Site filter + the Site delete-dialog "trips using this site" deep-link await a small design decision
 
 - **What is owed:** A `pickupSiteId` / `dropoffSiteId` (or a combined `siteId`) filter on the trips-list endpoint + web toolbar, and the paired `/sites/[id]` delete-dialog "View trips using this site" deep-link. The delete-blocker itself already works — `Trip.pickupSiteId` / `dropoffSiteId` are `onDelete: Restrict` (W2/W4), so a **Site** referenced by any trip 409s on delete exactly like the Customer→Job blocker — but the delete dialog has no "see which trips reference this site" link yet, and there is no way to list "all trips through Site X". The one design question W6 flagged and deferred: whether a single `siteId` param means **pickup-OR-drop-off** (one filter, an `OR` across the two columns) or two independent **AND-able** `pickupSiteId` / `dropoffSiteId` params — the Customer→Job `?customerId=` deep-link precedent is a single-column filter, but a Site legitimately sits on *either* end of a trip, so the OR-semantics need a deliberate pick before wiring.
