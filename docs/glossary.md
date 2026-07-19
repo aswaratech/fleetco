@@ -4,6 +4,8 @@ This is the project's semantic memory: the place where words have agreed meaning
 
 ## Fleet and operations vocabulary
 
+**Active trip** has two recorded usages, deliberately distinct so they cannot drift silently into each other. On the **Home dashboard**, "Active trips" means trips with status `IN_PROGRESS` only — "trips in progress now" (`lib/dashboard.ts`, the card's original definition). On the **Live map's active-trips layer** (ADR-0048), "active" means the wider dispatched, non-terminal set — `OFFERED`, `ACCEPTED`, or `IN_PROGRESS` — because a dispatched-but-unmoved truck is exactly what the fleet glance should surface; `PLANNED` (not dispatched) and the terminal `COMPLETED`/`CANCELLED` are never "active" in either usage. When a vehicle carries more than one active trip (no DB uniqueness forbids it — see `docs/tech-debt.md`), map attribution is deterministic: `IN_PROGRESS` > `ACCEPTED` > `OFFERED`, then recency. See the **Trip** / **trip.status** / **Dispatch** entries and ADR-0048.
+
 **Bishesh Anumati (विशेष अनुमति)** is the Nepali term for a special permit, often required to operate certain heavy vehicles or to operate on certain routes. It is one of the compliance documents tracked by the system, and its expiry triggers a reminder.
 
 **Bluebook (नीलो किताब)** is the vehicle registration certificate issued by Nepal's Department of Transport Management. It is called the Bluebook because of the color of its cover. Every vehicle in FleetCo has a Bluebook number and metadata, and Bluebook expiry triggers compliance reminders. As of Phase 1 iter 14, persisted on Vehicle as `bluebookNumber` (string, nullable) and `bluebookExpiresAt` (DateTime, nullable).
