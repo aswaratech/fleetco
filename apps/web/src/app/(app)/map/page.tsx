@@ -1,5 +1,11 @@
 import { redirect } from "next/navigation";
 
+import {
+  ACTIVE_TRIPS_QUERY,
+  mapActiveTrips,
+  type ActiveTripOverlay,
+  type ActiveTripsWireResponse,
+} from "@/lib/active-trips";
 import { Breadcrumb } from "@/components/ui/breadcrumb";
 import { apiFetch, ApiError } from "@/lib/api";
 
@@ -45,18 +51,37 @@ interface TrackersListResponse {
   total: number;
 }
 
+// The active-trips layer's initial fetch (ADR-0048) is BEST-EFFORT: a 401
+// still redirects (session truth), but any other failure degrades to an
+// empty layer + the "Trip data unavailable." sidebar line — the vehicle map
+// never blanks for the trip layer's sake (DESIGN.md §"Live map" edge
+// states). Rows are projected through the Tier-2-stripping mapper
+// SERVER-SIDE so consignee fields never reach the island's props.
+async function fetchActiveTrips(): Promise<ActiveTripOverlay[] | null> {
+  try {
+    const res = await apiFetch<ActiveTripsWireResponse>(`/api/v1/trips?${ACTIVE_TRIPS_QUERY}`);
+    return mapActiveTrips(res.items);
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) throw error;
+    return null;
+  }
+}
+
 export default async function MapPage(): Promise<React.ReactElement> {
   let positions: LatestPosition[];
   let depots: DepotFence[];
   let trackedVehicleIds: string[];
   let trackersRegistered: number;
+  let initialActiveTrips: ActiveTripOverlay[];
+  let tripsUnavailable: boolean;
   try {
-    const [latest, fences, trackers] = await Promise.all([
+    const [latest, fences, trackers, activeTrips] = await Promise.all([
       apiFetch<LatestPositionsResponse>("/api/v1/telematics/positions/latest"),
       // The yard overlay: DEPOT fences only (CUSTOMER_SITE / ROUTE_CORRIDOR
       // are deliberately not drawn in v1 — visual noise before value).
       apiFetch<GeofencesListResponse>("/api/v1/geofences?type=DEPOT&take=200"),
       apiFetch<TrackersListResponse>("/api/v1/telematics/trackers?take=200"),
+      fetchActiveTrips(),
     ]);
     positions = latest.positions;
     depots = fences.items.map((f) => ({ id: f.id, name: f.name, boundaryWkt: f.boundaryWkt }));
@@ -64,6 +89,8 @@ export default async function MapPage(): Promise<React.ReactElement> {
       .filter((t) => t.status === "ACTIVE" && t.vehicleId !== null)
       .map((t) => t.vehicleId as string);
     trackersRegistered = trackers.total;
+    initialActiveTrips = activeTrips ?? [];
+    tripsUnavailable = activeTrips === null;
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) {
       redirect("/login");
@@ -88,6 +115,8 @@ export default async function MapPage(): Promise<React.ReactElement> {
           depots={depots}
           trackedVehicleIds={trackedVehicleIds}
           trackersRegistered={trackersRegistered}
+          initialActiveTrips={initialActiveTrips}
+          tripsUnavailable={tripsUnavailable}
         />
       </div>
     </main>
