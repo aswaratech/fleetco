@@ -1,6 +1,6 @@
 # deploy
 
-> **STATUS: DRAFT — written from ADR-0014 (single VPS + Docker Compose), not yet executed.** Promote to `STATUS: ACTIVE` with a real "Last verified" date once the first production deploy has been run end-to-end; until then treat every step as unverified. See `docs/runbook/README.md` for the runbook discipline and `docs/architecture/decisions/0014-deployment-single-vps.md` for the architecture this implements.
+> **STATUS: ACTIVE — first production deploy executed end-to-end 2026-07-19** (see §Last verified). One standing divergence from the routine flow described below: while the GitHub Actions billing lock persists, no CI images exist in GHCR, so deploys build images ON the box per §Bootstrap step 2's first-bootstrap fallback (ADR-0014 "Alternatives"); the GHCR/`deploy.yml` path resumes when Actions revives. See `docs/runbook/README.md` for the runbook discipline and `docs/architecture/decisions/0014-deployment-single-vps.md` for the architecture this implements.
 
 ## When this procedure applies
 
@@ -102,4 +102,4 @@ bash deploy/smoke.sh https://<domain>
 
 ## Last verified
 
-Not yet verified — this procedure is `DRAFT` (written from ADR-0014, not executed). Replace with the date + `STATUS: ACTIVE` after the first successful production deploy.
+- **2026-07-19** — first production deploy executed end-to-end on a Hostinger KVM 2 VPS (2 vCPU / 8 GB / Ubuntu 24.04, amd64) at `https://200-141-0-43.sslip.io` (sslip.io wildcard DNS over the box's bare IP — no purchased domain; Let's Encrypt issued for that name first-try). The operator checklist ran top to bottom with one deliberate substitution: GitHub Actions was billing-locked (every job dies at startup), so step 0's variable was set for the future and the images were **built on the box** at `e04fbb7` per §Bootstrap step 2's fallback — a docs-only delta from the last CI-green commit `b2cb517`, with `NEXT_PUBLIC_API_URL` passed as the build-arg. Box hardened first (ufw 22/80/443, key-only SSH). All 26 migrations applied; admin seeded (`role=ADMIN` — the 2026-07-10 seed fix held); `smoke.sh` PASS plus an independent public-internet check; the founder logged into the dashboard in a browser. Traccar left in its documented first-boot restart loop (gateway bring-up deferred). Nightly backup cron installed (18:15 UTC) and the first backup + restore drill completed the same day — see `restore-from-backup.md`. Operational note for the next deploy: the credential prompts in this repo's interactive helper scripts need `ssh -t` (without a TTY, `read` silently writes empty values).

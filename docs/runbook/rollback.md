@@ -1,6 +1,6 @@
 # rollback
 
-> **STATUS: DRAFT — written from ADR-0014, not yet executed.** Promote to `STATUS: ACTIVE` with a real "Last verified" date once a rollback has actually been performed or deliberately rehearsed. See `docs/runbook/README.md` and `docs/architecture/decisions/0014-deployment-single-vps.md`.
+> **STATUS: ACTIVE — tag-swap core deliberately rehearsed in the 2026-07-10 local dry-run (PR #226); a production target to roll back FROM exists as of the 2026-07-19 first deploy** (see §Last verified for the current on-box-image caveat). See `docs/runbook/README.md` and `docs/architecture/decisions/0014-deployment-single-vps.md`.
 
 ## When this procedure applies
 
@@ -27,4 +27,4 @@ Placeholders: `<vps-host>`, `<domain>`, `<good-sha>` (previous known-good image 
 
 ## Last verified
 
-Not yet verified — `DRAFT`. Replace with the date + `STATUS: ACTIVE` after the first real rollback or a deliberate rehearsal.
+- **2026-07-19** — promoted to `ACTIVE` on the strength of the 2026-07-10 local dry-run's deliberate tag-swap rehearsal (PR #226), now that the 2026-07-19 first production deploy provides a real target to roll back from. **Standing caveat while the GitHub Actions billing lock persists:** GHCR holds no tags for on-box-built images, so "pull the previous tag" becomes "the previous tag is already in the box's local Docker image cache" (`docker image ls`) — the `IMAGE_TAG` swap in `/opt/fleetco/.env` plus `up -d` works unchanged; only a cache-evicted tag would require rebuilding the prior SHA on the box from the repo clone at `/opt/fleetco/src`.

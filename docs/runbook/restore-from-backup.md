@@ -1,6 +1,6 @@
 # restore-from-backup
 
-> **STATUS: DRAFT — written from ADR-0014, not yet executed.** Promote to `STATUS: ACTIVE` with a real "Last verified" date once the first restore has actually been performed — the roadmap requires this test **within two weeks of the first production deploy** (untested backups do not exist — `docs/runbook/README.md`). See `docs/architecture/decisions/0014-deployment-single-vps.md`.
+> **STATUS: ACTIVE — first restore drill run and passed 2026-07-19, the same day as the first production deploy** (13 days ahead of the roadmap's two-week requirement; see §Last verified for the measured RPO/RTO). See `docs/architecture/decisions/0014-deployment-single-vps.md`.
 
 ## When this procedure applies
 
@@ -77,4 +77,4 @@ The fetch → decrypt → load-into-scratch-DB → sanity-check span (steps 2–
 
 ## Last verified
 
-Not yet verified — `DRAFT`. The roadmap requires the first restore test within two weeks of the first production deploy; replace with the date + `STATUS: ACTIVE` (and the measured RPO/RTO) once that test passes.
+- **2026-07-19** — first restore drill run and passed, the same day as the first production deploy (13 days ahead of the two-week requirement). The create side ran first for real: `backup.sh` dumped, gzipped, age-encrypted, and uploaded `fleetco-2026-07-19.sql.gz.age` (12.5 KB) to the R2 bucket `fleetco-backups` (age identity at `/opt/fleetco/secrets/age-identity.txt`, operator's offsite copy in their password manager). `restore.sh` then fetched, decrypted, and loaded it into the `fleetco_restore` scratch DB in **1.9 s end-to-end**, and the sanity check matched production truth exactly (1 user — the seeded admin — and 0 business rows on day zero). **Measured RPO:** minutes (the dump was fresh); the nightly cron bounds it at ≤24 h per ADR-0014. **Measured RTO** at current data size: ~2 s fetch+decrypt+load plus the operator cutover — far inside the 4 h target; re-measure as data grows. Tooling note: Ubuntu's rclone 1.60 hits a benign 501-then-retry-succeeds on R2 uploads; upgrade rclone from rclone.org if the nightly log noise matters.
