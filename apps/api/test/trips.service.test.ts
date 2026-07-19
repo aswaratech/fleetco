@@ -389,6 +389,73 @@ describe("TripsService (integration, real Postgres)", () => {
       expect(result.total).toBe(2);
     });
 
+    test("the dispatched-set filter (OFFERED/ACCEPTED/IN_PROGRESS — the ADR-0048 /map query) excludes PLANNED and the terminal statuses", async () => {
+      await seedScenario();
+      await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.OFFERED,
+        offeredAt: new Date("2026-07-19T06:00:00Z"),
+      });
+
+      const dispatched = [TripStatus.OFFERED, TripStatus.ACCEPTED, TripStatus.IN_PROGRESS];
+      const result = await service.list({ status: dispatched }, STAFF_ACTOR);
+      // seedScenario's IN_PROGRESS trip + the OFFERED one; the PLANNED,
+      // two COMPLETED, and CANCELLED rows are excluded.
+      expect(result.total).toBe(2);
+      expect(result.items.every((t) => dispatched.includes(t.status))).toBe(true);
+    });
+
+    test("list items carry the Tier-3 site-pin projection ({id,name,latitude,longitude}) and never the Tier-2 site contact — the ADR-0048 /map wire contract", async () => {
+      // The list's pickupSite/dropoffSite coordinates were widened onto the
+      // slim projection for the driver Navigate deep-link (ADR-0047 W7) and
+      // the /map active-trips pins now also depend on them (ADR-0048) — pin
+      // the exact shape so a future "slim the list" pass cannot silently
+      // break either consumer. The pickup seeds WITH a site contact so the
+      // exact-key assertion proves the Tier-2 fields stay off the wire.
+      const pickup = await seedSite(prisma, {
+        createdById: adminId,
+        name: "Naubise Crusher",
+        latitude: 27.75,
+        longitude: 85.1,
+        contactName: "Site Contact",
+        contactPhone: "+9779811111111",
+      });
+      const dropoff = await seedSite(prisma, {
+        createdById: adminId,
+        name: "Thankot Yard",
+        latitude: 27.69,
+        longitude: 85.2,
+      });
+      await seedTrip(prisma, {
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        createdById: adminId,
+        status: TripStatus.OFFERED,
+        materialType: MaterialType.SAND,
+        pickupSiteId: pickup.id,
+        dropoffSiteId: dropoff.id,
+        offeredAt: new Date("2026-07-19T06:00:00Z"),
+      });
+
+      const result = await service.list({ status: [TripStatus.OFFERED] }, STAFF_ACTOR);
+      expect(result.total).toBe(1);
+      // toEqual pins the EXACT key set: coordinates present, contact absent.
+      expect(result.items[0]?.pickupSite).toEqual({
+        id: pickup.id,
+        name: "Naubise Crusher",
+        latitude: 27.75,
+        longitude: 85.1,
+      });
+      expect(result.items[0]?.dropoffSite).toEqual({
+        id: dropoff.id,
+        name: "Thankot Yard",
+        latitude: 27.69,
+        longitude: 85.2,
+      });
+    });
+
     test("vehicleId filter narrows to trips for that vehicle", async () => {
       await seedScenario();
       // The seed vehicle has 3 trips (t1, t2, t3); the otherVehicle
