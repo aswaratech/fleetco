@@ -4,7 +4,7 @@ This file is the project's operational memory for delivery performance. It recor
 
 This file is updated weekly in the same PR that closes the week's work. The discipline is that the file is updated by the AI agent at the end of each work week, with the founder reviewing the entry as part of the weekly close. When a target is missed in any measurement window, the next planning conversation must address what changed and what we will do about it before any new feature work begins.
 
-The format below is the structure each weekly entry follows. The first entry will appear at the end of the week in which Phase 1's first production deploy ships. Until then this file remains a stub.
+The format below is the structure each weekly entry follows. The first entry covers the week of the first production deploy (2026-07-19).
 
 ## Format for weekly entries
 
@@ -26,6 +26,18 @@ The metrics above are honest approximations rather than perfect operational defi
 
 The point of the metrics is not to produce a perfect score but to produce a directional signal that we can act on. When the numbers move, we look at why. When they stay stable, we get on with the work.
 
-## Stub: first entry
+## Week of 2026-07-13
 
-The first weekly entry will appear at the end of the week in which Phase 1's first production deploy ships. Until then this file is a stub.
+This is the first entry, covering the week of FleetCo's first-ever production deploy (Saturday 2026-07-19). Context that frames every number below: the deploy was the one-time bootstrap (`deploy.md` §First production deploy), executed on a Hostinger KVM 2 VPS at `https://200-141-0-43.sslip.io`, with images built on the box per the ADR-0014 first-bootstrap fallback because GitHub Actions was billing-locked all week (every Actions run since 2026-07-19 dies at startup with "account is locked due to a billing issue"; last green main run was 2026-07-13 on b2cb517). The deployed SHA e04fbb7 differs from that last-green SHA by docs-only commits.
+
+For deployment frequency: 1 production deployment this week — the bootstrap deploy of e04fbb7 on 2026-07-19. Against the ≥1-per-working-day target this is numerically below target, but the target measures a cadence that can only exist after the first deploy; the number to watch is next week's.
+
+For lead time for changes: the deployed merge (e04fbb7, PR #242) landed at 16:14 UTC and the deploy passed its public smoke check at approximately 17:00 UTC the same day — a lead time of roughly 46 minutes, well inside the under-24-hours target. Measured by hand from the merge timestamp and the smoke-check time, not from deployment workflow logs, because the deploy workflow could not run (billing lock).
+
+For change failure rate: 0 of 1 deploys month-to-date were followed within 24 hours by an error spike or rollback. Honest caveat: Sentry is not yet configured in production (SENTRY_DSN is empty), so detection this week was the smoke check plus the founder logging in and using the dashboard — manual observation, not instrumentation.
+
+For failed deployment recovery time: no failed deploys this week; nothing to measure.
+
+For rework rate: not computed this week. The PR-metadata signal the definition depends on is meaningful only once the weekly close rhythm is running; the first computed figure will appear in the next entry.
+
+Operational events worth recording alongside the metrics: the nightly encrypted backup went live the same day (first object `fleetco-2026-07-19.sql.gz.age` in the R2 bucket, cron at 18:15 UTC), and the restore-from-backup drill was run and passed the same day — 13 days ahead of the two-week deadline (details in `docs/runbook/restore-from-backup.md` §Last verified). The three deploy runbooks flipped DRAFT→ACTIVE in the same PR as this entry.
