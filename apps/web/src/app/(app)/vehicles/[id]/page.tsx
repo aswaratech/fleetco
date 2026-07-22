@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
+import { DocumentsSection } from "@/components/documents/documents-section";
 import { NepaliDate } from "@/components/nepali-date";
 import { Badge } from "@/components/ui/badge";
 import { Breadcrumb } from "@/components/ui/breadcrumb";
@@ -462,6 +463,15 @@ export default async function VehicleDetailPage({
             />
           </dl>
         </section>
+
+        {/* ADR-0049 F4: the papers behind the compliance rows above — the
+            Bluebook scan, the insurance policy, permit papers, agreements. */}
+        <DocumentsSection
+          entityType="VEHICLE"
+          entityId={vehicle.id}
+          entityPath={`/vehicles/${vehicle.id}`}
+          entityNoun="vehicle"
+        />
 
         {/* B4 (ADR-0037 c7): preventive-maintenance schedules. Per-schedule
             due-soon / overdue <Badge>, computed against this vehicle's current
