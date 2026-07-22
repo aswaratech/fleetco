@@ -237,6 +237,40 @@ export class DocumentsService {
     return { buffer, contentType: document.contentType };
   }
 
+  /**
+   * The F3 renewal link-check (ADR-0049 c4), exposed as the module's PUBLIC
+   * interface so the vehicles module never reaches into the fleet_document
+   * table: the linked "proof" document must EXIST (400 — the caller holds an
+   * id the operator typed/picked, so a ghost is a bad request, not a 404 on
+   * this route), belong to the SAME vehicle, and carry the expected category
+   * (a BLUEBOOK renewal links a BLUEBOOK scan, never a random paper).
+   */
+  async assertLinkableToVehicle(
+    documentId: string,
+    vehicleId: string,
+    expectedCategory: DocumentCategory,
+  ): Promise<void> {
+    const document = await this.prisma.fleetDocument.findUnique({
+      where: { id: documentId },
+      select: { vehicleId: true, category: true },
+    });
+    if (document === null) {
+      throw new BadRequestException(`Document ${documentId} does not exist.`);
+    }
+    if (document.vehicleId !== vehicleId) {
+      throw new BadRequestException(
+        `Document ${documentId} is not attached to this vehicle; a renewal must link a ` +
+          "document on the same vehicle.",
+      );
+    }
+    if (document.category !== expectedCategory) {
+      throw new BadRequestException(
+        `Document ${documentId} is category ${document.category}; a ${expectedCategory} ` +
+          `renewal must link a ${expectedCategory} document.`,
+      );
+    }
+  }
+
   /** Metadata-only PATCH; the entity FKs and bytes are immutable. A category
    * change re-checks the matrix against the document's (fixed) entity. */
   async update(id: string, input: UpdateDocumentInput): Promise<FleetDocumentWithEntityType> {
