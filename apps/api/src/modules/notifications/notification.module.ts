@@ -47,10 +47,14 @@ import { NotificationService } from "./notification.service";
     NotificationService,
     NotificationProcessor,
     {
+      // RESEND_FROM rides into the real mailer here (the "C2 wiring supplies
+      // the real `from`" seam DEFAULT_FROM_ADDRESS documents): when the env var
+      // is unset, `from: undefined` falls back to the placeholder inside the
+      // constructor, so dev/test/CI behavior is unchanged.
       provide: Mailer,
       useFactory: (): Mailer =>
         env.RESEND_API_KEY !== undefined && env.RESEND_API_KEY !== ""
-          ? new ResendMailer()
+          ? new ResendMailer({ from: env.RESEND_FROM })
           : new MockMailer(),
     },
   ],

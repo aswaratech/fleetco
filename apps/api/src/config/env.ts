@@ -77,6 +77,16 @@ const envSchema = z.object({
   // never reach the network). Empty-string -> undefined, like SENTRY_DSN.
   RESEND_API_KEY: z.preprocess(emptyStringAsUndefined, z.string().optional()),
 
+  // The reminder digest's sending address, e.g. "FleetCo <reminders@example.com.np>"
+  // (ADR-0038 c9 — the address must belong to the operator's VERIFIED sending
+  // domain, or Resend rejects the send). OPTIONAL: when unset, ResendMailer
+  // falls back to its DEFAULT_FROM_ADDRESS placeholder (a reserved-`.example`
+  // address that can never deliver), so setting this is part of activating the
+  // channel in production alongside RESEND_API_KEY. Tier-4 config per ADR-0013
+  // (the address is public-facing transport config, not a secret). Empty-string
+  // -> undefined, like its siblings.
+  RESEND_FROM: z.preprocess(emptyStringAsUndefined, z.string().optional()),
+
   // Optional comma-separated recipient override for the reminder digest
   // (ADR-0038 commitment 7). When set, these addresses are added to the v1
   // recipients (the ADMIN users' emails) — the escape hatch for a shared inbox

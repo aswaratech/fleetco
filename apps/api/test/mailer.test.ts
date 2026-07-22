@@ -112,6 +112,18 @@ describe("ResendMailer.send mapping (injected fake client — no network)", () =
     expect(fake.calls[0].html).toBe("<p>Bluebook expires soon.</p>");
   });
 
+  test("an explicitly-undefined from falls back to the placeholder — the module wiring's env-unset path", async () => {
+    // NotificationModule passes `{ from: env.RESEND_FROM }` unconditionally, so
+    // when the operator has not set RESEND_FROM the constructor must land on
+    // DEFAULT_FROM_ADDRESS, not a broken undefined sender.
+    const fake = fakeClient({ data: { id: "resend-id-789" }, error: null });
+    const mailer = new ResendMailer({ client: fake, from: undefined });
+
+    await mailer.send(MESSAGE);
+
+    expect(fake.calls[0].from).toBe(DEFAULT_FROM_ADDRESS);
+  });
+
   test("throws MailerSendError on a provider error, carrying the PII-free category — not the recipient", async () => {
     // A provider error whose raw message embeds the recipient address (Tier-2
     // PII). The thrown error must carry only the provider's error CATEGORY, so a
