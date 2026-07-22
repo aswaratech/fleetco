@@ -31,6 +31,7 @@ import { TelematicsModule } from "./modules/telematics/telematics.module";
 import { TripsModule } from "./modules/trips/trips.module";
 import { VehiclesModule } from "./modules/vehicles/vehicles.module";
 import { WhatsAppModule } from "./modules/whatsapp/whatsapp.module";
+import { DocumentsModule } from "./modules/documents/documents.module";
 
 @Module({
   imports: [
@@ -123,6 +124,8 @@ import { WhatsAppModule } from "./modules/whatsapp/whatsapp.module";
     // WhatsAppSender seam. Fails closed (503 webhook, mock sender) until the
     // operator sets the TWILIO_* env, so registering it is inert off-box.
     WhatsAppModule,
+    // Fleet documents & renewals (ADR-0049): the entity-documents aggregate.
+    DocumentsModule,
   ],
 })
 export class AppModule {}

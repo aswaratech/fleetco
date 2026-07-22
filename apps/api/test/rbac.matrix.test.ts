@@ -40,6 +40,7 @@ import { RolesGuard } from "../src/modules/auth/roles.guard";
 import { AgentController } from "../src/modules/agent/agent.controller";
 import { AuthController } from "../src/modules/auth/auth.controller";
 import { CustomersController } from "../src/modules/customers/customers.controller";
+import { DocumentsController } from "../src/modules/documents/documents.controller";
 import { DriversController } from "../src/modules/drivers/drivers.controller";
 import { DriversService } from "../src/modules/drivers/drivers.service";
 import { ExpenseLogsController } from "../src/modules/expense-logs/expense-logs.controller";
@@ -141,6 +142,24 @@ describe("tracker-register capability tokens (ADR-0042 M4)", () => {
   });
 });
 
+describe("fleet-document capability tokens (ADR-0049 F2)", () => {
+  test("documents:read and documents:write are on the operational floor, not DRIVER", () => {
+    for (const token of ["documents:read", "documents:write"] as const) {
+      expect(roleHasCapability(UserRole.ADMIN, token)).toBe(true);
+      expect(roleHasCapability(UserRole.OFFICE_STAFF, token)).toBe(true);
+      expect(roleHasCapability(UserRole.DRIVER, token)).toBe(false);
+    }
+  });
+
+  test("documents:delete is ADMIN-only — the evidence-destruction verb (c6)", () => {
+    expect(roleHasCapability(UserRole.ADMIN, "documents:delete")).toBe(true);
+    // The load-bearing half of the three-token design: an office-staff
+    // session uploads and edits the papers but cannot destroy the bytes.
+    expect(roleHasCapability(UserRole.OFFICE_STAFF, "documents:delete")).toBe(false);
+    expect(roleHasCapability(UserRole.DRIVER, "documents:delete")).toBe(false);
+  });
+});
+
 describe("toUserRole fails closed to DRIVER (the least-privileged live role)", () => {
   test("exact live values pass through", () => {
     expect(toUserRole(UserRole.ADMIN)).toBe(UserRole.ADMIN);
@@ -219,6 +238,18 @@ const TRACKERS_HANDLER_TABLE: readonly [string, Capability][] = [
   ["update", "trackers:write"],
 ];
 
+// The documents per-route split (ADR-0049 c6 — the invoices/trackers pattern
+// with a THIRD verb): read + write for both office roles, DELETE ADMIN-only
+// because deleting the bytes irreversibly destroys compliance evidence.
+const DOCUMENTS_HANDLER_TABLE: readonly [string, Capability][] = [
+  ["upload", "documents:write"],
+  ["list", "documents:read"],
+  ["getById", "documents:read"],
+  ["getContent", "documents:read"],
+  ["update", "documents:write"],
+  ["remove", "documents:delete"],
+];
+
 // DriversController's two login-link routes (2026-07-05, ADR-0034 c8)
 // override the class-level `drivers:*` with `users:manage`: deciding which
 // login sees which driver's own-record-scoped data is identity/account
@@ -270,6 +301,20 @@ describe("controller wiring (reflection over guard + permission metadata)", () =
 
   test.each(TRACKERS_HANDLER_TABLE)("TrackersController.%s requires %s", (method, token) => {
     const handler: unknown = TrackersController.prototype[method as keyof TrackersController];
+    expect(typeof handler).toBe("function");
+    expect(Reflect.getMetadata(REQUIRE_PERMISSION_KEY, handler as object)).toBe(token);
+  });
+
+  test("DocumentsController runs the chain at class level with the per-route split", () => {
+    const guards: unknown[] = Reflect.getMetadata(GUARDS_METADATA, DocumentsController) ?? [];
+    expect(guards).toContain(AuthGuard);
+    expect(guards).toContain(RolesGuard);
+    // No class-level token: every route declares its own verb of the split.
+    expect(Reflect.getMetadata(REQUIRE_PERMISSION_KEY, DocumentsController)).toBeUndefined();
+  });
+
+  test.each(DOCUMENTS_HANDLER_TABLE)("DocumentsController.%s requires %s", (method, token) => {
+    const handler: unknown = DocumentsController.prototype[method as keyof DocumentsController];
     expect(typeof handler).toBe("function");
     expect(Reflect.getMetadata(REQUIRE_PERMISSION_KEY, handler as object)).toBe(token);
   });

@@ -94,6 +94,17 @@ export type Capability =
   // OFFICE_STAFF is a deliberate later grant (an ADR-0043 "Revisit when"),
   // which is one row in the map below — not a controller edit.
   | "agent:use"
+  // FleetDocument aggregate (ADR-0049 c6). READ and WRITE are operational
+  // floor work — office staff already handle the same papers' Tier-2 metadata
+  // via drivers:* — but DELETE is its own ADMIN-only verb token: deleting a
+  // document's bytes irreversibly destroys compliance evidence (the
+  // invoices:write calculus applied to papers; row deletes elsewhere are
+  // Restrict-guarded, object deletes are not). Three tokens, not a coarse
+  // documents:*, precisely so the destruction verb can carry different
+  // privilege than day-to-day upload/edit. DRIVER holds none in v1.
+  | "documents:read"
+  | "documents:write"
+  | "documents:delete"
   | "gps:ingest"
   | "gps:read-derived"
   | "gps:read-raw"
@@ -139,6 +150,11 @@ const OPERATIONAL_CAPABILITIES: readonly Capability[] = [
   // calculus as geofences:read. WRITING the register (trackers:write) is
   // ADMIN-only and lives in the ADMIN set below.
   "trackers:read",
+  // Fleet documents (ADR-0049 c6): uploading/reading the papers is operational
+  // data entry — the same trust tier as the drivers:* PII the floor already
+  // holds. DELETING documents (documents:delete) is ADMIN-only, below.
+  "documents:read",
+  "documents:write",
 ];
 
 // The role -> capability map, exactly per ADR-0028 c4's table. Keyed by the
@@ -187,6 +203,10 @@ export const ROLE_CAPABILITY_MAP: Record<UserRole, ReadonlySet<Capability>> = {
     // Talking to the AI chat agent (ADR-0043 c1) — ADMIN-only in v1; see the
     // Capability union note for why this is a single coarse token.
     "agent:use",
+    // Deleting fleet documents irreversibly destroys compliance-evidence
+    // bytes (ADR-0049 c6) — the invoices:write calculus applied to papers.
+    // The floor holds documents:read/write; only ADMIN removes.
+    "documents:delete",
     "users:manage",
     "roles:assign",
   ]),

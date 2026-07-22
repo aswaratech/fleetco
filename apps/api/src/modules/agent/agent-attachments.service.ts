@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { type AgentAttachment } from "@prisma/client";
 
+import { sniffImageType } from "../../common/file-signatures";
 import { type Actor } from "../auth/driver-scope.service";
 
 // PrismaService and ObjectStorage are injected by NestJS via
@@ -46,37 +47,11 @@ const EXTENSION_BY_TYPE: Record<string, string> = {
   "image/webp": "webp",
 };
 
-/**
- * Magic-byte sniff (ADR-0044 c3): JPEG `FF D8 FF`, PNG `89 50 4E 47 0D 0A 1A
- * 0A`, WEBP `RIFF….WEBP`. Returns the DETECTED content type or null.
- * Hand-rolled (three signatures) rather than a dependency.
- */
-export function sniffImageType(bytes: Buffer): string | null {
-  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
-    return "image/jpeg";
-  }
-  if (
-    bytes.length >= 8 &&
-    bytes[0] === 0x89 &&
-    bytes[1] === 0x50 &&
-    bytes[2] === 0x4e &&
-    bytes[3] === 0x47 &&
-    bytes[4] === 0x0d &&
-    bytes[5] === 0x0a &&
-    bytes[6] === 0x1a &&
-    bytes[7] === 0x0a
-  ) {
-    return "image/png";
-  }
-  if (
-    bytes.length >= 12 &&
-    bytes.toString("ascii", 0, 4) === "RIFF" &&
-    bytes.toString("ascii", 8, 12) === "WEBP"
-  ) {
-    return "image/webp";
-  }
-  return null;
-}
+// The magic-byte sniff moved to common/file-signatures.ts in ADR-0049 F2 so
+// the documents module shares ONE sniffer (this surface's allowlist stays
+// image-only — photos of receipts). Re-exported so existing importers
+// (twilio-media.client.ts, tests) keep their import path unchanged.
+export { sniffImageType };
 
 @Injectable()
 export class AgentAttachmentsService {
