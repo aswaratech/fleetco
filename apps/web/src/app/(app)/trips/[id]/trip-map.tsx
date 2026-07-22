@@ -16,6 +16,7 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 
 import { fixAgeInWords, markerStateForAge, type MarkerState } from "@/lib/map-markers";
+import { pinDivIcon } from "@/lib/map-pins";
 
 // The read-only trip-detail tracking map (ADR-0047 c9, DESIGN §"Trip dispatch"):
 // the assigned vehicle's latest fix (with the /map fix-age honesty), the pickup
@@ -64,26 +65,6 @@ const MARKER_TOKEN: Record<MarkerState, { cssVar: string; fallback: string }> = 
 function resolveVar(cssVar: string, fallback: string): string {
   const value = getComputedStyle(document.documentElement).getPropertyValue(cssVar).trim();
   return value || fallback;
-}
-
-// A teardrop pin divIcon in a given CSS-var color. var() DOES resolve inside the
-// divIcon HTML (custom properties cascade into the Leaflet marker pane), unlike
-// pathOptions — so this uses no Tailwind class token and the design-token
-// consumption sweep stays green. The tip sits on the coordinate (iconAnchor).
-function pinDivIcon(colorVar: string, fallback: string): L.DivIcon {
-  return L.divIcon({
-    className: "",
-    html:
-      `<span style="color: var(${colorVar}, ${fallback}); ` +
-      `filter: drop-shadow(0 1px 1px rgba(0,0,0,0.35)); display: block; line-height: 0;">` +
-      `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" ` +
-      `fill="currentColor" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" ` +
-      `stroke-linejoin="round">` +
-      `<path d="M12 21s7-6.13 7-11a7 7 0 1 0-14 0c0 4.87 7 11 7 11z"/>` +
-      `<circle cx="12" cy="10" r="2.5" fill="#ffffff" stroke="none"/></svg></span>`,
-    iconSize: [28, 28],
-    iconAnchor: [14, 28],
-  });
 }
 
 // Fit the frame to all points ONCE (a doneRef guard) so an operator's pan/zoom

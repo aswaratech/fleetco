@@ -1,9 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CircleMarker,
   MapContainer,
+  Marker,
   Polygon,
   Popup,
   TileLayer,
@@ -14,12 +15,24 @@ import L from "leaflet";
 
 import "leaflet/dist/leaflet.css";
 
+import {
+  ACTIVE_TRIPS_QUERY,
+  activeTripByVehicle,
+  mapActiveTrips,
+  TRIPS_POLL_INTERVAL_MS,
+  tripPins,
+  type ActiveTripOverlay,
+  type ActiveTripsWireResponse,
+} from "@/lib/active-trips";
+import { Badge } from "@/components/ui/badge";
 import { vertexInputToLatLngs, type LatLngLike } from "@/lib/geofence-latlng";
 import { wktToVertexInput } from "@/lib/geofences-schema";
 import { fixAgeInWords, markerStateForAge, type MarkerState } from "@/lib/map-markers";
+import { pinDivIcon } from "@/lib/map-pins";
 import { formatNepaliDate } from "@/lib/nepali-date";
 import { VEHICLE_KIND_LABELS } from "@/lib/vehicles-schema";
 
+import { TRIP_STATUS_BADGE, TRIP_STATUS_LABELS } from "../trips/types";
 import type { DepotFence, LatestPosition, LatestPositionsResponse } from "./types";
 
 // The /map client island (ADR-0042 M9; DESIGN.md §Surfaces "Live map").
@@ -36,11 +49,16 @@ import type { DepotFence, LatestPosition, LatestPositionsResponse } from "./type
 // always-open ops tab must not hammer the API or the OSM tiles), and
 // resumed-AND-fired on visibility return so the operator never stares at a
 // paused snapshot. A failed poll keeps the last markers and states the
-// network line in the sidebar — the map never blanks.
+// network line in the sidebar — the map never blanks. The ADR-0048
+// active-trips layer polls the trips list on its own slower 60 s cadence
+// with the same visibility discipline — the layer may lag positions by up
+// to one tick, stated in DESIGN.md's Refresh bullet.
 //
 // TIER-5 DISCIPLINE: coordinates render on the map and go nowhere else —
 // nothing in the URL, nothing logged, one latest fix per vehicle, no
-// trails.
+// trails. The trip layer adds none (ADR-0048 c4): Tier-3 site pins only,
+// consignee Tier-2 stripped before this island's props/state, no route
+// lines.
 
 export interface LiveMapProps {
   initialPositions: LatestPosition[];
@@ -51,6 +69,13 @@ export interface LiveMapProps {
   trackedVehicleIds: string[];
   /** Total register rows at page load (drives the no-trackers empty state). */
   trackersRegistered: number;
+  /** The ADR-0048 layer's initial page-load fetch, already Tier-2-stripped
+   *  server-side (`mapActiveTrips`). */
+  initialActiveTrips: ActiveTripOverlay[];
+  /** True when the page-load trips fetch failed non-401 — the layer renders
+   *  empty with the "Trip data unavailable." line; the vehicle map is
+   *  unaffected. */
+  tripsUnavailable: boolean;
 }
 
 const POLL_INTERVAL_MS = 20_000;
@@ -141,13 +166,37 @@ export function LiveMap({
   depots,
   trackedVehicleIds,
   trackersRegistered,
+  initialActiveTrips,
+  tripsUnavailable,
 }: LiveMapProps): React.ReactElement {
   const [positions, setPositions] = useState<LatestPosition[]>(initialPositions);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date>(() => new Date());
   const [pollFailed, setPollFailed] = useState(false);
+  const [activeTrips, setActiveTrips] = useState<ActiveTripOverlay[]>(initialActiveTrips);
+  const [tripsFailed, setTripsFailed] = useState(tripsUnavailable);
+  // The L.Map instance, captured so the sidebar (outside <MapContainer>)
+  // can pan; the per-vehicle marker refs let a sidebar row open the popup.
+  const [map, setMap] = useState<L.Map | null>(null);
+  const vehicleMarkerRefs = useRef<Map<string, L.CircleMarker>>(new Map());
 
   // Resolved once per mount (ssr:false — the document exists at render).
   const markerColors = useMemo(resolveMarkerColors, []);
+
+  // The on-trip ring hue is deliberately STATUS-AGNOSTIC (DESIGN.md §"Live
+  // map": the ring is recognition that a trip exists; the status badge is
+  // the meaning) — text-primary, not a status token, so it can never be
+  // read as a fifth fix-age state or a status hue.
+  const ringColor = useMemo(() => {
+    const value = getComputedStyle(document.documentElement)
+      .getPropertyValue("--color-text-primary")
+      .trim();
+    return value || "#18181b";
+  }, []);
+  const pickupIcon = useMemo(() => pinDivIcon("--color-accent-primary", "#059669"), []);
+  const dropoffIcon = useMemo(() => pinDivIcon("--color-status-info", "#2563eb"), []);
+
+  const tripByVehicle = useMemo(() => activeTripByVehicle(activeTrips), [activeTrips]);
+  const pins = useMemo(() => tripPins(activeTrips), [activeTrips]);
 
   // Decode the yard rings once — depots are fetched per page load, not
   // polled (fence edits are rare; a reload picks them up).
@@ -180,22 +229,54 @@ export function LiveMap({
     }
   }, []);
 
+  // The trips-layer poll (ADR-0048 c5): the SAME visibility discipline at
+  // the slower 60 s cadence. A failed poll keeps the last layer and raises
+  // the "Trip data unavailable." line; responses pass through the
+  // Tier-2-stripping mapper before entering state, exactly like the
+  // server-side initial fetch.
+  const pollTrips = useCallback(async (): Promise<void> => {
+    try {
+      const res = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL}/api/v1/trips?${ACTIVE_TRIPS_QUERY}`,
+        {
+          credentials: "include",
+          cache: "no-store",
+        },
+      );
+      if (!res.ok) throw new Error(`trips poll failed: ${res.status}`);
+      const body = (await res.json()) as ActiveTripsWireResponse;
+      setActiveTrips(mapActiveTrips(body.items));
+      setTripsFailed(false);
+    } catch {
+      setTripsFailed(true);
+    }
+  }, []);
+
   useEffect(() => {
     // Poll every 20 s while visible; on visibility return, fire immediately
     // and resume — the interval itself keeps running but skips hidden ticks
-    // (cheaper than tearing the timer down and identical in behavior).
+    // (cheaper than tearing the timer down and identical in behavior). The
+    // trips layer rides its own 60 s interval; visibility return re-fires
+    // BOTH so neither layer shows a paused snapshot.
     const id = setInterval(() => {
       if (document.visibilityState !== "hidden") void poll();
     }, POLL_INTERVAL_MS);
+    const tripsId = setInterval(() => {
+      if (document.visibilityState !== "hidden") void pollTrips();
+    }, TRIPS_POLL_INTERVAL_MS);
     function onVisibilityChange(): void {
-      if (document.visibilityState !== "hidden") void poll();
+      if (document.visibilityState !== "hidden") {
+        void poll();
+        void pollTrips();
+      }
     }
     document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       clearInterval(id);
+      clearInterval(tripsId);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [poll]);
+  }, [poll, pollTrips]);
 
   const withFix = positions.filter(
     (p): p is LatestPosition & { fix: NonNullable<LatestPosition["fix"]> } =>
@@ -207,6 +288,20 @@ export function LiveMap({
     lat: p.fix.latitude,
     lng: p.fix.longitude,
   }));
+
+  // A sidebar trip row pans to the vehicle's fix and opens its popup; a
+  // fix-less trip pans to its pickup pin instead (the closest thing to
+  // "where is this load" the map can honestly show).
+  function focusTrip(trip: ActiveTripOverlay): void {
+    if (map === null) return;
+    const pos = withFix.find((p) => p.vehicleId === trip.vehicleId);
+    if (pos !== undefined) {
+      map.flyTo([pos.fix.latitude, pos.fix.longitude], Math.max(map.getZoom(), 14));
+      vehicleMarkerRefs.current.get(trip.vehicleId)?.openPopup();
+    } else if (trip.pickupSite !== null) {
+      map.flyTo([trip.pickupSite.latitude, trip.pickupSite.longitude], Math.max(map.getZoom(), 13));
+    }
+  }
 
   // The empty states, stated as fact (Voice): which one shows depends on
   // what exists, not what failed.
@@ -229,6 +324,7 @@ export function LiveMap({
           zoom={DEFAULT_ZOOM}
           scrollWheelZoom
           className="h-full min-h-[70vh] w-full"
+          ref={setMap}
         >
           <TileLayer
             attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
@@ -254,48 +350,107 @@ export function LiveMap({
             </Polygon>
           ))}
 
+          {/* The always-on pickup/drop-off pins (ADR-0048 c4): one teardrop
+              per (site, role) across all active trips — the trip-map pin,
+              one shared implementation. Tier-3 fixed business locations; no
+              route lines, no trails. */}
+          {pins.map((pin) => (
+            <Marker
+              key={pin.key}
+              position={[pin.latitude, pin.longitude]}
+              icon={pin.role === "pickup" ? pickupIcon : dropoffIcon}
+            >
+              <Tooltip>
+                {pin.role === "pickup" ? "Pickup" : "Drop-off"} · {pin.name}
+              </Tooltip>
+            </Marker>
+          ))}
+
           {/* One CircleMarker per vehicle-with-fix (an SVG path — colorable
               by token, no icon-asset pipeline), hue = server-computed fix
               age. The popup's age LABEL carries the meaning; the hue is
-              recognition (anti-pattern #2). */}
+              recognition (anti-pattern #2). A vehicle on an active trip
+              additionally carries the status-AGNOSTIC on-trip ring (the
+              ring is recognition that a trip exists; the popup's status
+              badge is the meaning — the fix-age hue channel is never
+              repurposed). */}
           {withFix.map((p) => {
             const state = markerStateForAge(p.fixAgeSeconds ?? 0);
             const color = markerColors[state];
+            const trip = tripByVehicle.get(p.vehicleId);
             return (
-              <CircleMarker
-                key={p.vehicleId}
-                center={[p.fix.latitude, p.fix.longitude]}
-                radius={9}
-                pathOptions={{
-                  color,
-                  weight: 2,
-                  fillColor: color,
-                  fillOpacity: state === "dead" ? 0.35 : 0.8,
-                }}
-              >
-                <Popup>
-                  <div className="space-y-1 text-sm">
-                    <p>
-                      <a
-                        href={`/vehicles/${p.vehicleId}`}
-                        className="text-text-primary font-mono font-semibold underline-offset-2 hover:underline"
-                      >
-                        {p.registrationNumber}
-                      </a>
-                    </p>
-                    <p className="text-text-secondary">
-                      {VEHICLE_KIND_LABELS[p.kind] ?? p.kind} · {formatSpeedKmh(p.fix.speed)} ·
-                      Ignition {formatIgnition(p.fix.ignition)}
-                    </p>
-                    {/* Age in words + the BS/AD date line. No coordinates
-                        printed — they are already ON the map. */}
-                    <p className="text-text-muted">
-                      {fixAgeInWords(p.fixAgeSeconds ?? 0)} ·{" "}
-                      {formatNepaliDate(p.fix.timestamp, { format: "both" })}
-                    </p>
-                  </div>
-                </Popup>
-              </CircleMarker>
+              <Fragment key={p.vehicleId}>
+                {trip !== undefined ? (
+                  <CircleMarker
+                    center={[p.fix.latitude, p.fix.longitude]}
+                    radius={13}
+                    interactive={false}
+                    pathOptions={{ color: ringColor, weight: 1.5, fill: false }}
+                  />
+                ) : null}
+                <CircleMarker
+                  center={[p.fix.latitude, p.fix.longitude]}
+                  radius={9}
+                  ref={(marker) => {
+                    if (marker) vehicleMarkerRefs.current.set(p.vehicleId, marker);
+                    else vehicleMarkerRefs.current.delete(p.vehicleId);
+                  }}
+                  pathOptions={{
+                    color,
+                    weight: 2,
+                    fillColor: color,
+                    fillOpacity: state === "dead" ? 0.35 : 0.8,
+                  }}
+                >
+                  <Popup>
+                    <div className="space-y-1 text-sm">
+                      <p>
+                        <a
+                          href={`/vehicles/${p.vehicleId}`}
+                          className="text-text-primary font-mono font-semibold underline-offset-2 hover:underline"
+                        >
+                          {p.registrationNumber}
+                        </a>
+                      </p>
+                      <p className="text-text-secondary">
+                        {VEHICLE_KIND_LABELS[p.kind] ?? p.kind} · {formatSpeedKmh(p.fix.speed)} ·
+                        Ignition {formatIgnition(p.fix.ignition)}
+                      </p>
+                      {/* Age in words + the BS/AD date line. No coordinates
+                          printed — they are already ON the map. */}
+                      <p className="text-text-muted">
+                        {fixAgeInWords(p.fixAgeSeconds ?? 0)} ·{" "}
+                        {formatNepaliDate(p.fix.timestamp, { format: "both" })}
+                      </p>
+                      {/* The trip line (ADR-0048): status badge + endpoints +
+                          driver + ONE trip deep-link — the popup's two links
+                          serve two contexts, vehicle and trip, one each (the
+                          recorded anti-pattern-#3 reading). No consignee. */}
+                      {trip !== undefined ? (
+                        <div className="border-border-subtle border-t pt-1">
+                          <p className="flex items-center gap-1.5">
+                            <Badge variant={TRIP_STATUS_BADGE[trip.status]}>
+                              {TRIP_STATUS_LABELS[trip.status]}
+                            </Badge>
+                            <span className="text-text-secondary">
+                              {trip.pickupSite?.name ?? "—"} → {trip.dropoffSite?.name ?? "—"}
+                            </span>
+                          </p>
+                          <p className="text-text-secondary mt-1">
+                            {trip.driverName} ·{" "}
+                            <a
+                              href={`/trips/${trip.id}`}
+                              className="text-text-primary underline-offset-2 hover:underline"
+                            >
+                              Open trip →
+                            </a>
+                          </p>
+                        </div>
+                      ) : null}
+                    </div>
+                  </Popup>
+                </CircleMarker>
+              </Fragment>
             );
           })}
         </MapContainer>
@@ -327,20 +482,74 @@ export function LiveMap({
             ))}
           </ul>
           <p className="text-text-muted mt-3 text-xs tabular-nums">
-            Last updated {clockTime(lastUpdatedAt)} · refreshes every 20 s
+            Last updated {clockTime(lastUpdatedAt)} · positions every 20 s · trips every 60 s
           </p>
           {pollFailed ? (
             <p className="text-status-error mt-2 text-sm" role="alert">
               Cannot reach the server.{" "}
               <button
                 type="button"
-                onClick={() => void poll()}
+                onClick={() => {
+                  void poll();
+                  void pollTrips();
+                }}
                 className="underline underline-offset-2"
               >
                 Retry.
               </button>
             </p>
           ) : null}
+        </section>
+
+        {/* The active-trips layer's sidebar section (ADR-0048): every
+            dispatched trip, not just the per-vehicle popup winner. A row
+            click pans to the vehicle (or its pickup pin when fix-less) —
+            the trip deep-link lives in the popup. */}
+        <section className="border-border-subtle bg-surface-raised rounded border p-4 shadow-sm">
+          <h2 className="text-text-muted mb-3 text-xs font-medium tracking-wide uppercase">
+            Active trips
+          </h2>
+          {tripsFailed ? (
+            <p className="text-text-secondary text-sm">Trip data unavailable.</p>
+          ) : activeTrips.length === 0 ? (
+            <p className="text-text-muted text-sm">No active trips.</p>
+          ) : (
+            <>
+              <p className="text-text-muted mb-2 text-xs tabular-nums">
+                {activeTrips.length} {activeTrips.length === 1 ? "trip" : "trips"} dispatched or
+                underway
+              </p>
+              <ul className="space-y-1.5 text-sm">
+                {activeTrips.map((trip) => {
+                  const hasFix = withFix.some((p) => p.vehicleId === trip.vehicleId);
+                  return (
+                    <li key={trip.id}>
+                      <button
+                        type="button"
+                        onClick={() => focusTrip(trip)}
+                        className="flex w-full items-center gap-2 text-left"
+                      >
+                        <span className="text-text-primary font-mono">
+                          {trip.registrationNumber}
+                        </span>
+                        <span className="text-text-secondary truncate">{trip.driverName}</span>
+                        <span className="ml-auto flex shrink-0 items-center gap-1.5">
+                          {!hasFix ? (
+                            <span className="text-text-muted text-xs">
+                              {trackedIds.has(trip.vehicleId) ? "No fix yet" : "No tracker"}
+                            </span>
+                          ) : null}
+                          <Badge variant={TRIP_STATUS_BADGE[trip.status]}>
+                            {TRIP_STATUS_LABELS[trip.status]}
+                          </Badge>
+                        </span>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            </>
+          )}
         </section>
 
         <section className="border-border-subtle bg-surface-raised rounded border p-4 shadow-sm">

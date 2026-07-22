@@ -1,6 +1,6 @@
 # ADR-0048: Active trips on the admin live map — a read-time layer over the ADR-0047 trips and ADR-0042 positions reads
 
-- **Status:** Proposed (decisions taken interactively by the PO in the 2026-07-19 planning session — governance form, status set, pin behavior, and route-line deferral each chosen with alternatives surfaced; the PO merging this PR is the durable ratification — see §Phase mismatch. An agent must never self-accept this ADR, add an `## Acceptance` block, or flip the status — the PO ratifies separately, per the ADR-0038 rule.)
+- **Status:** Accepted (ratified by the PO merging PR #242 on 2026-07-19 — the durable ratification this ADR's Proposed form named; flipped from Proposed in a follow-up docs commit per the ADR-0040/0041 acceptance pattern. The underlying decisions — governance form, status set, pin behavior, route-line deferral — were taken interactively by the PO in the 2026-07-19 planning session with alternatives surfaced; see §Phase mismatch.)
 - **Date:** 2026-07-19
 - **Decider:** Product owner (CEO)
 
