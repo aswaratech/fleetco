@@ -72,6 +72,7 @@ model User {
   /// an identity pointer, never a stored grant.
   agentPhoneLinks         AgentPhoneLink[]    @relation("AgentPhoneLinkUser")
   fleetDocumentsCreated   FleetDocument[]     @relation("FleetDocumentCreatedBy")
+  renewalRecordsCreated   RenewalRecord[]     @relation("RenewalRecordCreatedBy")
   /// The Driver this login identity is linked to, if any (ADR-0034 c4). A User
   /// with role DRIVER is linked 1:1 to a Driver row via Driver.userId.
   driver                  Driver?             @relation("DriverUser")
@@ -307,6 +308,7 @@ model Vehicle {
   serviceSchedules ServiceSchedule[]
   serviceRecords   ServiceRecord[]
   fleetDocuments   FleetDocument[]
+  renewalRecords   RenewalRecord[]
 
   @@index([status])
   @@index([kind])
@@ -1089,6 +1091,7 @@ model ExpenseLog {
   // expense raises to HTTP 409 (the latent-500 close its iter-22 docstring
   // anticipated for exactly this case).
   serviceRecords ServiceRecord[]
+  renewalRecords RenewalRecord[]
 
   @@index([vehicleId])
   @@index([tripId])
@@ -2492,6 +2495,8 @@ model FleetDocument {
   createdById String
   createdBy   User     @relation("FleetDocumentCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
 
+  renewalRecords RenewalRecord[]
+
   @@index([vehicleId])
   @@index([driverId])
   @@index([customerId])
@@ -2499,4 +2504,72 @@ model FleetDocument {
   @@index([expiresAt])
   @@index([createdById])
   @@map("fleet_document")
+}
+
+// Which vehicle compliance item a RenewalRecord renews (ADR-0049 c4). The
+// three values mirror the compliance reminder kinds byte-for-byte
+// (notifications/compliance-source.ts) — the anti-drift rule: one vocabulary
+// for badges, reminders, and renewals.
+enum RenewalKind {
+  BLUEBOOK
+  INSURANCE
+  ROUTE_PERMIT
+
+  @@map("renewal_kind")
+}
+
+// A renewal-record row (ADR-0049 c4): the append-only proof that a vehicle
+// compliance item was renewed — what the expiry was BEFORE, what it is NOW,
+// when, on what paper, and at what cost. Created ONLY by the atomic renew
+// action (POST /vehicles/:id/renewals), which writes this row and updates the
+// vehicle's matching expiry/number fields in ONE transaction; there is no
+// PATCH/DELETE (a wrong entry is corrected by renewing again with a note —
+// the NotificationLog ledger posture).
+model RenewalRecord {
+  id        String      @id @default(cuid())
+  vehicleId String
+  vehicle   Vehicle     @relation(fields: [vehicleId], references: [id], onDelete: Restrict)
+  kind      RenewalKind
+
+  /// Tier 3 per ADR-0013 — the expiry BEFORE this renewal, snapshotted
+  /// SERVER-SIDE from the vehicle row inside the renew transaction (a
+  /// pre-image the client can never fabricate). Null when the field had
+  /// never been set (a first-ever registration).
+  previousExpiresAt DateTime?
+  /// Tier 3 — the new expiry written to the vehicle's matching field in the
+  /// same transaction. A new expiry is a new NotificationLog occurrenceKey,
+  /// so the ADR-0038 reminder re-arms with zero notification-code change.
+  newExpiresAt      DateTime
+  /// Tier 3 — when the renewal was done (operator-entered; defaults to the
+  /// request time). Deliberately NOT monotonic — backdated corrections are
+  /// legitimate (the fuel-log odometer precedent).
+  renewedAt         DateTime
+
+  /// Nullable link to the NEW paper's FleetDocument (Restrict — a referenced
+  /// proof delete-blocks through DocumentsService's P2003 -> 409 arm).
+  /// Service-validated: same vehicle + the kind's matching category.
+  documentId   String?
+  document     FleetDocument? @relation(fields: [documentId], references: [id], onDelete: Restrict)
+  /// Nullable link to the ExpenseLog recording this renewal's COST — the
+  /// ServiceRecord.expenseLogId pattern verbatim: link an existing ledger
+  /// row, never copy an amount, never create one inline. Service-validated:
+  /// same vehicle + the kind's allowed expense categories (INSURANCE ->
+  /// INSURANCE; ROUTE_PERMIT -> PERMIT; BLUEBOOK -> PERMIT/OTHER).
+  expenseLogId String?
+  expenseLog   ExpenseLog?    @relation(fields: [expenseLogId], references: [id], onDelete: Restrict)
+
+  /// Tier 3 — free-form notes; null when empty.
+  notes String?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  createdById String
+  createdBy   User     @relation("RenewalRecordCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@index([vehicleId])
+  @@index([renewedAt(sort: Desc)])
+  @@index([documentId])
+  @@index([expenseLogId])
+  @@index([createdById])
+  @@map("renewal_record")
 }

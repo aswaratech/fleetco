@@ -50,6 +50,9 @@ const TABLES = [
   "invoice_number_sequence",
   "service_record",
   "service_schedule",
+  // ADR-0049 F3: renewal records FK into vehicle + fleet_document +
+  // expense_log (all Restrict) + user, so the ledger precedes them all.
+  "renewal_record",
   // ADR-0049 F2: fleet documents FK into vehicle/driver/customer (Restrict,
   // one of the three) + user (createdById), so the row precedes all four.
   // CASCADE makes order cosmetic.

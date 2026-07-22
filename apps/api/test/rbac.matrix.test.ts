@@ -49,6 +49,7 @@ import { InvoicesController } from "../src/modules/invoices/invoices.controller"
 import { JobsController } from "../src/modules/jobs/jobs.controller";
 import { ServiceRecordsController } from "../src/modules/maintenance/service-records.controller";
 import { ServiceSchedulesController } from "../src/modules/maintenance/service-schedules.controller";
+import { RenewalsController } from "../src/modules/vehicles/renewals.controller";
 import { ReportsController } from "../src/modules/reports/reports.controller";
 import { RoutingController } from "../src/modules/routing/routing.controller";
 import { TrackersController } from "../src/modules/telematics/trackers.controller";
@@ -204,6 +205,10 @@ const CLASS_TOKEN_TABLE: readonly [string, object, Capability][] = [
   // three live roles hold trips:* (dispatch continuity), so the gate's live wall
   // is authentication; roles.guard.test.ts pins the capability-absent denial.
   ["RoutingController", RoutingController, "trips:*"],
+  // ADR-0049 F3: renewals are Vehicle-aggregate writes (the atomic renew
+  // updates the vehicle's compliance fields), so the nested controller rides
+  // the same class-level token as VehiclesController.
+  ["RenewalsController", RenewalsController, "vehicles:*"],
   ["FuelLogsController", FuelLogsController, "fuel-logs:*"],
   ["ExpenseLogsController", ExpenseLogsController, "expense-logs:*"],
   ["ReportsController", ReportsController, "reports:read"],
