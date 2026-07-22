@@ -71,6 +71,7 @@ model User {
   /// ADR-0043 c1) is re-checked against the live role at turn time, so a link is
   /// an identity pointer, never a stored grant.
   agentPhoneLinks         AgentPhoneLink[]    @relation("AgentPhoneLinkUser")
+  fleetDocumentsCreated   FleetDocument[]     @relation("FleetDocumentCreatedBy")
   /// The Driver this login identity is linked to, if any (ADR-0034 c4). A User
   /// with role DRIVER is linked 1:1 to a Driver row via Driver.userId.
   driver                  Driver?             @relation("DriverUser")
@@ -305,6 +306,7 @@ model Vehicle {
   // P2003 → 409 arm covers the new referencers with no change (ADR-0037 c1).
   serviceSchedules ServiceSchedule[]
   serviceRecords   ServiceRecord[]
+  fleetDocuments   FleetDocument[]
 
   @@index([status])
   @@index([kind])
@@ -410,6 +412,8 @@ model Driver {
   user   User?   @relation("DriverUser", fields: [userId], references: [id], onDelete: Restrict)
 
   trips Trip[] @relation("TripDriver")
+
+  fleetDocuments FleetDocument[]
 
   @@index([status])
   @@index([licenseClass])
@@ -723,6 +727,8 @@ model Customer {
   // that has invoices returns a clean 409, no CustomersService change in
   // Program D.
   invoices Invoice[]
+
+  fleetDocuments FleetDocument[]
 
   @@index([status])
   @@index([createdById])
@@ -2408,4 +2414,89 @@ model WhatsAppMessageLog {
   @@index([conversationId])
   @@index([messageId])
   @@map("whatsapp_message_log")
+}
+
+// Which paper a FleetDocument is (ADR-0049 c3). The allowed set is narrowed
+// PER ENTITY at the service layer (the category matrix): VEHICLE carries
+// BLUEBOOK / INSURANCE / ROUTE_PERMIT / AGREEMENT / OTHER, DRIVER carries
+// LICENSE / ID_DOCUMENT / AGREEMENT / OTHER, CUSTOMER carries AGREEMENT /
+// OTHER. Named DocumentCategory (NOT DocumentType — the invoice aggregate
+// already owns that name for INVOICE/CREDIT_NOTE).
+enum DocumentCategory {
+  BLUEBOOK
+  INSURANCE
+  ROUTE_PERMIT
+  AGREEMENT
+  LICENSE
+  ID_DOCUMENT
+  OTHER
+
+  @@map("document_category")
+}
+
+// A fleet document (ADR-0049 c1): a stored copy of a fleet-related paper —
+// Bluebook scan, insurance policy, route-permit papers, a driver's license or
+// ID document, or an agreement contract — attached to EXACTLY ONE of Vehicle /
+// Driver / Customer. The bytes live in object storage (R2 in production, the
+// in-memory mock elsewhere) through the shared ObjectStorage seam; this row
+// is the Tier-4/Tier-3 metadata that finds them. Entity-lifetime data: no
+// retention prune applies (the deliberate contrast with AgentAttachment's
+// 180-day transcript regime — ADR-0044's rationale for reserving this model).
+model FleetDocument {
+  id String @id @default(cuid())
+
+  /// EXACTLY ONE of vehicleId / driverId / customerId is set — enforced at
+  /// the service layer (DocumentsService is the single writer; ADR-0049
+  /// records the no-DB-CHECK decision). All three are onDelete: Restrict, so
+  /// an entity with documents delete-blocks through each entity service's
+  /// EXISTING P2003 -> 409 arm.
+  vehicleId  String?
+  vehicle    Vehicle?  @relation(fields: [vehicleId], references: [id], onDelete: Restrict)
+  driverId   String?
+  driver     Driver?   @relation(fields: [driverId], references: [id], onDelete: Restrict)
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
+  category DocumentCategory
+
+  /// Tier 3 per ADR-0013 — operator-entered label ("2083 insurance policy").
+  /// The upload form's helper text warns against putting license/ID numbers
+  /// in titles (the Trip.notes posture: free text is Tier 3, keep PII out).
+  title     String
+  /// Tier 3 per ADR-0013 — free-form notes; null when empty.
+  notes     String?
+  /// Tier 3 per ADR-0013 — optional expiry (agreements and licenses expire).
+  /// Feeds the ADR-0049 c5 documents reminder source; a renewal (new expiry)
+  /// re-arms the reminder because the NotificationLog occurrenceKey IS this
+  /// ISO date. Vehicle compliance categories are EXCLUDED from that source —
+  /// the Vehicle's structured *ExpiresAt fields stay canonical there.
+  expiresAt DateTime?
+
+  /// Tier 4 per ADR-0013 — the opaque object key
+  /// (documents/<entity>/<entityId>/<uuid>.<ext>). The BYTES it points at are
+  /// handled Tier 2 (ADR-0049 c7): never logged, no public URLs, served only
+  /// through the authed streaming route behind documents:read.
+  r2Key       String @unique
+  /// Tier 4 — the SNIFFED content type (application/pdf | image/jpeg |
+  /// image/png | image/webp), magic-byte-verified at upload; the client's
+  /// declared mimetype is never trusted (common/file-signatures.ts).
+  contentType String
+  /// Tier 4 — stored size in bytes (<= 10 MB, enforced at upload).
+  sizeBytes   Int
+  /// Tier 4 — SHA-256 hex of the stored bytes (audit/integrity, NOT dedup —
+  /// the AgentAttachment.sha256 rationale).
+  sha256      String
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  createdById String
+  createdBy   User     @relation("FleetDocumentCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@index([vehicleId])
+  @@index([driverId])
+  @@index([customerId])
+  // The documents reminder source scans WHERE expiresAt IS NOT NULL daily.
+  @@index([expiresAt])
+  @@index([createdById])
+  @@map("fleet_document")
 }

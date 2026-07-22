@@ -50,6 +50,10 @@ const TABLES = [
   "invoice_number_sequence",
   "service_record",
   "service_schedule",
+  // ADR-0049 F2: fleet documents FK into vehicle/driver/customer (Restrict,
+  // one of the three) + user (createdById), so the row precedes all four.
+  // CASCADE makes order cosmetic.
+  "fleet_document",
   "geofence",
   // ADR-0042 M3: FKs into vehicle + user, so it precedes both (CASCADE makes
   // order cosmetic, but the list stays readable as a dependency ordering).
