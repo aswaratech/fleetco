@@ -27,6 +27,7 @@ import {
   type ReminderItem,
 } from "./compliance-source";
 import { collectServiceMaintenanceReminders } from "./maintenance-source";
+import { collectDocumentExpiryReminders } from "./documents-source";
 import { renderReminderDigest } from "./digest";
 import {
   NOTIFICATION_QUEUE,
@@ -196,10 +197,44 @@ export class NotificationService implements OnApplicationBootstrap {
       now,
     );
 
-    // Both sources feed ONE scan → dedup → digest → send pipeline (ADR-0038 c4).
-    // The digest groups them by domain; the NotificationLog dedups them by the
-    // same tuple (distinct subjectTypes keep the keys from colliding).
-    const items = [...complianceItems, ...maintenanceItems];
+    // The DOCUMENT source (ADR-0049 c5): every fleet document that carries an
+    // expiry, classified by the SAME shared `complianceBadgeState`. The
+    // vehicle-compliance-category exclusion lives in the pure source — but it
+    // needs `vehicleAttached` per row, so the fetch selects `vehicleId` (for the
+    // flag) plus the owning entity's display name across the three FKs. Documents
+    // WITHOUT an expiry never remind, so the fetch filters `expiresAt` non-null.
+    const documents = await this.prisma.fleetDocument.findMany({
+      where: { expiresAt: { not: null } },
+      select: {
+        id: true,
+        category: true,
+        title: true,
+        expiresAt: true,
+        vehicleId: true,
+        vehicle: { select: { registrationNumber: true } },
+        driver: { select: { fullName: true } },
+        customer: { select: { name: true } },
+      },
+    });
+    const documentItems = collectDocumentExpiryReminders(
+      documents.map((d) => ({
+        id: d.id,
+        category: d.category,
+        title: d.title,
+        expiresAt: d.expiresAt?.toISOString() ?? null,
+        // The owning entity's display name — exactly one FK is set (the F2
+        // exactly-one invariant), so the first non-null wins.
+        entityLabel:
+          d.vehicle?.registrationNumber ?? d.driver?.fullName ?? d.customer?.name ?? "Unknown",
+        vehicleAttached: d.vehicleId !== null,
+      })),
+      now,
+    );
+
+    // All three sources feed ONE scan → dedup → digest → send pipeline (ADR-0038
+    // c4). The digest groups them by domain; the NotificationLog dedups them by
+    // the same tuple (distinct subjectTypes keep the keys from colliding).
+    const items = [...complianceItems, ...documentItems, ...maintenanceItems];
     if (items.length === 0) {
       return { itemsConsidered: 0, remindersNewlyDue: 0, sendJobsEnqueued: 0 };
     }

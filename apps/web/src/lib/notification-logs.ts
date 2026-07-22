@@ -21,15 +21,25 @@ export type NotificationBadgeVariant = "error" | "warning" | "neutral";
 const SUBJECT_TYPE_LABELS: Record<string, string> = {
   VEHICLE: "Vehicle compliance",
   SERVICE_SCHEDULE: "Service schedule",
+  // ADR-0049 F6: the fleet-document reminder source (agreements, licenses, IDs).
+  DOCUMENT: "Document",
 };
 
 // reminderKind → operator label. The precise-noun labels the digest renders
-// (DESIGN.md §Voice: "Bluebook", not "Document").
+// (DESIGN.md §Voice: "Bluebook", not "Document"). The document source (ADR-0049
+// F6) reminds by document category, so those join here; BLUEBOOK / INSURANCE /
+// ROUTE_PERMIT are shared with the compliance source (a document in those
+// categories only reaches the ledger from a DRIVER/CUSTOMER doc — the
+// vehicle-attached ones are excluded at the source).
 const REMINDER_KIND_LABELS: Record<string, string> = {
   BLUEBOOK: "Bluebook",
   INSURANCE: "Insurance",
   ROUTE_PERMIT: "Route permit",
   SERVICE: "Service",
+  AGREEMENT: "Agreement",
+  LICENSE: "License",
+  ID_DOCUMENT: "ID document",
+  OTHER: "Document",
 };
 
 // state → operator label. The four remind-worthy states across both sources.
@@ -79,5 +89,6 @@ export function stateBadgeVariant(state: string): NotificationBadgeVariant {
 // preset, which is the right v1 behavior for an audit view.
 export const SUBJECT_TYPE_FILTER_OPTIONS: readonly { value: string; label: string }[] = [
   { value: "VEHICLE", label: "Vehicle compliance" },
+  { value: "DOCUMENT", label: "Document" },
   { value: "SERVICE_SCHEDULE", label: "Service schedule" },
 ];
