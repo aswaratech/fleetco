@@ -58,8 +58,17 @@ const EXPENSE_CATEGORIES_FOR_KIND: Record<RenewalKindName, readonly ExpenseCateg
   ROUTE_PERMIT: ["PERMIT"],
 };
 
+/** A history row with its linked proof/cost SUMMARIES nested (F5's read
+ * shape): the web renders the document's title as an Open link and the
+ * expense's amount via formatNpr without N+1 fetches. Slim selects only —
+ * never the full linked rows. */
+export type RenewalRecordWithLinks = RenewalRecord & {
+  document: { id: string; title: string } | null;
+  expenseLog: { id: string; amountPaisa: number } | null;
+};
+
 export interface RenewalsListResult {
-  items: RenewalRecord[];
+  items: RenewalRecordWithLinks[];
   total: number;
   skip: number;
   take: number;
@@ -157,6 +166,13 @@ export class RenewalsService {
         orderBy: [{ renewedAt: "desc" }, { id: "asc" }],
         skip: safeSkip,
         take: safeTake,
+        // The F5 read shape: nest the linked proof/cost summaries (slim
+        // selects) so the history table renders titles and amounts without
+        // N+1 fetches. Absent links stay null.
+        include: {
+          document: { select: { id: true, title: true } },
+          expenseLog: { select: { id: true, amountPaisa: true } },
+        },
       }),
       this.prisma.renewalRecord.count({ where }),
     ]);

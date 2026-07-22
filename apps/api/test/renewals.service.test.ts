@@ -253,6 +253,9 @@ describe("RenewalsService (integration, real Postgres)", () => {
     const all = await service.list(vehicle.id, {});
     expect(all.total).toBe(2);
     expect(all.items.map((r) => r.kind)).toEqual(["INSURANCE", "BLUEBOOK"]); // newest first
+    // The F5 read shape: link summaries are nested keys, null when unlinked.
+    expect(all.items[0].document).toBeNull();
+    expect(all.items[0].expenseLog).toBeNull();
 
     const filtered = await service.list(vehicle.id, { kind: "BLUEBOOK" });
     expect(filtered.total).toBe(1);
@@ -290,6 +293,14 @@ describe("RenewalsService (integration, real Postgres)", () => {
       },
       adminId,
     );
+
+    // The F5 read shape carries the linked summaries for the history table.
+    const history = await service.list(vehicle.id, {});
+    expect(history.items[0].document).toEqual({ id: proof.id, title: "policy" });
+    expect(history.items[0].expenseLog).toEqual({
+      id: premium.id,
+      amountPaisa: premium.amountPaisa,
+    });
 
     // DocumentsService maps the P2003 to the house 409 (the F2 arm, now live).
     await expect(documents.delete(proof.id)).rejects.toBeInstanceOf(ConflictException);

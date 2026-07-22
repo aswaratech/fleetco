@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
 import { DocumentsSection } from "@/components/documents/documents-section";
+import { RenewalHistorySection } from "./renewal-history-section";
 import { NepaliDate } from "@/components/nepali-date";
 import { Badge } from "@/components/ui/badge";
 import { Breadcrumb } from "@/components/ui/breadcrumb";
@@ -242,7 +243,13 @@ function formatDateTime(iso: string | null): string {
 // render NO badge for "ok" / "none" (the date stands alone). The existing
 // <NepaliDate> render is preserved — the badge is additive, not a replacement.
 // A <Badge> is a <span> (status, not action — DESIGN.md anti-pattern #2).
-function ComplianceExpiry({ iso }: { iso: string | null }): React.ReactElement {
+function ComplianceExpiry({
+  iso,
+  renewHref,
+}: {
+  iso: string | null;
+  renewHref?: string;
+}): React.ReactElement {
   const state = complianceBadgeState(iso, new Date());
   let badge: React.ReactElement | null = null;
   if (state === "expired") {
@@ -254,6 +261,12 @@ function ComplianceExpiry({ iso }: { iso: string | null }): React.ReactElement {
     <span className="inline-flex flex-wrap items-center gap-2">
       <NepaliDate iso={iso} />
       {badge}
+      {/* ADR-0049 F5: the quiet per-row entry into the atomic renew flow. */}
+      {renewHref === undefined ? null : (
+        <Link href={renewHref} className="text-text-accent text-xs hover:underline">
+          Renew
+        </Link>
+      )}
     </span>
   );
 }
@@ -432,7 +445,12 @@ export default async function VehicleDetailPage({
             <DetailRow label="Bluebook number" value={valueOrDash(vehicle.bluebookNumber)} mono />
             <DetailRow
               label="Bluebook expires"
-              value={<ComplianceExpiry iso={vehicle.bluebookExpiresAt} />}
+              value={
+                <ComplianceExpiry
+                  iso={vehicle.bluebookExpiresAt}
+                  renewHref={`/vehicles/${vehicle.id}/renewals/new?kind=BLUEBOOK`}
+                />
+              }
             />
             <DetailRow label="Insurer" value={valueOrDash(vehicle.insurer)} />
             <DetailRow
@@ -450,7 +468,12 @@ export default async function VehicleDetailPage({
             />
             <DetailRow
               label="Insurance expires"
-              value={<ComplianceExpiry iso={vehicle.insuranceExpiresAt} />}
+              value={
+                <ComplianceExpiry
+                  iso={vehicle.insuranceExpiresAt}
+                  renewHref={`/vehicles/${vehicle.id}/renewals/new?kind=INSURANCE`}
+                />
+              }
             />
             <DetailRow
               label="Route permit number"
@@ -459,7 +482,12 @@ export default async function VehicleDetailPage({
             />
             <DetailRow
               label="Route permit expires"
-              value={<ComplianceExpiry iso={vehicle.routePermitExpiresAt} />}
+              value={
+                <ComplianceExpiry
+                  iso={vehicle.routePermitExpiresAt}
+                  renewHref={`/vehicles/${vehicle.id}/renewals/new?kind=ROUTE_PERMIT`}
+                />
+              }
             />
           </dl>
         </section>
@@ -472,6 +500,9 @@ export default async function VehicleDetailPage({
           entityPath={`/vehicles/${vehicle.id}`}
           entityNoun="vehicle"
         />
+
+        {/* ADR-0049 F5: the append-only old->new expiry proof trail. */}
+        <RenewalHistorySection vehicleId={vehicle.id} />
 
         {/* B4 (ADR-0037 c7): preventive-maintenance schedules. Per-schedule
             due-soon / overdue <Badge>, computed against this vehicle's current
