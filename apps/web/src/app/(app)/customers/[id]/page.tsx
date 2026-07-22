@@ -1,3 +1,4 @@
+import { DocumentsSection } from "@/components/documents/documents-section";
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
@@ -115,6 +116,14 @@ export default async function CustomerDetailPage({
                 the Drivers detail page omission. */}
           </dl>
         </section>
+
+        {/* ADR-0049 F4: the customer's papers — signed agreements, contracts. */}
+        <DocumentsSection
+          entityType="CUSTOMER"
+          entityId={customer.id}
+          entityPath={`/customers/${customer.id}`}
+          entityNoun="customer"
+        />
       </div>
     </main>
   );

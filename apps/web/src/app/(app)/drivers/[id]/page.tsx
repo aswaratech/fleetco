@@ -1,3 +1,4 @@
+import { DocumentsSection } from "@/components/documents/documents-section";
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
@@ -270,6 +271,14 @@ export default async function DriverDetailPage({
             />
           </dl>
         </section>
+
+        {/* ADR-0049 F4: the driver's papers — license scan, ID, agreements. */}
+        <DocumentsSection
+          entityType="DRIVER"
+          entityId={driver.id}
+          entityPath={`/drivers/${driver.id}`}
+          entityNoun="driver"
+        />
 
         <section className="border-border-subtle bg-surface-raised rounded border shadow-sm">
           <header className="border-border-subtle flex items-center justify-between gap-4 border-b px-6 py-4">
