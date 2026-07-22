@@ -2,6 +2,7 @@ import { formatNepaliDate } from "@fleetco/shared";
 
 import { SUBJECT_TYPE_VEHICLE, type ReminderItem, type ReminderState } from "./compliance-source";
 import { SUBJECT_TYPE_SERVICE_SCHEDULE } from "./maintenance-source";
+import { SUBJECT_TYPE_DOCUMENT } from "./documents-source";
 
 // The pure reminder-digest renderer (ADR-0038 commitment 7). Turns the newly-due
 // reminder items into one email body — `{ subject, text, html }` — with dates in
@@ -12,14 +13,16 @@ import { SUBJECT_TYPE_SERVICE_SCHEDULE } from "./maintenance-source";
 // the HTML body is a faithful render of the same content. Pure (no I/O, no clock)
 // so it is unit-tested in isolation like every FleetCo formatter.
 //
-// C3 BATCHES BOTH KINDS, GROUPED. The digest now renders two domains — Compliance
-// (vehicle documents, ADR-0031) and Maintenance (service schedules, ADR-0037) —
-// each as its own block with its own state sub-sections (most urgent first). An
-// item's domain is its `subjectType`; its "due" detail is `dueLabel` when the
-// source pre-rendered one (maintenance, whose occurrenceKey is a meter value or a
-// date), else `formatNepaliDate(occurrenceKey)` (compliance, whose occurrenceKey
-// IS the expiry date). A domain with no items is omitted entirely; a digest with
-// only compliance items renders exactly as it did in C2.
+// The digest BATCHES ALL SOURCES, GROUPED. It renders three domains —
+// Compliance (vehicle structured expiries, ADR-0031), Documents (fleet
+// documents with an expiry, ADR-0049 F6), and Maintenance (service schedules,
+// ADR-0037) — each as its own block with its own state sub-sections (most
+// urgent first). An item's domain is its `subjectType`; its "due" detail is
+// `dueLabel` when the source pre-rendered one (maintenance, whose occurrenceKey
+// is a meter value or a date), else `formatNepaliDate(occurrenceKey)`
+// (compliance and documents, whose occurrenceKey IS the expiry date). A domain
+// with no items is omitted entirely; a digest with only compliance items
+// renders exactly as it did in C2 (the DOCUMENTS_DOMAIN regression pin).
 //
 // The `to` recipient is NOT part of the rendered digest — the scan addresses one
 // send per recipient (ADR-0038 c4), so the renderer produces the shared content
@@ -58,6 +61,20 @@ const COMPLIANCE_DOMAIN: DomainConfig = {
   ],
 };
 
+// Documents (ADR-0049 c5): the same expired/expiring-soon states as compliance
+// (both classify via `complianceBadgeState`), so the same headers + verbs. This
+// domain carries the fleet documents that have NO structured twin — agreements,
+// driver licenses/IDs, vehicle AGREEMENT/OTHER papers (the vehicle-compliance
+// categories are excluded at the source, so they never reach here).
+const DOCUMENTS_DOMAIN: DomainConfig = {
+  subjectType: SUBJECT_TYPE_DOCUMENT,
+  header: "Documents",
+  sections: [
+    { state: "expired", header: "Expired", verb: "expired" },
+    { state: "expiring-soon", header: "Expiring soon", verb: "expires" },
+  ],
+};
+
 // Maintenance (ADR-0037 / C3): overdue before due-soon, the service words.
 const MAINTENANCE_DOMAIN: DomainConfig = {
   subjectType: SUBJECT_TYPE_SERVICE_SCHEDULE,
@@ -68,8 +85,10 @@ const MAINTENANCE_DOMAIN: DomainConfig = {
   ],
 };
 
-// Compliance first (legal lapses outrank maintenance), then maintenance.
-const DOMAINS: readonly DomainConfig[] = [COMPLIANCE_DOMAIN, MAINTENANCE_DOMAIN];
+// Compliance first (legal lapses outrank the rest), then documents, then
+// maintenance. A digest with no document items renders exactly as it did
+// before this domain existed (the domain is skipped when empty).
+const DOMAINS: readonly DomainConfig[] = [COMPLIANCE_DOMAIN, DOCUMENTS_DOMAIN, MAINTENANCE_DOMAIN];
 
 // Minimal HTML escaping for the dynamic values (registration numbers and
 // schedule names are operator-entered). Defense-in-depth — these values are

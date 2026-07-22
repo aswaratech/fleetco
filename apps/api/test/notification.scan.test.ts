@@ -18,6 +18,7 @@ import {
 import { PrismaService } from "../src/modules/prisma/prisma.service";
 import { QueueModule } from "../src/modules/queue/queue.module";
 import { resetDb } from "./db";
+import { seedCustomer } from "./fixtures/agent";
 import { seedUser, seedVehicle } from "./fixtures/trip";
 
 // Integration tests for the scan → send → dedup behaviors (ADR-0038 C2 c4–c7),
@@ -280,5 +281,113 @@ describe("notification scan → send → dedup (live Redis + DB, ADR-0038 C2)", 
       .map((row) => row.subjectType)
       .sort();
     expect(types).toEqual(["SERVICE_SCHEDULE", "VEHICLE"]);
+  });
+
+  // ── F6 (ADR-0049 c5): the document source folds into the SAME scan ────────
+  // Insert a fleet_document row directly (the scan only reads it; the exactly-
+  // one-FK invariant is service-enforced, and one FK is set here). Storage
+  // metadata is filler — the scan never touches the bytes.
+  async function seedDocument(params: {
+    category: string;
+    title: string;
+    expiresAt: Date | null;
+    vehicleId?: string;
+    driverId?: string;
+    customerId?: string;
+  }): Promise<void> {
+    await prisma.fleetDocument.create({
+      data: {
+        vehicleId: params.vehicleId ?? null,
+        driverId: params.driverId ?? null,
+        customerId: params.customerId ?? null,
+        category: params.category as never,
+        title: params.title,
+        expiresAt: params.expiresAt,
+        r2Key: `documents/test/${params.title.replace(/\s+/g, "-")}-${Math.random()
+          .toString(36)
+          .slice(2)}`,
+        contentType: "application/pdf",
+        sizeBytes: 1024,
+        sha256: "0".repeat(64),
+        createdById: adminId,
+      },
+    });
+  }
+
+  test("emails a dated customer-agreement document once, logged as DOCUMENT, deduped on re-scan", async () => {
+    const customer = await seedCustomer(prisma, adminId);
+    await seedDocument({
+      category: "AGREEMENT",
+      title: "Haul contract 2083",
+      expiresAt: new Date(EXPIRED_ISO),
+      customerId: customer.id,
+    });
+
+    const first = await service.scan(NOW);
+    expect(first.itemsConsidered).toBe(1);
+    expect(first.remindersNewlyDue).toBe(1);
+    await deliverEnqueuedSends();
+    expect(mailer.sent).toHaveLength(1);
+    expect(mailer.sent[0].text).toContain("Documents");
+    expect(mailer.sent[0].text).toContain("Haul contract 2083");
+
+    const log = await prisma.notificationLog.findFirstOrThrow();
+    expect(log.subjectType).toBe("DOCUMENT");
+    expect(log.reminderKind).toBe("AGREEMENT");
+    expect(log.state).toBe("expired");
+    expect(log.occurrenceKey).toBe(EXPIRED_ISO);
+
+    // Re-scan the same day: still expired, already logged → no second email.
+    const second = await service.scan(NOW);
+    expect(second.remindersNewlyDue).toBe(0);
+    await deliverEnqueuedSends();
+    expect(mailer.sent).toHaveLength(1);
+  });
+
+  test("EXCLUSION: a vehicle-attached bluebook document does NOT double-email against the structured field", async () => {
+    // A vehicle whose STRUCTURED bluebook expiry is expired — the compliance
+    // source reminds on this (subjectType VEHICLE).
+    const vehicle = await seedVehicle(prisma, adminId, {
+      registrationNumber: "BA 2 KHA 1234",
+      bluebookExpiresAt: new Date(EXPIRED_ISO),
+    });
+    // ...AND a bluebook SCAN uploaded beside it, with an expiry of its own. The
+    // document source must SKIP it (the Vehicle field is canonical) — otherwise
+    // one lapse would email twice.
+    await seedDocument({
+      category: "BLUEBOOK",
+      title: "Bluebook scan 2083",
+      expiresAt: new Date(EXPIRED_ISO),
+      vehicleId: vehicle.id,
+    });
+
+    const result = await service.scan(NOW);
+    // Exactly ONE item — the structured compliance lapse, not the document.
+    expect(result.itemsConsidered).toBe(1);
+    expect(result.remindersNewlyDue).toBe(1);
+    await deliverEnqueuedSends();
+    expect(mailer.sent).toHaveLength(1);
+
+    const logs = await prisma.notificationLog.findMany({ select: { subjectType: true } });
+    expect(logs).toHaveLength(1);
+    expect(logs[0].subjectType).toBe("VEHICLE"); // the compliance source, not DOCUMENT
+  });
+
+  test("still reminds on a vehicle-attached AGREEMENT document (no structured twin)", async () => {
+    const vehicle = await seedVehicle(prisma, adminId, { registrationNumber: "BA 3 KHA 9999" });
+    await seedDocument({
+      category: "AGREEMENT",
+      title: "Lease agreement 2083",
+      expiresAt: new Date(EXPIRED_ISO),
+      vehicleId: vehicle.id,
+    });
+
+    const result = await service.scan(NOW);
+    expect(result.itemsConsidered).toBe(1);
+    await deliverEnqueuedSends();
+
+    const log = await prisma.notificationLog.findFirstOrThrow();
+    expect(log.subjectType).toBe("DOCUMENT");
+    expect(log.reminderKind).toBe("AGREEMENT");
   });
 });

@@ -1,3 +1,4 @@
+import { formatNepaliDate } from "@fleetco/shared";
 import { describe, expect, test } from "vitest";
 
 import { type ReminderItem } from "../src/modules/notifications/compliance-source";
@@ -198,5 +199,94 @@ describe("renderReminderDigest — both domains batched (ADR-0038 C3)", () => {
     const { text } = renderReminderDigest([maintenanceItem({ state: "overdue" })]);
     expect(text).toContain("Maintenance");
     expect(text).not.toContain("Compliance");
+  });
+});
+
+// A document reminder item (subjectType DOCUMENT, ADR-0049 F6). Same
+// expired/expiring-soon states as compliance (both classify via
+// complianceBadgeState), so it renders with the compliance verbs; its
+// occurrenceKey IS the expiry ISO (no dueLabel — the digest BS-formats it).
+function documentItem(overrides: Partial<ReminderItem> = {}): ReminderItem {
+  return {
+    subjectType: "DOCUMENT",
+    subjectId: "doc1",
+    subjectLabel: "Haul contract 2083 — Himalayan Builders Pvt. Ltd.",
+    reminderKind: "AGREEMENT",
+    kindLabel: "Agreement",
+    state: "expired",
+    occurrenceKey: "2026-05-20T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+describe("renderReminderDigest — documents domain (ADR-0049 F6)", () => {
+  test("renders a document item under its own Documents block, with the BS expiry", () => {
+    const { text } = renderReminderDigest([documentItem()]);
+    expect(text).toContain("Documents");
+    expect(text).toContain("Haul contract 2083 — Himalayan Builders Pvt. Ltd. — Agreement");
+    // The occurrenceKey IS the expiry, BS-formatted like a compliance item.
+    expect(text).toContain("expired 2083 Jestha 6 (2026-05-20)");
+  });
+
+  test("uses the 'expires' verb for an expiring-soon document", () => {
+    const { text } = renderReminderDigest([
+      documentItem({ state: "expiring-soon", occurrenceKey: "2026-06-10T00:00:00.000Z" }),
+    ]);
+    expect(text).toContain("expires 2083");
+  });
+
+  test("orders the three domains Compliance → Documents → Maintenance", () => {
+    const { subject, text } = renderReminderDigest([
+      maintenanceItem({ state: "overdue", dueLabel: "2,500 km" }),
+      documentItem({ state: "expired" }),
+      item({ state: "expired" }),
+    ]);
+    expect(subject).toBe("FleetCo — 3 items need attention");
+    expect(text.indexOf("Compliance")).toBeLessThan(text.indexOf("Documents"));
+    expect(text.indexOf("Documents")).toBeLessThan(text.indexOf("Maintenance"));
+  });
+
+  test("REGRESSION: a compliance-only digest is byte-identical to before the Documents domain", () => {
+    // The domain is skipped when empty, so a digest with no document items must
+    // render exactly as it did in C3 — the load-bearing no-regression pin.
+    const complianceOnly = [
+      item({ subjectId: "v1", state: "expired", occurrenceKey: "2026-05-20T00:00:00.000Z" }),
+      item({
+        subjectId: "v2",
+        reminderKind: "INSURANCE",
+        kindLabel: "Insurance",
+        state: "expiring-soon",
+        occurrenceKey: "2026-06-10T00:00:00.000Z",
+      }),
+    ];
+    const { text, html } = renderReminderDigest(complianceOnly);
+    expect(text).not.toContain("Documents");
+    expect(html).not.toContain("Documents");
+    // The exact C3 text shape (summary + one Compliance block, two sections).
+    // The BS dates are computed via the SAME shared formatter the digest uses,
+    // so this pins the STRUCTURE without hardcoding a BS spelling that could
+    // drift from the library.
+    const expired = formatNepaliDate("2026-05-20T00:00:00.000Z");
+    const soon = formatNepaliDate("2026-06-10T00:00:00.000Z");
+    expect(text).toBe(
+      [
+        "2 items need attention.",
+        "",
+        "Compliance",
+        "Expired",
+        `- BA 2 KHA 1234 — Bluebook (expired ${expired})`,
+        "",
+        "Expiring soon",
+        `- BA 2 KHA 1234 — Insurance (expires ${soon})`,
+        "",
+      ].join("\n"),
+    );
+  });
+
+  test("a documents-only digest renders no Compliance or Maintenance block", () => {
+    const { text } = renderReminderDigest([documentItem({ state: "expired" })]);
+    expect(text).toContain("Documents");
+    expect(text).not.toContain("Compliance");
+    expect(text).not.toContain("Maintenance");
   });
 });

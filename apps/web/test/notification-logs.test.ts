@@ -18,9 +18,11 @@ import {
 // gracefully.
 
 describe("subjectTypeLabel", () => {
-  test("maps the two known domains to operator labels", () => {
+  test("maps the three known domains to operator labels", () => {
     expect(subjectTypeLabel("VEHICLE")).toBe("Vehicle compliance");
     expect(subjectTypeLabel("SERVICE_SCHEDULE")).toBe("Service schedule");
+    // ADR-0049 F6: the fleet-document reminder domain.
+    expect(subjectTypeLabel("DOCUMENT")).toBe("Document");
   });
 
   test("falls back to the raw token for an unknown subjectType", () => {
@@ -34,6 +36,10 @@ describe("reminderKindLabel", () => {
     expect(reminderKindLabel("INSURANCE")).toBe("Insurance");
     expect(reminderKindLabel("ROUTE_PERMIT")).toBe("Route permit");
     expect(reminderKindLabel("SERVICE")).toBe("Service");
+    // ADR-0049 F6: the document-category kinds.
+    expect(reminderKindLabel("AGREEMENT")).toBe("Agreement");
+    expect(reminderKindLabel("LICENSE")).toBe("License");
+    expect(reminderKindLabel("ID_DOCUMENT")).toBe("ID document");
   });
 
   test("falls back to the raw token for an unknown kind", () => {
@@ -71,9 +77,10 @@ describe("stateBadgeVariant", () => {
 });
 
 describe("SUBJECT_TYPE_FILTER_OPTIONS", () => {
-  test("offers the two known domains, compliance first (the source real today)", () => {
+  test("offers the three known domains — compliance, documents, maintenance", () => {
     expect(SUBJECT_TYPE_FILTER_OPTIONS.map((o) => o.value)).toEqual([
       "VEHICLE",
+      "DOCUMENT",
       "SERVICE_SCHEDULE",
     ]);
   });
