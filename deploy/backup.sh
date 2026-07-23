@@ -131,7 +131,20 @@ else
   echo "backup: NOTE — traccar database not present; skipping its dump (one-time creation: docs/runbook/traccar.md)."
 fi
 
-echo "backup: pruning ${R2_REMOTE}:${R2_BUCKET}/ older than 30d ..."
-rclone delete --min-age 30d "${R2_REMOTE}:${R2_BUCKET}/"
+# Prune backups older than 30 days (ADR-0014 §6 retention). SCOPED to the
+# backup objects by name — the `--include "/fleetco-*.sql.gz.age"` filter
+# (anchored to the bucket root with the leading slash) matches ONLY the daily
+# dumps this script writes (`fleetco-<date>.sql.gz.age` and
+# `fleetco-traccar-<date>.sql.gz.age`). This is LOAD-BEARING: the same R2
+# bucket also holds the app's object store (invoice PDFs, fleet documents,
+# agent attachments — ADR-0014 §6 shared-bucket annotation), which live under
+# the `invoices/`, `documents/`, and `agent-attachments/` PREFIXES and must
+# NEVER be pruned (fleet documents have entity lifetimes — ADR-0049 c8; an
+# issued invoice PDF is a permanent legal record). Without the filter, this
+# recursive delete would silently destroy every app object older than 30 days.
+# NOTE: if a NEW backup object name is ever added that does not match
+# `fleetco-*.sql.gz.age`, extend this filter to cover it.
+echo "backup: pruning ${R2_REMOTE}:${R2_BUCKET}/ backups older than 30d ..."
+rclone delete --min-age 30d --include "/fleetco-*.sql.gz.age" "${R2_REMOTE}:${R2_BUCKET}/"
 
-echo "backup: PASS — ${object} uploaded and copies older than 30d pruned."
+echo "backup: PASS — ${object} uploaded and backup copies older than 30d pruned."
