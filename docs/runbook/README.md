@@ -32,6 +32,8 @@ The procedure for rolling back a bad deployment lives at `docs/runbook/rollback.
 
 The procedure for restoring from a database backup lives at `docs/runbook/restore-from-backup.md`. It will be filled in within two weeks of the first production deployment, because untested backups do not exist.
 
+The procedure for activating the app's R2 object store (invoice PDFs, fleet documents, agent attachments) lives at `docs/runbook/activate-app-r2.md`. It sets the four `R2_*` vars in the box's `.env` — via the `deploy/setup-app-r2.sh` helper or a hand-edit — so the API binds real Cloudflare R2 instead of the in-memory mock. Added when the fleet-documents program (ADR-0049) made in-app object storage a live operator step.
+
 The procedure for responding to common incidents lives at `docs/runbook/incidents/`, with a separate file per incident type. The folder is empty at project start; entries will be added as incidents occur and as we learn what kinds of incidents this system produces.
 
 ## Why stubs exist before content
