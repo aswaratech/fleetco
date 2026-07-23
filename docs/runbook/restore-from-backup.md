@@ -44,10 +44,22 @@ Run `deploy/backup.sh` by hand once to confirm a dump lands in R2, then schedule
    ```
    15 18 * * * /opt/fleetco/deploy/backup.sh >> /opt/fleetco/backup.log 2>&1
    ```
-4. **Prune to 30-day retention** (ADR-0013) at the end of the script:
+4. **Prune to 30-day retention** (ADR-0013) at the end of the script, **scoped
+   to the backup objects by name**:
    ```
-   rclone delete --min-age 30d "$R2_REMOTE:$R2_BUCKET/"
+   rclone delete --min-age 30d --include "/fleetco-*.sql.gz.age" "$R2_REMOTE:$R2_BUCKET/"
    ```
+   The `--include` filter is **load-bearing** because this bucket is SHARED with
+   the app's object store (ADR-0014 §6 shared-bucket annotation): the app writes
+   invoice PDFs, fleet documents, and agent attachments under the `invoices/`,
+   `documents/`, and `agent-attachments/` key **prefixes**, while the backups sit
+   at the bucket **root** as `fleetco-<date>.sql.gz.age`. The anchored
+   `/fleetco-*.sql.gz.age` pattern matches only the root-level dumps, so the
+   nightly prune can never delete an app object — fleet documents have entity
+   lifetimes (ADR-0049 c8) and an issued invoice PDF is a permanent legal record.
+   An unfiltered, bucket-wide `rclone delete` would silently destroy every app
+   object older than 30 days. (If a separate bucket is used for the app instead,
+   this coupling disappears — but then the app needs its own bucket + token.)
 5. **Verify the morning after the first run** that a new `<backup-object>` landed in `<r2-bucket>` and is non-empty; a missing or 0-byte dump is a backup failure to fix _before_ it becomes a data-loss event. An untested backup does not exist (`docs/runbook/README.md`) — the within-two-weeks restore drill below is what proves this side actually works.
 
 ## Restore procedure

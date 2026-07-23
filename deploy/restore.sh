@@ -65,9 +65,15 @@ RESTORE_DB="${RESTORE_DB:-fleetco_restore}"
 : "${R2_BUCKET:?set R2_BUCKET (the R2 bucket name)}"
 
 # --- --list mode: just enumerate the bucket and exit -------------------------
+# SCOPED to backup objects by name (`--include "/fleetco-*.sql.gz.age"`,
+# anchored to the bucket root): the same R2 bucket also holds the app's object
+# store under the `invoices/`/`documents/`/`agent-attachments/` prefixes
+# (ADR-0014 §6 shared-bucket annotation), so an unfiltered `lsf` would list
+# those prefixes among the backups. The object FETCH below is by exact name and
+# is unaffected — only this human-facing listing is filtered.
 if [ "${1:-}" = "--list" ]; then
   echo "restore: backups in ${R2_REMOTE}:${R2_BUCKET}/ —"
-  rclone lsf "${R2_REMOTE}:${R2_BUCKET}/"
+  rclone lsf --include "/fleetco-*.sql.gz.age" "${R2_REMOTE}:${R2_BUCKET}/"
   exit 0
 fi
 
